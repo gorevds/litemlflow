@@ -351,6 +351,78 @@ curl -s http://localhost:5000/api/v1/workspaces/current \
 - A workspace with experiments cannot be deleted until all experiments are removed or moved (there is no move API yet — delete the experiments first).
 - Member roles (`viewer`, `editor`, `admin`) are stored but not yet enforced by the API layer; enforcement is planned for v0.2 once OIDC lands.
 
+## 11. Plot a million-point metric series in <300 ms
+
+When a training run logs hundreds of thousands of metrics (e.g., per-token loss in an LLM pre-training job), fetching the full series is slow and the browser renders it poorly. Use the `?downsample=N` query parameter to get a visual summary instead.
+
+### REST
+
+```bash
+# Fetch 500 LTTB-representative points from a large series.
+curl "http://localhost:5000/api/2.0/mlflow/metrics/get-history?run_id=<RUN_ID>&metric_key=loss&downsample=500"
+```
+
+Response:
+```json
+{
+  "metrics": [
+    {"key": "loss", "value": 3.14, "timestamp": 1715000000000, "step": 0},
+    {"key": "loss", "value": 1.07, "timestamp": 1715003600000, "step": 10000},
+    ...
+  ],
+  "downsampled_from": 1000000
+}
+```
+
+`"downsampled_from"` tells you the total raw count; `"metrics"` contains the representative subset. The first and last points are always included.
+
+### Python
+
+```python
+import requests
+
+BASE = "http://localhost:5000"
+run_id = "your-run-id-here"
+
+resp = requests.get(
+    f"{BASE}/api/2.0/mlflow/metrics/get-history",
+    params={"run_id": run_id, "metric_key": "loss", "downsample": 500},
+)
+data = resp.json()
+print(f"Showing {len(data['metrics'])} of {data['downsampled_from']} points")
+
+# Plot with matplotlib.
+import matplotlib.pyplot as plt
+pts = data["metrics"]
+xs = [p["step"] for p in pts]
+ys = [p["value"] for p in pts]
+plt.plot(xs, ys)
+plt.title(f"loss (LTTB, {len(pts)} of {data['downsampled_from']} pts)")
+plt.show()
+```
+
+### UI
+
+The embedded UI automatically uses `?downsample=1000` when rendering metric charts. When the server returns fewer points than the raw total, a note appears next to the chart title:
+
+```
+loss  (showing 1000 of 1000000 points, LTTB)
+```
+
+No client-side configuration is needed.
+
+### Algorithm
+
+LiteMLflow uses **Largest-Triangle-Three-Buckets (LTTB)** by Steinarsson (2013). The series is divided into `target` equal-width buckets; within each bucket the point that forms the largest triangle area with the previously selected point and the centroid of the next bucket is kept. This greedy selection preserves visually prominent peaks and troughs far better than uniform stride sampling.
+
+### When to use which path
+
+| Use case | Query parameters |
+|---|---|
+| Visualising a large series in the browser or a notebook | `?downsample=N` |
+| Programmatic access that needs every point | `?max_results=N&page_token=...` |
+| Small series (≤ N points) | Either; LTTB returns all points unchanged |
+
 ## 8. Run as a systemd service
 
 `/etc/systemd/system/litemlflow.service`:
@@ -386,3 +458,47 @@ sudo systemctl enable --now litemlflow
 ```
 
 Put a Caddy/Nginx in front for TLS (Caddy auto-provisions Let's Encrypt; v0.2 will bring this in-process).
+
+## 11. Scrape LiteMLflow with Prometheus
+
+LiteMLflow exposes `GET /metrics` in OpenMetrics text format. The endpoint is
+public (no credentials required) even when `auth=basic` is configured.
+
+### prometheus.yml
+
+```yaml
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: litemlflow
+    static_configs:
+      - targets: ["localhost:5000"]
+    # No authentication needed — /metrics is always public.
+    # If you want to restrict access at the network layer, put LiteMLflow
+    # behind a reverse proxy and allow-list the Prometheus scraper IP.
+```
+
+Point Prometheus at your LiteMLflow instance and it will scrape every 15 s.
+
+### Quick smoke test (no Prometheus required)
+
+```bash
+# Check the endpoint is reachable and returns OpenMetrics text.
+curl -s http://localhost:5000/metrics | grep "^litemlflow_"
+
+# Verify at least the HTTP request counter is present.
+curl -s http://localhost:5000/metrics | grep litemlflow_http_requests_total
+
+# Watch the request counter grow in real time.
+watch -n 5 'curl -s http://localhost:5000/metrics | grep litemlflow_http_requests_total'
+```
+
+### Key metrics to alert on
+
+| Alert | Expression | Meaning |
+|---|---|---|
+| High error rate | `rate(litemlflow_http_requests_total{status=~"5.."}[5m]) > 0.01` | More than 1% of requests are 5xx |
+| Slow p95 latency | `histogram_quantile(0.95, rate(litemlflow_http_request_duration_seconds_bucket[5m])) > 0.5` | 95th-percentile latency above 500 ms |
+| DB growth | `litemlflow_db_size_bytes > 5e9` | Database is larger than 5 GiB |
+| Process restarted | `increase(litemlflow_build_info[5m]) > 0` | Build-info gauge resets on restart |

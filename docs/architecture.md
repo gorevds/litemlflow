@@ -111,8 +111,19 @@ interface as `FilesystemStore`, making it fully transparent to all API handlers.
 | `search_runs` (100 results, indexed) | < 20 ms | < 60 ms | < 150 ms |
 | First paint (UI list, 5k runs) | < 300 ms (cold) | < 500 ms | < 800 ms |
 | Cold start (binary up) | < 200 ms | < 500 ms | — |
+| `get-history?downsample=N` (50k pts → 500) | < 300 ms | < 500 ms | — |
 
 These are tested by the perf-regression CI; >5% regression on any line blocks merge.
+
+### Metric downsampling
+
+The UI fetches metric history with `?downsample=1000` so that large series never block page rendering. The server applies the **LTTB (Largest-Triangle-Three-Buckets)** algorithm in `internal/store/downsample.go`:
+
+1. The full history is loaded from SQLite in one query (the index on `(run_id, key, timestamp, step)` makes this a sequential scan of only the relevant rows).
+2. The in-memory LTTB pass is O(N) in the raw point count and O(target) in allocations.
+3. The compressed response is typically 10–200× smaller than the raw series, so network transfer and JSON parsing on the client are proportionally faster.
+
+The paginated path (`?max_results=N&page_token=...`) is unchanged and is used by programmatic callers (e.g., the MLflow Python client) that need the complete data.
 
 ## Security boundaries
 
@@ -129,8 +140,68 @@ These are tested by the perf-regression CI; >5% regression on any line blocks me
 - `/api/v1/...` — LiteMLflow native API (see [api-native.md](api-native.md)).
 - `/v1/traces` — OpenTelemetry/OTLP-compatible trace ingest (HTTP/JSON form; gRPC OTLP is post-1.0).
 - `/healthz`, `/readyz`, `/version` — operational endpoints.
+- `/metrics` — Prometheus/OpenMetrics scrape endpoint (see Observability section).
 - `/ui/*` — static SPA assets (served from `go:embed`).
 - `/` — redirects to `/ui/`.
+
+## Observability
+
+LiteMLflow exposes a `GET /metrics` endpoint that returns metrics in the
+[OpenMetrics text format](https://openmetrics.io/) (content-type:
+`text/plain; version=0.0.4`), which all current Prometheus versions accept.
+
+### Implementation
+
+The metrics layer lives in `internal/metrics/`. It is implemented without
+external dependencies — no `prometheus/client_golang` — using straightforward
+string-building in `registry.go`. The registry supports three metric types:
+
+| Type | Description |
+|---|---|
+| Counter | Monotonically increasing float64, keyed by an optional label set |
+| Gauge | Scalar float64 (no labels); set/add in place |
+| Histogram | Distribution of float64 values across fixed upper-bound buckets |
+
+Label sets are stored as a `map[string]float64` keyed by a null-delimited
+string (`"k1=v1\x00k2=v2"`), built from declared key names in construction
+order. This avoids sorting on every observation.
+
+`internal/metrics/standard.go` pre-defines the application metric set and is
+wired into `buildRouter` in `internal/server/server.go`.
+
+### Exposed metrics
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `litemlflow_http_requests_total` | counter | `method`, `path`, `status` | HTTP requests, by method, route template, and status code |
+| `litemlflow_http_request_duration_seconds` | histogram | `method`, `path` | Request latency (11 default buckets: 5 ms–10 s) |
+| `litemlflow_runs_created_total` | counter | — | Experiment runs created |
+| `litemlflow_metrics_logged_total` | counter | — | Metric data-points logged (single + batch) |
+| `litemlflow_active_sessions` | gauge | — | Active user sessions in the session store |
+| `litemlflow_db_size_bytes` | gauge | — | SQLite database file size (refreshed per scrape) |
+| `litemlflow_build_info` | gauge (=1) | — | Always 1; signals binary is alive |
+| `litemlflow_build_info_labels` | counter (=1) | `version`, `commit` | Build version/commit for dashboard grouping |
+| `litemlflow_process_cpu_seconds_total` | gauge | — | User+system CPU (from `/proc/self/stat`; HZ=100 assumed) |
+| `litemlflow_process_resident_memory_bytes` | gauge | — | RSS from `/proc/self/status` (Linux) or `runtime.Sys` |
+| `litemlflow_process_open_fds` | gauge | — | Open file descriptors (`/proc/self/fd` count) |
+| `litemlflow_process_goroutines` | gauge | — | `runtime.NumGoroutine()` |
+
+### Path-template normalization
+
+The `metricsMiddleware` in `internal/server/middleware.go` reads the matched
+route pattern from `chi.RouteContext(r.Context()).RoutePattern()` after the
+handler returns. This returns the registered pattern (e.g.
+`/api/v1/prompts/{name}`) rather than the concrete URL path
+(`/api/v1/prompts/my-prompt`), preventing cardinality explosion from
+per-entity IDs and run UUIDs. For unmatched routes (404s), the path is
+truncated to the first two segments.
+
+### Auth bypass
+
+`/metrics` is listed in `isPublicPath` so the auth middleware skips it
+entirely. Prometheus scrapers do not send credentials by default, and
+exposing the scrape endpoint publicly does not leak user data (only aggregate
+server statistics).
 
 ## Dependency policy
 

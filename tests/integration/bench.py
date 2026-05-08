@@ -225,6 +225,67 @@ def bench_ui_first_paint(url: str) -> dict[str, float]:
     }
 
 
+def bench_downsample(url: str, metric_count: int = 50_000, downsample_n: int = 500) -> dict[str, Any]:
+    """Populate metric_count metrics on one run, then compare raw vs. downsampled fetch.
+
+    Uses the ?downsample=N query parameter for the fast path and no parameter
+    for the baseline. Both fetches are repeated 5 times and the median is
+    reported.
+    """
+    import mlflow
+    from mlflow.entities import Metric
+    from mlflow.tracking import MlflowClient
+
+    mlflow.set_tracking_uri(url)
+    client = MlflowClient(tracking_uri=url)
+    eid = mlflow.create_experiment(f"bench-ds-{time.time_ns()}")
+    run = client.create_run(str(eid))
+    run_id = run.info.run_id
+
+    # Populate metrics in batches of 1000 (server cap).
+    now = int(time.time() * 1000)
+    batch_size = 1000
+    for start in range(0, metric_count, batch_size):
+        end = min(start + batch_size, metric_count)
+        ms = [Metric("bigmetric", float(i), now + i, i) for i in range(start, end)]
+        client.log_batch(run_id, metrics=ms)
+
+    base_url = f"{url}/api/2.0/mlflow/metrics/get-history?run_id={run_id}&metric_key=bigmetric"
+
+    # Baseline: no downsample.
+    baseline_samples = []
+    for _ in range(5):
+        t0 = time.perf_counter()
+        r = requests.get(base_url, timeout=60)
+        r.raise_for_status()
+        baseline_samples.append((time.perf_counter() - t0) * 1000)
+
+    # Downsampled path.
+    ds_samples = []
+    ds_data = None
+    for _ in range(5):
+        t0 = time.perf_counter()
+        r = requests.get(f"{base_url}&downsample={downsample_n}", timeout=10)
+        r.raise_for_status()
+        ds_data = r.json()
+        ds_samples.append((time.perf_counter() - t0) * 1000)
+
+    returned_points = len(ds_data.get("metrics", [])) if ds_data else 0
+    downsampled_from = ds_data.get("downsampled_from") if ds_data else None
+
+    return {
+        "metric_count": metric_count,
+        "downsample_n": downsample_n,
+        "baseline_p50_ms": statistics.median(baseline_samples),
+        "baseline_max_ms": max(baseline_samples),
+        "downsampled_p50_ms": statistics.median(ds_samples),
+        "downsampled_max_ms": max(ds_samples),
+        "returned_points": returned_points,
+        "downsampled_from": downsampled_from,
+        "speedup": statistics.median(baseline_samples) / statistics.median(ds_samples),
+    }
+
+
 def run_suite(label: str, ctx, runs: int) -> dict[str, Any]:
     print(f"\n=== {label} ===")
     with ctx as (url, cold_start):
@@ -241,6 +302,9 @@ def run_suite(label: str, ctx, runs: int) -> dict[str, Any]:
         search = bench_search_runs(url, target_runs=runs)
         print(f"  search 100 runs:   p50 {search['search_p50_ms']:.1f} ms / p95 {search['search_p95_ms']:.1f} ms")
         print(f"  populated {search['populate_runs']} runs in {search['populate_seconds']:.1f} s")
+        ds = bench_downsample(url)
+        print(f"  downsample baseline p50: {ds['baseline_p50_ms']:.1f} ms  ({ds['metric_count']} pts)")
+        print(f"  downsample LTTB p50:     {ds['downsampled_p50_ms']:.1f} ms  ({ds['returned_points']} pts, {ds['speedup']:.1f}x faster)")
         return {
             "label": label,
             "cold_start_ms": cold_start * 1000,
@@ -248,6 +312,7 @@ def run_suite(label: str, ctx, runs: int) -> dict[str, Any]:
             "log_batch": batch,
             "ui_first_paint": ui,
             "search_runs": search,
+            "downsample": ds,
         }
 
 

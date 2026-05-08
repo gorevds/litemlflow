@@ -35,7 +35,7 @@ The wire format is JSON over HTTP, request and response shapes match MLflow exac
 | `/api/2.0/mlflow/runs/set-tag` | POST | upsert tag |
 | `/api/2.0/mlflow/runs/delete-tag` | POST | remove tag |
 | `/api/2.0/mlflow/runs/log-inputs` | POST | dataset linkage (migration 006) |
-| `/api/2.0/mlflow/metrics/get-history` | GET | timeseries by `run_id` + `metric_key`; supports `?max_results=N&page_token=...` |
+| `/api/2.0/mlflow/metrics/get-history` | GET | timeseries by `run_id` + `metric_key`; supports `?max_results=N&page_token=...` (paginated) and `?downsample=N` (LTTB server-side downsampling) |
 
 ### Artifacts
 
@@ -90,6 +90,44 @@ The wire format is JSON over HTTP, request and response shapes match MLflow exac
 - **Aliases**: upsert semantics (POST), delete by `name`+`alias` query params (DELETE), resolve by `name`+`alias` (GET).
 - **Tags**: all tag operations are upsert. Tags cascade-delete with their parent model/version.
 - **Migration**: schema lives in `internal/migrations/003_registry.sql`.
+
+## Metric history downsampling (`?downsample=N`)
+
+The standard `?max_results=N&page_token=...` query parameters are for callers that need the full series paginated (e.g., the MLflow Python client). For visualization, use `?downsample=N` instead.
+
+### How it works
+
+When `?downsample=N` is present, the server:
+
+1. Fetches the complete metric history for the requested `(run_id, metric_key)` pair.
+2. Reduces it to at most `N` representative points using **LTTB (Largest-Triangle-Three-Buckets)**, the gold-standard algorithm for visual downsampling that preserves peaks and troughs.
+3. Always keeps the first and last points.
+4. When the raw series has ≤ N points, returns all of them unchanged.
+
+### Response shape
+
+```json
+{
+  "metrics": [
+    {"key": "loss", "value": 1.23, "timestamp": 1715000000000, "step": 0},
+    ...
+  ],
+  "downsampled_from": 50000
+}
+```
+
+`"downsampled_from"` is always present in the downsampled response and contains the total raw point count. The standard `"next_page_token"` field is omitted (downsampling returns a single, complete payload, not pages).
+
+### Example
+
+```bash
+# Fetch 500 LTTB-representative points from a 1M-point series.
+curl "http://localhost:5000/api/2.0/mlflow/metrics/get-history?run_id=abc123&metric_key=loss&downsample=500"
+```
+
+### Compatibility note
+
+The `?downsample` parameter is a LiteMLflow extension. The MLflow Python client does not send it; its `get_metric_history()` method uses the paginated path. The two paths are independent and do not interfere.
 
 ## Deferred to v0.3
 
