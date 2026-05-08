@@ -2,7 +2,48 @@
 
 All notable changes to LiteMLflow are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/) starting at v1.0.
 
-## [Unreleased] — v0.2 RC1
+## [v0.3.0-rc1] — 2026-05-08
+
+The Q3 "Scale & ergonomics" release. See [docs/roadmap-y1.md](docs/roadmap-y1.md).
+
+### Added
+
+- **LangChain auto-instrumentation.** `pip install 'litemlflow[langchain]'` and pass `LiteMLflowCallbackHandler` to any chain — every chain, LLM, chat-model, tool, retriever call is recorded as a span. Token usage and USD cost computed from a built-in pricing table for OpenAI / Anthropic / Google models.
+- **`litemlflow import-mlflow` CLI.** Reads from a running MLflow tracking server via REST and copies experiments, runs, metrics (full history), params, tags, artifacts into a LiteMLflow data dir. Resumable via per-run idempotency check + `.import-state.json` checkpoint; per-run errors are logged and skipped rather than aborting the whole import.
+- **Workspace RBAC enforcement.** `viewer` / `editor` / `admin` roles are now enforced on every request, gated by a path-prefix → required-role table (`internal/server/rbac.go`). Open-mode rule: the `default` workspace with zero configured members allows full access — fresh installs need no setup.
+- **OIDC nonce.** PKCE flow now generates a random nonce, includes it in the auth URL, and validates `claims["nonce"]` on token exchange via constant-time comparison. Backward-compatible with in-flight v0.2 sessions (state cookies missing the nonce field skip the check with a logged warning).
+- **Server-side metric downsampling (LTTB).** `?downsample=N` on `get-history` returns at most N points selected by Largest-Triangle-Three-Buckets, preserving visual peaks. Response includes `downsampled_from`. UI auto-uses it for charts.
+- **Prometheus `/metrics` endpoint.** OpenMetrics-format exposition without `client_golang` dep. 12 metric families including request counters, latency histograms, runs/metrics created counters, active sessions gauge, DB size gauge, and standard process metrics. Public path — Prometheus scrapes without credentials.
+
+### Fixed (independent review pass)
+
+- OIDC nonce comparison now uses `subtle.ConstantTimeCompare` (was plain `!=`).
+- `litemlflow import-mlflow` checkpoint race resolved by adding per-run DB lookup before insert (idempotent re-runs and concurrent imports both safe).
+- Python SDK editable install: added `[tool.hatch.build.dev-mode-dirs]` so `pip install -e python/.` generates the required `.pth` file. Without this the SDK was importable only from `python/` directory.
+- `.gitignore`: narrowed `litemlflow` (binary) pattern from global to `/litemlflow` so `python/litemlflow/...` is not silently ignored.
+
+### Stats
+
+- Go LOC (non-test): 11,129 (+1,073 vs v0.2)
+- Go LOC (test): 5,595 (+1,217 vs v0.2)
+- Python LOC: 1,680 (+1,064 vs v0.2 — LangChain handler + tests)
+- Markdown docs: 2,129 (+267 vs v0.2)
+- 22 files changed, +4,039 insertions, 9 commits since v0.2.0-rc1
+- 31/31 MLflow compat checks pass against live `https://lmf.gorev.space`
+- 23/23 Python SDK + LangChain tests pass
+- 18 Go test files all green with `-race`
+
+### Deferred to v0.4 (Q4)
+
+- Helm chart, k8s operator, Terraform provider
+- Multipart S3 upload (currently single PUT only)
+- Astro/Starlight docs site
+- Full benchmark vs MLflow (harness exists; not run in this session)
+- LlamaIndex / OpenAI direct-client auto-instrumentation
+- Prompt diff UI (side-by-side)
+- gRPC OTLP receiver
+
+## [v0.2.0-rc1] — 2026-05-08
 
 The Q2 "Production hardening" release. See [docs/roadmap-y1.md](docs/roadmap-y1.md).
 
