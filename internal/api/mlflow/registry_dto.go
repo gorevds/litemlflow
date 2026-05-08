@@ -63,11 +63,9 @@ type mvDTO struct {
 	RunLink        string     `json:"run_link,omitempty"`
 }
 
-// mvTagDTO is the wire shape for model/version tags.
-type mvTagDTO struct {
-	Key   string `json:"key"`
-	Value string `json:"value"`
-}
+// mvTagDTO is the wire shape for model/version tags. Aliased to kvTagDTO
+// (defined in dto.go) — wire shape unchanged in T3.12.
+type mvTagDTO = kvTagDTO
 
 func modelVersionToDTO(mv *model.ModelVersion) mvDTO {
 	tags := make([]mvTagDTO, 0, len(mv.Tags))

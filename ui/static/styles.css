@@ -1154,3 +1154,41 @@ button.btn-ghost:hover { background: var(--bg-alt); }
   padding: 0 4px;
   user-select: none;
 }
+
+/* ── Utility classes (T3.15) ─────────────────────────────────────────────────
+   Extracted from the most-repeated inline style="..." idioms in app.js
+   (16× width:100%, 13× color:var(--fg-muted), 11× margin-top:0, …). Visual
+   shape is preserved exactly; the difference is locality and grep-ability. */
+
+.u-w-full { width: 100%; }
+.u-mt-0   { margin-top: 0; }
+.u-m-0    { margin: 0; }
+.u-mb-12  { margin-bottom: 12px; }
+.u-hidden { display: none; }
+.u-pad-0  { padding: 0; }
+
+.u-muted {
+  color: var(--fg-muted);
+}
+.u-muted-sm {
+  color: var(--fg-muted);
+  font-size: 13px;
+}
+.u-muted-xs {
+  color: var(--fg-muted);
+  font-size: 11px;
+}
+
+/* Modal-footer button row: gap-spaced, right-aligned, top-margin. */
+.u-row-end {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
+/* Toolbar h1/h2 that should grow to fill remaining space. */
+.u-toolbar-title {
+  margin: 0;
+  flex: 1;
+}

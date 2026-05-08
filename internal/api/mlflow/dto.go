@@ -22,10 +22,17 @@ type experimentDTO struct {
 	Tags             []experimentTagDTO `json:"tags,omitempty"`
 }
 
-type experimentTagDTO struct {
+// kvTagDTO is the unified wire shape for any (key, value) tag pair on the
+// MLflow surface — experiment, run, registered-model, model-version,
+// dataset-input. Three identical struct definitions previously lived
+// here and in registry_dto.go; merged in T3.12 (deep-review proposal).
+// Aliases keep the historical names for readability.
+type kvTagDTO struct {
 	Key   string `json:"key"`
 	Value string `json:"value"`
 }
+
+type experimentTagDTO = kvTagDTO
 
 // runInfoDTO mirrors RunInfo. RunInfo + RunData = Run in the protocol.
 type runInfoDTO struct {
@@ -85,10 +92,7 @@ type paramDTO struct {
 	Value string `json:"value"`
 }
 
-type tagDTO struct {
-	Key   string `json:"key"`
-	Value string `json:"value"`
-}
+type tagDTO = kvTagDTO
 
 // Conversion helpers ----------------------------------------------------------
 

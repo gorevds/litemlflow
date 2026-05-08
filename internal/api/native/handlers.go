@@ -411,7 +411,7 @@ func (h *Handler) IngestTraces(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(req.Spans) == 0 {
-		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "spans is required")
+		writeMissingField(w, "spans")
 		return
 	}
 	if req.TraceID == "" {
@@ -715,7 +715,7 @@ func (h *Handler) CreatePrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Name == "" || req.Content == "" {
-		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "name and content are required")
+		writeMissingField(w, "name+content")
 		return
 	}
 	p := &model.Prompt{
@@ -817,7 +817,7 @@ func (h *Handler) CreateEval(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.RunID == "" {
-		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "run_id is required")
+		writeMissingField(w, "run_id")
 		return
 	}
 	mJSON, _ := jsonOrEmpty(req.Metrics)
@@ -1131,8 +1131,34 @@ func decodeJSON(r *http.Request, dst any) error {
 	return nil
 }
 
+// Error code catalogue for native v1 (T3.14). Native endpoints can use
+// finer-grained codes than the MLflow compat surface (which is locked
+// to the strict MLflow vocabulary by tests/integration/mlflow_compat.py).
+//
+// Existing code paths that use INVALID_PARAMETER_VALUE keep working —
+// these are additional codes for new validation paths and progressive
+// migration of the most overloaded site (writeBadRequest → still 400
+// INVALID_PARAMETER_VALUE because callers depend on that).
+const (
+	codeMissingField     = "MISSING_REQUIRED_FIELD" // for blank/absent required input
+	codeInvalidParameter = "INVALID_PARAMETER_VALUE"
+	codeMethodNotAllowed = "METHOD_NOT_ALLOWED"
+	codeWorkspaceNotFound = "WORKSPACE_NOT_FOUND"
+	codePayloadTooLarge  = "PAYLOAD_TOO_LARGE"
+	codeUnauthenticated  = "UNAUTHENTICATED"
+	codeForbidden        = "FORBIDDEN"
+)
+
+// writeMissingField is a tiny helper for "X is required" validation, used
+// where the existing INVALID_PARAMETER_VALUE catch-all would be too coarse.
+// Returns 400 with the new MISSING_REQUIRED_FIELD code.
+func writeMissingField(w http.ResponseWriter, fieldName string) {
+	writeError(w, http.StatusBadRequest, codeMissingField,
+		"required field is missing or empty: "+fieldName)
+}
+
 func writeBadRequest(w http.ResponseWriter, err error) {
-	writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", err.Error())
+	writeError(w, http.StatusBadRequest, codeInvalidParameter, err.Error())
 }
 
 func writeStoreErr(w http.ResponseWriter, err error) {
