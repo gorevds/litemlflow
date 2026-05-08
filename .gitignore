@@ -67,3 +67,4 @@ ui/node_modules/
 
 # Coverage reports
 *.lcov
+.claude/
