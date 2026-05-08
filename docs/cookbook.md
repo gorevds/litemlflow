@@ -167,6 +167,96 @@ litemlflow restore --data /var/lib/litemlflow/data --in /tmp/backup.tar.gz
 litemlflow up --data /var/lib/litemlflow/data
 ```
 
+## 9. Switch artifact storage to S3-compatible
+
+LiteMLflow defaults to writing artifacts to `$DATA/artifacts/` on local disk.
+To store artifacts in any S3-compatible object store (AWS S3, MinIO, Ceph, Garage, …)
+set `--artifact-backend s3` and supply the five required connection parameters.
+
+### Quick start with MinIO (Docker)
+
+```bash
+# Start a local MinIO instance.
+docker run -d --name minio \
+  -p 9000:9000 -p 9001:9001 \
+  -e MINIO_ROOT_USER=minioadmin \
+  -e MINIO_ROOT_PASSWORD=minioadmin \
+  quay.io/minio/minio server /data --console-address :9001
+
+# Create the bucket (one-time).
+docker exec minio mc alias set local http://localhost:9000 minioadmin minioadmin
+docker exec minio mc mb local/litemlflow
+
+# Start LiteMLflow with S3 backend.
+litemlflow up \
+  --data ./data \
+  --artifact-backend s3 \
+  --s3-endpoint http://localhost:9000 \
+  --s3-bucket litemlflow \
+  --s3-region us-east-1 \
+  --s3-access-key minioadmin \
+  --s3-secret-key minioadmin
+```
+
+### AWS S3
+
+```bash
+litemlflow up \
+  --data ./data \
+  --artifact-backend s3 \
+  --s3-endpoint https://s3.amazonaws.com \
+  --s3-bucket my-ml-artifacts \
+  --s3-region eu-west-1 \
+  --s3-access-key "$AWS_ACCESS_KEY_ID" \
+  --s3-secret-key "$AWS_SECRET_ACCESS_KEY"
+```
+
+Credentials are better supplied via environment variables so they do not appear
+in process listings:
+
+```bash
+export LITEMLFLOW_ARTIFACT_BACKEND=s3
+export LITEMLFLOW_S3_ENDPOINT=https://s3.amazonaws.com
+export LITEMLFLOW_S3_BUCKET=my-ml-artifacts
+export LITEMLFLOW_S3_REGION=eu-west-1
+export LITEMLFLOW_S3_ACCESS_KEY="$AWS_ACCESS_KEY_ID"
+export LITEMLFLOW_S3_SECRET_KEY="$AWS_SECRET_ACCESS_KEY"
+
+litemlflow up --data ./data
+```
+
+### Key layout
+
+Artifacts are stored under:
+
+```
+<prefix>artifacts/<run-id>/<relative-path>
+```
+
+`--s3-prefix` (default `""`) lets you share a bucket between multiple
+LiteMLflow deployments, e.g. `--s3-prefix staging/`.
+
+### Addressing style
+
+- **Path-style** is used for any endpoint that is not `amazonaws.com`:
+  `http://minio:9000/<bucket>/<key>` — this is what MinIO requires by default.
+- **Virtual-hosted style** is used for `amazonaws.com`:
+  `https://<bucket>.s3.<region>.amazonaws.com/<key>`.
+
+### Signing
+
+Every request is signed with AWS Signature Version 4 using only Go standard
+library primitives (`crypto/hmac`, `crypto/sha256`, `encoding/hex`).
+No AWS SDK or MinIO client library is required.
+
+### Limitations (v0.2 roadmap)
+
+- Uploads are single-part PUT requests; multipart upload for very large files
+  (> 5 GiB) is planned for v0.3.
+- No presigned URL generation yet (all data is proxied through LiteMLflow).
+- IAM instance-profile / IRSA automatic credential discovery is not implemented;
+  explicit `access-key` / `secret-key` are required.
+
 ## 8. Run as a systemd service
 
 `/etc/systemd/system/litemlflow.service`:

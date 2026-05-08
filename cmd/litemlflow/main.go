@@ -71,6 +71,9 @@ func usage(w io.Writer) {
 
 Usage:
   litemlflow up       [--data DIR] [--addr HOST:PORT] [--auth MODE] [--basic-user USER --basic-pass-hash HASH] [--dev]
+                      [--artifact-backend fs|s3]
+                      [--s3-endpoint URL] [--s3-bucket BUCKET] [--s3-region REGION]
+                      [--s3-access-key KEY] [--s3-secret-key SECRET] [--s3-prefix PREFIX]
   litemlflow migrate  [--data DIR]
   litemlflow rollback [--data DIR]
   litemlflow backup   [--data DIR] [--out FILE]
@@ -85,6 +88,13 @@ Environment variables override defaults; flags override env vars.
   LITEMLFLOW_BASIC_USER        basic auth username
   LITEMLFLOW_BASIC_PASS_HASH   basic auth password (hex SHA-256)
   LITEMLFLOW_DEV=1             dev-mode logs and verbose errors
+  LITEMLFLOW_ARTIFACT_BACKEND  artifact backend: fs (default) or s3
+  LITEMLFLOW_S3_ENDPOINT       S3-compatible endpoint URL
+  LITEMLFLOW_S3_BUCKET         S3 bucket name
+  LITEMLFLOW_S3_REGION         S3 region (e.g. us-east-1)
+  LITEMLFLOW_S3_ACCESS_KEY     S3 access key ID
+  LITEMLFLOW_S3_SECRET_KEY     S3 secret access key
+  LITEMLFLOW_S3_PREFIX         optional S3 key prefix (e.g. litemlflow/)
 `)
 }
 
@@ -96,16 +106,31 @@ func runUp(args []string) error {
 	basicUser := fs.String("basic-user", "", "basic auth username")
 	basicPassHash := fs.String("basic-pass-hash", "", "basic auth password (hex SHA-256)")
 	dev := fs.Bool("dev", false, "enable dev mode")
+	// Artifact backend flags.
+	artifactBackend := fs.String("artifact-backend", "", "artifact storage backend: fs (default) or s3")
+	s3Endpoint := fs.String("s3-endpoint", "", "S3 endpoint URL, e.g. https://s3.amazonaws.com")
+	s3Bucket := fs.String("s3-bucket", "", "S3 bucket name")
+	s3Region := fs.String("s3-region", "", "S3 region, e.g. us-east-1")
+	s3AccessKey := fs.String("s3-access-key", "", "S3 access key ID")
+	s3SecretKey := fs.String("s3-secret-key", "", "S3 secret access key")
+	s3Prefix := fs.String("s3-prefix", "", "optional S3 key prefix, e.g. litemlflow/")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	cfg, err := config.FromEnv(config.Config{
-		DataDir:       *dataDir,
-		Addr:          *addr,
-		Auth:          *auth,
-		BasicUser:     *basicUser,
-		BasicPassHash: *basicPassHash,
-		DevMode:       *dev,
+		DataDir:         *dataDir,
+		Addr:            *addr,
+		Auth:            *auth,
+		BasicUser:       *basicUser,
+		BasicPassHash:   *basicPassHash,
+		DevMode:         *dev,
+		ArtifactBackend: *artifactBackend,
+		S3Endpoint:      *s3Endpoint,
+		S3Bucket:        *s3Bucket,
+		S3Region:        *s3Region,
+		S3AccessKey:     *s3AccessKey,
+		S3SecretKey:     *s3SecretKey,
+		S3Prefix:        *s3Prefix,
 	})
 	if err != nil {
 		return err
