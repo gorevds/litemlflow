@@ -27,6 +27,22 @@ type Server struct {
 	st   store.Store
 }
 
+// defaultGRPCOptions returns the hardened default gRPC server options for the
+// OTLP receiver. Without these, an unauthenticated client can ship arbitrarily
+// large payloads (gRPC's default max message size is 4 MiB on the recv side,
+// but we tighten it to 64 MiB and add explicit connection caps).
+//
+// Operators exposing the gRPC port to untrusted networks should still place a
+// rate-limiting reverse proxy in front; these caps are defense-in-depth for
+// trusted-network deployments.
+func defaultGRPCOptions() []grpc.ServerOption {
+	return []grpc.ServerOption{
+		grpc.MaxRecvMsgSize(64 * 1024 * 1024),  // 64 MiB
+		grpc.MaxSendMsgSize(64 * 1024 * 1024),
+		grpc.MaxConcurrentStreams(1024),
+	}
+}
+
 // New creates a Server that will listen on addr when Serve is called.
 //
 // No TLS is set up on the gRPC listener itself; operators who need TLS should
@@ -36,7 +52,7 @@ func New(addr string, st store.Store) (*Server, error) {
 	if addr == "" {
 		return nil, fmt.Errorf("grpcotlp: addr is required")
 	}
-	g := grpc.NewServer()
+	g := grpc.NewServer(defaultGRPCOptions()...)
 	coltracepb.RegisterTraceServiceServer(g, &traceServiceServer{store: st})
 	return &Server{addr: addr, grpc: g, st: st}, nil
 }
@@ -48,7 +64,7 @@ func NewWithListener(lis net.Listener, st store.Store) (*Server, error) {
 	if lis == nil {
 		return nil, fmt.Errorf("grpcotlp: listener is required")
 	}
-	g := grpc.NewServer()
+	g := grpc.NewServer(defaultGRPCOptions()...)
 	coltracepb.RegisterTraceServiceServer(g, &traceServiceServer{store: st})
 	return &Server{grpc: g, lis: lis, st: st}, nil
 }
