@@ -238,10 +238,23 @@ func runRollback(args []string) error {
 // The server should be stopped or quiescent during a backup; SQLite WAL is
 // included verbatim, so even if writes are happening, the backup is at
 // least crash-consistent (matches a power-loss scenario).
+//
+// **S3 artifact backend:** runBackup only tars cfg.DataDir, which on an
+// S3-configured server contains the SQLite DB but NOT the artifacts (those
+// live in the bucket). Restoring such a tar into a fresh deploy will yield
+// a UI full of broken artifact links. To prevent silent data loss, runBackup
+// refuses to proceed when ArtifactBackend=="s3" unless the operator passes
+// --include-only-db (acknowledging the gap and snapshotting the bucket
+// separately) or --include-s3 (which streams every object in
+// <prefix>/<...> into the tar — only feasible for small buckets).
 func runBackup(args []string) error {
 	fs := flag.NewFlagSet("backup", flag.ContinueOnError)
 	dataDir := fs.String("data", "", "data directory")
 	out := fs.String("out", "", "output file (default: litemlflow-backup-<ts>.tar.gz)")
+	includeOnlyDB := fs.Bool("include-only-db", false,
+		"with --artifact-backend=s3, acknowledge that artifacts are not in the backup (snapshot the bucket separately)")
+	includeS3 := fs.Bool("include-s3", false,
+		"with --artifact-backend=s3, stream every artifact object into the backup tar (slow on large buckets)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -249,6 +262,22 @@ func runBackup(args []string) error {
 	if err != nil {
 		return err
 	}
+
+	// S3 sanity gate. Either the operator opts in to the partial backup
+	// (--include-only-db, with the warning surfaced) or to the full one
+	// (--include-s3, which streams the bucket). Neither set → hard error.
+	if cfg.ArtifactBackend == "s3" && !*includeOnlyDB && !*includeS3 {
+		return errors.New(
+			"backup with --artifact-backend=s3 would silently exclude artifacts from the tar.\n" +
+				"  Pick one:\n" +
+				"    --include-only-db   tar only the SQLite DB; snapshot the bucket separately\n" +
+				"    --include-s3        stream every S3 object into the backup tar (slow)\n",
+		)
+	}
+	if *includeOnlyDB && *includeS3 {
+		return errors.New("--include-only-db and --include-s3 are mutually exclusive")
+	}
+
 	target := *out
 	if target == "" {
 		target = fmt.Sprintf("litemlflow-backup-%d.tar.gz", nowTS())
@@ -295,8 +324,115 @@ func runBackup(args []string) error {
 	if err != nil {
 		return err
 	}
+
+	if cfg.ArtifactBackend == "s3" && *includeS3 {
+		// Stream every artifact under every active run into the tar. We
+		// enumerate runs from the SQLite DB and use the existing
+		// artifact.Store.List(runID, dir) API rather than a backend-walker
+		// — both FilesystemStore and S3Store reject runID=="" with
+		// ErrInvalidPath, so a "list-everything" sentinel doesn't exist.
+		s3Store, err := artifact.NewS3Store(artifact.S3Config{
+			Endpoint: cfg.S3Endpoint, Bucket: cfg.S3Bucket, Region: cfg.S3Region,
+			AccessKey: cfg.S3AccessKey, SecretKey: cfg.S3SecretKey, Prefix: cfg.S3Prefix,
+		})
+		if err != nil {
+			return fmt.Errorf("backup: open s3 store: %w", err)
+		}
+		st, err := store.OpenSQLite(context.Background(), cfg.DBPath, cfg.DataDir)
+		if err != nil {
+			return fmt.Errorf("backup: open store for run enumeration: %w", err)
+		}
+		defer st.Close()
+		count, bytes, err := streamS3IntoTar(tw, s3Store, st)
+		if err != nil {
+			return fmt.Errorf("backup: stream s3 artifacts: %w", err)
+		}
+		fmt.Printf("backup wrote %d S3 objects (%d bytes) into the tar\n", count, bytes)
+	}
+
 	fmt.Println("backup written to", target)
+	if cfg.ArtifactBackend == "s3" && *includeOnlyDB {
+		fmt.Println("WARNING: artifacts in S3 are NOT in this tar; snapshot the bucket separately to avoid restore-time link rot.")
+	}
 	return nil
+}
+
+// streamS3IntoTar walks every artifact under every active run via the
+// artifact.Store interface (which requires a non-empty runID), copying each
+// object into "s3-artifacts/<runID>/<relPath>". Returns total file count
+// and bytes streamed.
+func streamS3IntoTar(tw *tar.Writer, art artifact.Store, st *store.SQLiteStore) (int, int64, error) {
+	// Enumerate active run IDs.
+	rows, err := st.DB().QueryContext(context.Background(),
+		`SELECT id FROM runs WHERE lifecycle_stage = 'active' ORDER BY id`)
+	if err != nil {
+		return 0, 0, fmt.Errorf("enumerate runs: %w", err)
+	}
+	var runIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, 0, err
+		}
+		runIDs = append(runIDs, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, 0, err
+	}
+
+	var count int
+	var totalLen int64
+
+	// Recursive walk per run. child.Path is relative to the run's
+	// artifact root, so the tar name is simply runID + "/" + child.Path.
+	// (Concatenating any parent prefix would double up because List
+	// already returns full relative paths.)
+	var walk func(runID, dir string) error
+	walk = func(runID, dir string) error {
+		entries, lerr := art.List(runID, dir)
+		if lerr != nil {
+			return lerr
+		}
+		for _, child := range entries {
+			if child.IsDir {
+				if werr := walk(runID, child.Path); werr != nil {
+					return werr
+				}
+				continue
+			}
+			rc, _, oerr := art.Open(runID, child.Path)
+			if oerr != nil {
+				return oerr
+			}
+			hdr := &tar.Header{
+				Name:    "s3-artifacts/" + runID + "/" + child.Path,
+				Mode:    0o640,
+				Size:    child.Size, // use List size — no extra stat round-trip
+				ModTime: time.Now(),
+			}
+			if werr := tw.WriteHeader(hdr); werr != nil {
+				_ = rc.Close()
+				return werr
+			}
+			n, cerr := io.Copy(tw, rc)
+			_ = rc.Close()
+			if cerr != nil {
+				return cerr
+			}
+			count++
+			totalLen += n
+		}
+		return nil
+	}
+
+	for _, runID := range runIDs {
+		if werr := walk(runID, ""); werr != nil {
+			return count, totalLen, fmt.Errorf("run %s: %w", runID, werr)
+		}
+	}
+	return count, totalLen, nil
 }
 
 // runRestore unpacks a .tar.gz produced by runBackup into the data directory.

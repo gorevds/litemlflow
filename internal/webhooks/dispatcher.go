@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -81,6 +82,12 @@ type Dispatcher struct {
 	retryBase time.Duration
 	echo      *EchoLog
 	dropped   atomic.Int64 // count of dropped jobs due to backpressure
+
+	// Drain coordination — Stop() closes stopCh and waits for stopped.
+	stopCh   chan struct{} // closed by Stop() to tell workers to drain
+	stopped  chan struct{} // closed once workers have all exited
+	workerWG sync.WaitGroup
+	once     sync.Once
 }
 
 const (
@@ -127,20 +134,87 @@ func NewWithOptions(ctx context.Context, store WebhookLookup, logger *slog.Logge
 		logger:    logger,
 		retryBase: base,
 		echo:      opts.Echo,
+		stopCh:    make(chan struct{}),
+		stopped:   make(chan struct{}),
 	}
 	for i := 0; i < maxWorkers; i++ {
+		d.workerWG.Add(1)
 		go d.worker(ctx)
 	}
+	// Once all workers have returned (queue drained or stop fired), close
+	// stopped so Stop() can return.
+	go func() {
+		d.workerWG.Wait()
+		close(d.stopped)
+	}()
 	return d
+}
+
+// Stop tells workers to drain the queue (up to drainTimeout) then exit.
+// Subsequent Notify() calls are dropped (counted via DroppedCount).
+//
+// Returns when all workers have exited or drainTimeout elapses, whichever
+// is first. After workers exit we sweep any remaining queue entries
+// synchronously — this catches the small window where a Notify lost the
+// stopCh race and slipped a job in just as workers were exiting.
+//
+// Safe to call multiple times.
+func (d *Dispatcher) Stop(drainTimeout time.Duration) {
+	d.once.Do(func() {
+		close(d.stopCh)
+	})
+	select {
+	case <-d.stopped:
+	case <-time.After(drainTimeout):
+		d.logger.Warn("webhooks: Stop timeout — workers still running, abandoning queue",
+			slog.Duration("timeout", drainTimeout),
+			slog.Int("queued", len(d.queue)),
+		)
+		return
+	}
+	// Final synchronous sweep — workers are gone, but a Notify may have
+	// landed a job during the gap between worker-exit and stopped-close.
+	// We use a fresh background context bounded by 5s; longer than that
+	// means a misconfigured webhook target.
+	sweepCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for {
+		select {
+		case j := <-d.queue:
+			d.deliver(sweepCtx, j)
+		default:
+			return
+		}
+	}
 }
 
 // Notify enqueues webhook deliveries for all matching webhooks.
 // It resolves webhooks for the given run's experiment and workspace, then
 // enqueues one job per webhook that subscribes to the event. If the queue is
 // full a warning is logged and the job is dropped (backpressure design).
+//
+// Once Stop() has been called, subsequent Notify() calls drop their work
+// (counted via DroppedCount): the dispatcher is closed and the caller can't
+// expect delivery anyway.
+//
+// Race window (post-T1 review fix): Notify is called from request handlers
+// while Stop runs concurrently from server shutdown. We close the residual
+// "stopCh-closed-and-queue-still-has-space" race by re-checking stopCh after
+// the send-or-drop fast path. A vanishingly small window remains where Stop
+// fires between the second stopCh check and the worker draining; in that
+// case the job is enqueued but workers may have already exited. A
+// post-Stop drain in Stop() itself catches anything that lands during
+// drainTimeout. Documented residual: jobs Notified strictly after the
+// drain deadline are silently dropped (counted in `dropped`).
 func (d *Dispatcher) Notify(ctx context.Context, event string, run *model.Run) {
 	if event == "" || run == nil {
 		return
+	}
+	select {
+	case <-d.stopCh:
+		// Already stopped — drop the whole batch.
+		return
+	default:
 	}
 	expID := run.ExperimentID
 	whs, err := d.store.ListWebhooks(ctx, "", &expID)
@@ -156,6 +230,15 @@ func (d *Dispatcher) Notify(ctx context.Context, event string, run *model.Run) {
 			continue
 		}
 		j := job{wh: wh, event: event, run: run}
+		// Stage 1: check stopCh first so that a Stop racing with Notify
+		// drops the job rather than enqueueing into a dying queue.
+		select {
+		case <-d.stopCh:
+			d.dropped.Add(1)
+			return
+		default:
+		}
+		// Stage 2: send or drop on full queue.
 		select {
 		case d.queue <- j:
 		default:
@@ -173,10 +256,24 @@ func (d *Dispatcher) Notify(ctx context.Context, event string, run *model.Run) {
 func (d *Dispatcher) DroppedCount() int64 { return d.dropped.Load() }
 
 func (d *Dispatcher) worker(ctx context.Context) {
+	defer d.workerWG.Done()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-d.stopCh:
+			// Drain remaining queue items best-effort, then exit. The
+			// stopCh-vs-queue race is fine: if Stop() fires while a job
+			// is sitting in the queue we still try to deliver it. The
+			// outer Stop() bounds total drain time via drainTimeout.
+			for {
+				select {
+				case j := <-d.queue:
+					d.deliver(ctx, j)
+				default:
+					return
+				}
+			}
 		case j := <-d.queue:
 			d.deliver(ctx, j)
 		}

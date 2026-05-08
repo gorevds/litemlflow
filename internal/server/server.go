@@ -29,12 +29,13 @@ import (
 
 // Server bundles the HTTP server and its dependencies.
 type Server struct {
-	cfg       config.Config
-	logger    *slog.Logger
-	store     *store.SQLiteStore
-	artifacts artifact.Store
-	httpd     *http.Server
-	grpcSrv   *grpcotlp.Server // nil when OTLPGRPCAddr is not configured
+	cfg        config.Config
+	logger     *slog.Logger
+	store      *store.SQLiteStore
+	artifacts  artifact.Store
+	httpd      *http.Server
+	grpcSrv    *grpcotlp.Server // nil when OTLPGRPCAddr is not configured
+	dispatcher *webhooks.Dispatcher
 }
 
 // New constructs a server, opening the store and preparing the router.
@@ -113,10 +114,19 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Server, 
 		}
 	}
 
-	return &Server{cfg: cfg, logger: logger, store: st, artifacts: art, httpd: httpSrv, grpcSrv: grpcSrv}, nil
+	return &Server{
+		cfg: cfg, logger: logger, store: st, artifacts: art,
+		httpd: httpSrv, grpcSrv: grpcSrv, dispatcher: dispatcher,
+	}, nil
 }
 
 // Run starts serving until ctx is canceled or an error occurs.
+//
+// On shutdown the order is: HTTP first (stop accepting new requests), then
+// the webhook dispatcher (drain in-flight deliveries with a 5 s ceiling),
+// then gRPC OTLP (stop accepting traces), then close the store. The
+// dispatcher drain matters because audit-log webhooks would otherwise be
+// silently lost on SIGTERM.
 func (s *Server) Run(ctx context.Context) error {
 	errCh := make(chan error, 2)
 
@@ -143,21 +153,26 @@ func (s *Server) Run(ctx context.Context) error {
 		}()
 	}
 
-	select {
-	case <-ctx.Done():
+	shutdown := func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = s.httpd.Shutdown(shutdownCtx)
+		// Drain webhooks: don't lose in-flight audit-log deliveries.
+		if s.dispatcher != nil {
+			s.dispatcher.Stop(5 * time.Second)
+		}
 		if s.grpcSrv != nil {
 			s.grpcSrv.Stop()
 		}
 		_ = s.store.Close()
+	}
+
+	select {
+	case <-ctx.Done():
+		shutdown()
 		return nil
 	case err := <-errCh:
-		if s.grpcSrv != nil {
-			s.grpcSrv.Stop()
-		}
-		_ = s.store.Close()
+		shutdown()
 		return err
 	}
 }

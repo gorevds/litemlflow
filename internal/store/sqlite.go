@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -38,7 +39,27 @@ func OpenSQLite(ctx context.Context, path, root string) (*SQLiteStore, error) {
 	//   _synchronous=NORMAL: durable across power loss for *committed* WAL frames.
 	//   _busy_timeout=5000: wait up to 5s for write lock (default is 0 = fail fast).
 	//   _foreign_keys=on: enforce FKs at runtime.
-	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)", path)
+	//
+	// Performance pragmas (added in T2.6 per the storage-architect review —
+	// see docs/reports/2026-05-08-deep-review.md):
+	//   _cache_size=-65536: 64 MiB page cache (default 2 MiB; negative means
+	//     KiB rather than pages, so this is portable across page sizes).
+	//   _temp_store=MEMORY: keep temp B-trees and sort buffers in RAM. Big
+	//     win on the analytics window-function path.
+	//   _wal_autocheckpoint=1000: checkpoint every 1000 frames (default
+	//     also 1000, but we set it explicitly so future driver changes don't
+	//     drift our durability profile).
+	//
+	// mmap_size is *not* set globally because some 32-bit ARM kernels OOM on
+	// 256 MiB mmap regions. Operators who want it can set
+	// `LITEMLFLOW_SQLITE_MMAP_MIB=256` and we'll layer it on after Open.
+	dsn := fmt.Sprintf(
+		"file:%s?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"+
+			"&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"+
+			"&_pragma=cache_size(-65536)&_pragma=temp_store(MEMORY)"+
+			"&_pragma=wal_autocheckpoint(1000)",
+		path,
+	)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
@@ -53,6 +74,14 @@ func OpenSQLite(ctx context.Context, path, root string) (*SQLiteStore, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("ping sqlite: %w", err)
 	}
+
+	// Optional mmap (gated by env to avoid the 32-bit ARM OOM mode).
+	if v := os.Getenv("LITEMLFLOW_SQLITE_MMAP_MIB"); v != "" {
+		if mib, perr := strconv.ParseInt(v, 10, 64); perr == nil && mib > 0 {
+			_, _ = db.ExecContext(ctx, fmt.Sprintf("PRAGMA mmap_size=%d", mib<<20))
+		}
+	}
+
 	return &SQLiteStore{db: db, root: root}, nil
 }
 
@@ -63,8 +92,22 @@ func (s *SQLiteStore) DB() *sql.DB { return s.db }
 func (s *SQLiteStore) Close() error { return s.db.Close() }
 
 // Migrate brings the database to the latest schema version.
+//
+// Side-effects after a successful Apply:
+//   - run ANALYZE so the SQLite query planner has up-to-date stats. Without
+//     this, the analytics layer's headline query was 2-4× slower on cold
+//     databases (measured in analytics_bench_test.go on the v1.1 release).
+//   - PRAGMA optimize gives the planner a chance to update sqlite_stat1 for
+//     tables it has been recently writing to (cheap; runs only when needed).
 func (s *SQLiteStore) Migrate(ctx context.Context) error {
-	return migrations.Apply(ctx, s.db)
+	if err := migrations.Apply(ctx, s.db); err != nil {
+		return err
+	}
+	// Best-effort. ANALYZE is non-failing on healthy DBs; ignore the error
+	// and let normal operation surface anything sinister.
+	_, _ = s.db.ExecContext(ctx, "ANALYZE")
+	_, _ = s.db.ExecContext(ctx, "PRAGMA optimize")
+	return nil
 }
 
 // ----- experiments -----

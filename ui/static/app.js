@@ -605,11 +605,224 @@
     },
   };
 
+  // ─── Modal a11y + Confirm/Prompt helpers (Tier 1 / B3) ──────────────────────
+  //
+  // Existing modals (`_showPromptCreateModal`, `_showNewProjectModal`,
+  // `_showMoveProjectModal`, `_showDatasetUploadModal`, `_showAddWidgetModal`)
+  // build their own bodies and attach a `.modal-backdrop` div to the DOM. They
+  // were not focus-trapped, lacked role=dialog/aria-modal, and tabbing leaked
+  // to the page beneath. Rather than rewrite all five callers, this helper
+  // elevates EVERY `.modal-backdrop` once it lands in the DOM:
+  //
+  //   - sets role="dialog" + aria-modal="true" on the inner .modal element
+  //   - links aria-labelledby to the first <h2> via auto-generated id
+  //   - traps Tab/Shift+Tab inside the backdrop
+  //   - moves focus to the first focusable element on open
+  //   - restores focus to whatever was active before the modal opened
+  //
+  // Modal.confirm() and Modal.prompt() are async replacements for the native
+  // confirm() / prompt() used in destructive flows (delete run, delete
+  // webhook, soft-delete dataset, name a saved analytics query). They build
+  // their own .modal-backdrop so the same machinery applies.
+  const Modal = (() => {
+    const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    let labelSeq = 0;
+    const previousFocus = new WeakMap();
+
+    // Apply a11y attributes + focus trap whenever a .modal-backdrop is added.
+    const mo = new MutationObserver((muts) => {
+      for (const m of muts) {
+        for (const node of m.addedNodes) {
+          if (node.nodeType !== 1) continue;
+          if (node.classList && node.classList.contains("modal-backdrop")) {
+            arm(node);
+          }
+        }
+      }
+    });
+
+    const arm = (backdrop) => {
+      const card = backdrop.querySelector(".modal");
+      if (!card) return;
+      card.setAttribute("role", "dialog");
+      card.setAttribute("aria-modal", "true");
+      // Label the dialog by the first heading inside it.
+      const heading = card.querySelector("h2, h1, h3");
+      if (heading) {
+        const id = "lmf-modal-label-" + (++labelSeq);
+        heading.id = heading.id || id;
+        card.setAttribute("aria-labelledby", heading.id);
+      }
+      // Remember the trigger element so we can restore focus on close.
+      previousFocus.set(backdrop, document.activeElement);
+      // Move focus into the modal — first focusable element, falling back
+      // to the modal card itself.
+      const firstFocusable = card.querySelector(FOCUSABLE);
+      setTimeout(() => {
+        (firstFocusable || card).focus();
+      }, 0);
+      if (!firstFocusable) {
+        card.tabIndex = -1; // allow programmatic focus
+      }
+      // Tab / Shift+Tab loop inside the backdrop. We attach to the
+      // backdrop (capture phase) so it runs before any per-input handlers.
+      backdrop.addEventListener("keydown", (e) => {
+        if (e.key !== "Tab") return;
+        const focusables = Array.from(card.querySelectorAll(FOCUSABLE)).filter(el => !el.disabled && el.offsetParent !== null);
+        if (focusables.length === 0) {
+          e.preventDefault();
+          return;
+        }
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      });
+      // Restore focus when the backdrop is removed.
+      const removalObserver = new MutationObserver((rmMuts) => {
+        for (const rm of rmMuts) {
+          for (const removed of rm.removedNodes) {
+            if (removed === backdrop) {
+              const prev = previousFocus.get(backdrop);
+              if (prev && typeof prev.focus === "function") {
+                try { prev.focus(); } catch {}
+              }
+              removalObserver.disconnect();
+              return;
+            }
+          }
+        }
+      });
+      removalObserver.observe(backdrop.parentNode || document.body, { childList: true });
+    };
+
+    const init = () => {
+      mo.observe(document.body, { childList: true, subtree: false });
+    };
+
+    // ----- Confirm / Prompt -----
+    //
+    // Both return Promises — destructive flows can `await` them rather than
+    // using the synchronous, blocking, ugly browser dialogs.
+
+    const confirm = ({ title, message, primaryLabel, danger }) => {
+      return new Promise((resolve) => {
+        const wrap = document.createElement("div");
+        wrap.className = "modal-backdrop";
+        wrap.innerHTML = `
+          <div class="card modal" style="max-width:440px">
+            <h2 style="margin-top:0">${escapeHTML(title || "Confirm")}</h2>
+            <p style="color:var(--fg-muted);margin:0 0 16px">${escapeHTML(message || "Are you sure?")}</p>
+            <div style="display:flex;gap:8px;justify-content:flex-end">
+              <button data-modal-cancel>Cancel</button>
+              <button data-modal-ok class="${danger ? "btn-danger" : "btn-primary"}">${escapeHTML(primaryLabel || (danger ? "Delete" : "OK"))}</button>
+            </div>
+          </div>`;
+        document.body.appendChild(wrap);
+
+        const close = (result) => {
+          wrap.remove();
+          resolve(result);
+        };
+        wrap.addEventListener("click", (e) => {
+          if (e.target === wrap) close(false);
+        });
+        wrap.querySelector("[data-modal-cancel]").addEventListener("click", () => close(false));
+        wrap.querySelector("[data-modal-ok]").addEventListener("click", () => close(true));
+        // Wire Escape locally so we can resolve(false) — the global Escape
+        // handler in App.init also closes top backdrop, but won't surface
+        // a value through our promise.
+        wrap.addEventListener("keydown", (e) => {
+          if (e.key === "Escape") {
+            e.stopPropagation();
+            close(false);
+          } else if (e.key === "Enter" && document.activeElement.tagName !== "TEXTAREA") {
+            e.preventDefault();
+            close(true);
+          }
+        });
+      });
+    };
+
+    const prompt = ({ title, label, placeholder, defaultValue }) => {
+      return new Promise((resolve) => {
+        const wrap = document.createElement("div");
+        wrap.className = "modal-backdrop";
+        wrap.innerHTML = `
+          <div class="card modal" style="max-width:440px">
+            <h2 style="margin-top:0">${escapeHTML(title || "Input")}</h2>
+            <table class="form-table">
+              <tr>
+                <th><label for="lmf-prompt-input">${escapeHTML(label || "Value")}</label></th>
+                <td><input type="text" id="lmf-prompt-input" placeholder="${escapeHTML(placeholder || "")}" value="${escapeHTML(defaultValue || "")}" style="width:100%"/></td>
+              </tr>
+            </table>
+            <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
+              <button data-modal-cancel>Cancel</button>
+              <button data-modal-ok class="btn-primary">OK</button>
+            </div>
+          </div>`;
+        document.body.appendChild(wrap);
+        const input = wrap.querySelector("#lmf-prompt-input");
+        const close = (result) => {
+          wrap.remove();
+          resolve(result);
+        };
+        wrap.addEventListener("click", (e) => {
+          if (e.target === wrap) close(null);
+        });
+        wrap.querySelector("[data-modal-cancel]").addEventListener("click", () => close(null));
+        wrap.querySelector("[data-modal-ok]").addEventListener("click", () => close(input.value));
+        input.addEventListener("keydown", (e) => {
+          if (e.key === "Escape") { e.stopPropagation(); close(null); }
+          else if (e.key === "Enter") { e.preventDefault(); close(input.value); }
+        });
+      });
+    };
+
+    return { init, confirm, prompt };
+  })();
+
+  // ─── Prefs namespace (Tier 1 / B3 follow-up) ────────────────────────────────
+  // Centralises localStorage access. Keys follow `litemlflow.<scope>.<key>`.
+  // Everywhere across app.js that touches localStorage directly is a candidate
+  // for migration (~18 sites at last count) — done piecemeal during T2/T3.
+  const Prefs = {
+    getJSON(key, def) {
+      try {
+        const v = localStorage.getItem(key);
+        if (v == null) return def;
+        return JSON.parse(v);
+      } catch { return def; }
+    },
+    setJSON(key, val) {
+      try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
+    },
+    getString(key, def) {
+      const v = localStorage.getItem(key);
+      return v == null ? (def || "") : v;
+    },
+    setString(key, val) {
+      try { localStorage.setItem(key, val); } catch {}
+    },
+    remove(key) {
+      try { localStorage.removeItem(key); } catch {}
+    },
+  };
+
   // ─── Main App ─────────────────────────────────────────────────────────────────
   const App = {
     cache: { experiments: null, runs: {}, runData: {} },
 
     init() {
+      // Modal a11y observer (focus trap + role=dialog + restore-focus).
+      Modal.init();
+
       // Theme
       const stored = localStorage.getItem("litemlflow.theme");
       if (stored) document.documentElement.setAttribute("data-theme", stored);
@@ -1282,7 +1495,11 @@ mlflow.log_metric("loss", 0.42)</pre>
       };
 
       $("#bulk-delete").onclick = async () => {
-        if (!confirm(`Delete ${n} run(s)? This cannot be undone.`)) return;
+        if (!await Modal.confirm({
+          title: "Delete runs",
+          message: `Delete ${n} run(s)? This cannot be undone.`,
+          danger: true, primaryLabel: "Delete",
+        })) return;
         const ids = BulkSelect.list();
         await Promise.all(ids.map(id =>
           fetchJSON("/api/2.0/mlflow/runs/delete", { method: "POST", body: JSON.stringify({ run_id: id }) })
@@ -2538,7 +2755,11 @@ c.create_prompt("rag.system", "You are a helpful assistant.", description="seed 
       $$(".member-remove-btn", main).forEach(btn => {
         btn.addEventListener("click", async () => {
           const userID = btn.dataset.userId;
-          if (!confirm(`Remove ${userID} from workspace ${wsID}?`)) return;
+          if (!await Modal.confirm({
+            title: "Remove member",
+            message: `Remove ${userID} from workspace ${wsID}?`,
+            danger: true, primaryLabel: "Remove",
+          })) return;
           try {
             await fetch(
               `/api/v1/workspaces/${encodeURIComponent(wsID)}/members/${encodeURIComponent(userID)}`,
@@ -2895,7 +3116,11 @@ c.create_prompt("rag.system", "You are a helpful assistant.", description="seed 
         $$(".wh-del-btn", main).forEach(btn => {
           btn.addEventListener("click", async () => {
             const id = btn.dataset.whId;
-            if (!confirm("Delete this webhook?")) return;
+            if (!await Modal.confirm({
+              title: "Delete webhook",
+              message: "Delete this webhook? Pending deliveries will be lost.",
+              danger: true, primaryLabel: "Delete",
+            })) return;
             try {
               await fetch(`/api/v1/webhooks/${id}`, {
                 method: "DELETE",
@@ -3032,7 +3257,11 @@ requests.post("${location.origin}/api/v1/datasets/my-dataset/versions",
         $$(".ds-del-btn", main).forEach(b => b.addEventListener("click", async (e) => {
           e.stopPropagation();
           const v = b.dataset.version;
-          if (!confirm(`Soft-delete ${name} v${v}? (Content stays in CAS for offline GC.)`)) return;
+          if (!await Modal.confirm({
+            title: "Delete dataset version",
+            message: `Soft-delete ${name} v${v}? Content stays in CAS for offline garbage collection.`,
+            danger: true, primaryLabel: "Soft-delete",
+          })) return;
           try {
             const r = await fetch(`/api/v1/datasets/${encodeURIComponent(name)}/versions/${v}`, { method: "DELETE" });
             if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -3748,8 +3977,12 @@ requests.post("${location.origin}/api/v1/datasets/my-dataset/versions",
         localStorage.removeItem(wsKey);
         App.renderAnalytics();
       });
-      $("#aq-save").addEventListener("click", () => {
-        const name = prompt("Save this query as:");
+      $("#aq-save").addEventListener("click", async () => {
+        const name = await Modal.prompt({
+          title: "Save query",
+          label: "Name",
+          placeholder: "e.g. F1 by optimizer (last 30 days)",
+        });
         if (!name) return;
         const q = collectQuery();
         savedQueries.push({ name, query: q });

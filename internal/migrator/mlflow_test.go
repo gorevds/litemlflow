@@ -12,6 +12,7 @@ import (
 	"github.com/gorevds/litemlflow/internal/artifact"
 	"github.com/gorevds/litemlflow/internal/model"
 	"github.com/gorevds/litemlflow/internal/store"
+	"github.com/gorevds/litemlflow/internal/store/storetest"
 )
 
 // ---- unit tests: JSON parsing ----
@@ -291,6 +292,7 @@ func newFakeMLflow(t *testing.T) (*httptest.Server, *fakeMLflow) {
 // inMemStore is a minimal in-memory Store implementation used for tests.
 // Only the methods called by the importer need to be implemented.
 type inMemStore struct {
+	storetest.NopStore
 	experiments []*model.Experiment
 	runs        map[string]*model.Run
 	params      map[string][]model.Param
@@ -381,192 +383,7 @@ func (s *inMemStore) UpdateRun(_ context.Context, id string, status *string, end
 }
 
 // Stub out every other Store method so inMemStore satisfies the interface.
-func (s *inMemStore) Migrate(_ context.Context) error                  { return nil }
-func (s *inMemStore) Close() error                                      { return nil }
-func (s *inMemStore) GetExperiment(_ context.Context, _ int64) (*model.Experiment, error) {
-	return nil, store.ErrNotFound
-}
-func (s *inMemStore) GetExperimentByName(_ context.Context, _ string) (*model.Experiment, error) {
-	return nil, store.ErrNotFound
-}
-func (s *inMemStore) UpdateExperiment(_ context.Context, _ int64, _ *string) error { return nil }
-func (s *inMemStore) SetExperimentLifecycle(_ context.Context, _ int64, _ string) error {
-	return nil
-}
-func (s *inMemStore) SearchExperiments(_ context.Context, _ store.SearchOptions) (store.SearchResult[*model.Experiment], error) {
-	return store.SearchResult[*model.Experiment]{}, nil
-}
-func (s *inMemStore) GetRun(_ context.Context, _ string) (*model.Run, error) {
-	return nil, store.ErrNotFound
-}
-func (s *inMemStore) SetRunLifecycle(_ context.Context, _, _ string) error { return nil }
-func (s *inMemStore) SearchRuns(_ context.Context, _ store.SearchOptions) (store.SearchResult[*model.Run], error) {
-	return store.SearchResult[*model.Run]{}, nil
-}
-func (s *inMemStore) LogMetric(_ context.Context, _ string, _ model.Metric) error { return nil }
-func (s *inMemStore) LogParams(_ context.Context, _ string, _ []model.Param) error { return nil }
-func (s *inMemStore) SetTags(_ context.Context, _ string, _ []model.KV) error     { return nil }
-func (s *inMemStore) DeleteTag(_ context.Context, _, _ string) error               { return nil }
-func (s *inMemStore) GetMetricHistory(_ context.Context, _, _ string, _ store.MetricHistoryOptions) ([]model.Metric, string, error) {
-	return nil, "", nil
-}
-func (s *inMemStore) GetMetricHistoryDownsampled(_ context.Context, _, _ string, _ int) ([]model.Metric, int64, error) {
-	return nil, 0, nil
-}
-func (s *inMemStore) GetParams(_ context.Context, _ string) ([]model.Param, error) { return nil, nil }
-func (s *inMemStore) GetTags(_ context.Context, _ string) ([]model.KV, error)      { return nil, nil }
-func (s *inMemStore) GetLatestMetrics(_ context.Context, _ string) ([]model.Metric, error) {
-	return nil, nil
-}
-func (s *inMemStore) LogInputs(_ context.Context, _ string, _ []model.DatasetInput) error {
-	return nil
-}
-func (s *inMemStore) GetRunDatasets(_ context.Context, _ string) ([]model.DatasetInput, error) {
-	return nil, nil
-}
-func (s *inMemStore) SetRunNote(_ context.Context, _, _, _ string) error { return nil }
-func (s *inMemStore) GetRunNote(_ context.Context, _ string) (string, string, int64, error) {
-	return "", "", 0, store.ErrNotFound
-}
-func (s *inMemStore) InsertSpans(_ context.Context, _ []model.Span) error { return nil }
-func (s *inMemStore) GetSpansByRun(_ context.Context, _ string) ([]model.Span, error) {
-	return nil, nil
-}
-func (s *inMemStore) GetSpansByTrace(_ context.Context, _ string) ([]model.Span, error) {
-	return nil, nil
-}
-func (s *inMemStore) CreatePrompt(_ context.Context, _ *model.Prompt) (int64, error) { return 0, nil }
-func (s *inMemStore) ListPrompts(_ context.Context) ([]*model.Prompt, error)          { return nil, nil }
-func (s *inMemStore) GetLatestPrompt(_ context.Context, _ string) (*model.Prompt, error) {
-	return nil, store.ErrNotFound
-}
-func (s *inMemStore) GetPromptVersion(_ context.Context, _ string, _ int64) (*model.Prompt, error) {
-	return nil, store.ErrNotFound
-}
-func (s *inMemStore) ListPromptVersions(_ context.Context, _ string) ([]*model.Prompt, error) {
-	return nil, nil
-}
-func (s *inMemStore) SetPromptAlias(_ context.Context, _, _ string, _ int64) error { return nil }
-func (s *inMemStore) GetPromptByAlias(_ context.Context, _, _ string) (*model.Prompt, error) {
-	return nil, store.ErrNotFound
-}
-func (s *inMemStore) CreateEval(_ context.Context, _ *model.Eval) error           { return nil }
-func (s *inMemStore) GetEval(_ context.Context, _ string) (*model.Eval, error)    { return nil, store.ErrNotFound }
-func (s *inMemStore) CreateRegisteredModel(_ context.Context, _ *model.RegisteredModel) error {
-	return nil
-}
-func (s *inMemStore) GetRegisteredModel(_ context.Context, _ string) (*model.RegisteredModel, error) {
-	return nil, store.ErrNotFound
-}
-func (s *inMemStore) RenameRegisteredModel(_ context.Context, _, _ string) (*model.RegisteredModel, error) {
-	return nil, store.ErrNotFound
-}
-func (s *inMemStore) UpdateRegisteredModel(_ context.Context, _ string, _ *string) (*model.RegisteredModel, error) {
-	return nil, store.ErrNotFound
-}
-func (s *inMemStore) DeleteRegisteredModel(_ context.Context, _ string) error { return nil }
-func (s *inMemStore) SearchRegisteredModels(_ context.Context, _ string, _ int, _ string) (store.SearchResult[*model.RegisteredModel], error) {
-	return store.SearchResult[*model.RegisteredModel]{}, nil
-}
-func (s *inMemStore) GetLatestModelVersions(_ context.Context, _ string, _ []string) ([]*model.ModelVersion, error) {
-	return nil, nil
-}
-func (s *inMemStore) SetRegisteredModelTag(_ context.Context, _, _, _ string) error  { return nil }
-func (s *inMemStore) DeleteRegisteredModelTag(_ context.Context, _, _ string) error  { return nil }
-func (s *inMemStore) SetModelAlias(_ context.Context, _, _ string, _ int64) error    { return nil }
-func (s *inMemStore) DeleteModelAlias(_ context.Context, _, _ string) error          { return nil }
-func (s *inMemStore) GetModelByAlias(_ context.Context, _, _ string) (*model.ModelVersion, error) {
-	return nil, store.ErrNotFound
-}
-func (s *inMemStore) CreateModelVersion(_ context.Context, _ *model.ModelVersion) (*model.ModelVersion, error) {
-	return nil, nil
-}
-func (s *inMemStore) GetModelVersion(_ context.Context, _ string, _ int64) (*model.ModelVersion, error) {
-	return nil, store.ErrNotFound
-}
-func (s *inMemStore) UpdateModelVersion(_ context.Context, _ string, _ int64, _ *string) (*model.ModelVersion, error) {
-	return nil, store.ErrNotFound
-}
-func (s *inMemStore) DeleteModelVersion(_ context.Context, _ string, _ int64) error { return nil }
-func (s *inMemStore) SearchModelVersions(_ context.Context, _ string, _ int, _ string) (store.SearchResult[*model.ModelVersion], error) {
-	return store.SearchResult[*model.ModelVersion]{}, nil
-}
-func (s *inMemStore) TransitionModelStage(_ context.Context, _ string, _ int64, _ string, _ bool) (*model.ModelVersion, error) {
-	return nil, store.ErrNotFound
-}
-func (s *inMemStore) SetModelVersionTag(_ context.Context, _ string, _ int64, _, _ string) error {
-	return nil
-}
-func (s *inMemStore) DeleteModelVersionTag(_ context.Context, _ string, _ int64, _ string) error {
-	return nil
-}
-func (s *inMemStore) CreateWorkspace(_ context.Context, _ *model.Workspace) error { return nil }
-func (s *inMemStore) GetWorkspace(_ context.Context, _ string) (*model.Workspace, error) {
-	return nil, store.ErrNotFound
-}
-func (s *inMemStore) ListWorkspaces(_ context.Context) ([]*model.Workspace, error) { return nil, nil }
-func (s *inMemStore) UpdateWorkspace(_ context.Context, _ string, _, _ *string) error {
-	return nil
-}
-func (s *inMemStore) DeleteWorkspace(_ context.Context, _ string) error { return nil }
-func (s *inMemStore) AddMember(_ context.Context, _, _, _ string) error { return nil }
-func (s *inMemStore) RemoveMember(_ context.Context, _, _ string) error { return nil }
-func (s *inMemStore) ListMembers(_ context.Context, _ string) ([]*model.WorkspaceMember, error) {
-	return nil, nil
-}
-func (s *inMemStore) GetMemberRole(_ context.Context, _, _ string) (string, error) {
-	return "", store.ErrNotFound
-}
-func (s *inMemStore) ListProjects(_ context.Context, _ string) ([]store.ProjectSummary, error) {
-	return nil, nil
-}
 
-func (s *inMemStore) SearchRunsByName(_ context.Context, _, _ string, _ int) ([]*model.Run, error) {
-	return nil, nil
-}
-func (s *inMemStore) GetRunLineage(_ context.Context, _ string) (*store.RunLineage, error) {
-	return nil, store.ErrNotFound
-}
-func (s *inMemStore) ArchiveStaleRuns(_ context.Context, _ int64) (int, error) { return 0, nil }
-func (s *inMemStore) CreateWebhook(_ context.Context, _ *model.Webhook) (int64, error) {
-	return 0, nil
-}
-func (s *inMemStore) ListWebhooks(_ context.Context, _ string, _ *int64) ([]*model.Webhook, error) {
-	return nil, nil
-}
-func (s *inMemStore) GetWebhook(_ context.Context, _ int64) (*model.Webhook, error) {
-	return nil, store.ErrNotFound
-}
-func (s *inMemStore) UpdateWebhook(_ context.Context, _ *model.Webhook) error { return nil }
-func (s *inMemStore) DeleteWebhook(_ context.Context, _ int64) error          { return nil }
-func (s *inMemStore) RecordWebhookAttempt(_ context.Context, _ int64, _ int, _ int64) error {
-	return nil
-}
-func (s *inMemStore) CloneExperiment(_ context.Context, _ int64, _, _ string) (*model.Experiment, error) {
-	return nil, store.ErrNotFound
-}
-func (s *inMemStore) GetDashboard(_ context.Context, _, _ string) (*model.Dashboard, error) {
-	return nil, store.ErrNotFound
-}
-func (s *inMemStore) SaveDashboard(_ context.Context, _, _, _ string) (*model.Dashboard, error) {
-	return nil, store.ErrNotFound
-}
-func (s *inMemStore) AnalyticsQuery(_ context.Context, _ store.AnalyticsQuery) (*store.AnalyticsResult, error) {
-	return &store.AnalyticsResult{}, nil
-}
-func (s *inMemStore) CreateDatasetVersion(_ context.Context, _ *model.DatasetVersion, _ []int64) (*model.DatasetVersion, error) {
-	return nil, store.ErrNotFound
-}
-func (s *inMemStore) ListDatasets(_ context.Context, _ string) ([]*model.DatasetVersion, error) { return nil, nil }
-func (s *inMemStore) ListDatasetVersions(_ context.Context, _, _ string) ([]*model.DatasetVersion, error) { return nil, nil }
-func (s *inMemStore) GetDatasetVersion(_ context.Context, _, _ string, _ int64) (*model.DatasetVersion, error) {
-	return nil, store.ErrNotFound
-}
-func (s *inMemStore) GetDatasetLineage(_ context.Context, _, _ string, _ int64) (*model.DatasetLineage, error) {
-	return nil, store.ErrNotFound
-}
-func (s *inMemStore) SoftDeleteDatasetVersion(_ context.Context, _, _ string, _ int64) error { return store.ErrNotFound }
-func (s *inMemStore) DatasetHashStillReferenced(_ context.Context, _ string) (bool, error)   { return false, nil }
 
 // inMemArtifactStore records uploaded artifacts.
 type inMemArtifactStore struct {

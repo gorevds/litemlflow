@@ -30,269 +30,29 @@ import (
 	"github.com/gorevds/litemlflow/internal/api/native"
 	"github.com/gorevds/litemlflow/internal/model"
 	"github.com/gorevds/litemlflow/internal/store"
+	"github.com/gorevds/litemlflow/internal/store/storetest"
 )
 
 // --- minimal in-memory store stub ---
 
-// stubStore satisfies the store.Store interface with in-memory state, just
-// enough for the OTLP fuzz target (InsertSpans + SearchExperiments used by
-// Readyz; all other methods are stubs that return ErrNotFound).
+// stubStore wraps storetest.NopStore + records spans for the fuzz target.
+// All other Store methods are inherited from NopStore (no-op / ErrNotFound).
 type stubStore struct {
+	storetest.NopStore
 	spans []model.Span
 }
 
-func (s *stubStore) Migrate(_ context.Context) error { return nil }
-func (s *stubStore) Close() error                    { return nil }
+// Override CreateExperiment so the embedded NopStore's panic doesn't fire
+// during fuzz setup (stubStore is created with `&stubStore{}` and the OTLP
+// path doesn't legitimately call it).
+func (s *stubStore) CreateExperiment(_ context.Context, _ *model.Experiment) (int64, error) {
+	return 0, store.ErrNotFound
+}
 
 func (s *stubStore) InsertSpans(_ context.Context, spans []model.Span) error {
 	s.spans = append(s.spans, spans...)
 	return nil
 }
-
-func (s *stubStore) GetSpansByRun(_ context.Context, _ string) ([]model.Span, error) {
-	return nil, store.ErrNotFound
-}
-
-func (s *stubStore) GetSpansByTrace(_ context.Context, _ string) ([]model.Span, error) {
-	return nil, store.ErrNotFound
-}
-
-func (s *stubStore) SearchExperiments(_ context.Context, _ store.SearchOptions) (store.SearchResult[*model.Experiment], error) {
-	return store.SearchResult[*model.Experiment]{}, nil
-}
-
-// Stub out all the remaining interface methods. They're not exercised by
-// IngestOTLP but the interface requires them.
-
-func (s *stubStore) CreateExperiment(_ context.Context, _ *model.Experiment) (int64, error) {
-	return 0, store.ErrNotFound
-}
-func (s *stubStore) GetExperiment(_ context.Context, _ int64) (*model.Experiment, error) {
-	return nil, store.ErrNotFound
-}
-func (s *stubStore) GetExperimentByName(_ context.Context, _ string) (*model.Experiment, error) {
-	return nil, store.ErrNotFound
-}
-func (s *stubStore) GetExperimentByNameInWorkspace(_ context.Context, _, _ string) (*model.Experiment, error) {
-	return nil, store.ErrNotFound
-}
-func (s *stubStore) UpdateExperiment(_ context.Context, _ int64, _ *string) error {
-	return store.ErrNotFound
-}
-func (s *stubStore) SetExperimentLifecycle(_ context.Context, _ int64, _ string) error {
-	return store.ErrNotFound
-}
-func (s *stubStore) SetExperimentTag(_ context.Context, _ int64, _, _ string) error {
-	return store.ErrNotFound
-}
-func (s *stubStore) CreateRun(_ context.Context, _ *model.Run) error { return store.ErrNotFound }
-func (s *stubStore) GetRun(_ context.Context, _ string) (*model.Run, error) {
-	return nil, store.ErrNotFound
-}
-func (s *stubStore) UpdateRun(_ context.Context, _ string, _ *string, _ *int64, _ *string) error {
-	return store.ErrNotFound
-}
-func (s *stubStore) SetRunLifecycle(_ context.Context, _, _ string) error { return store.ErrNotFound }
-func (s *stubStore) SearchRuns(_ context.Context, _ store.SearchOptions) (store.SearchResult[*model.Run], error) {
-	return store.SearchResult[*model.Run]{}, nil
-}
-func (s *stubStore) LogMetric(_ context.Context, _ string, _ model.Metric) error {
-	return store.ErrNotFound
-}
-func (s *stubStore) LogMetrics(_ context.Context, _ string, _ []model.Metric) error {
-	return store.ErrNotFound
-}
-func (s *stubStore) LogParam(_ context.Context, _ string, _ model.Param) error {
-	return store.ErrNotFound
-}
-func (s *stubStore) LogParams(_ context.Context, _ string, _ []model.Param) error {
-	return store.ErrNotFound
-}
-func (s *stubStore) SetTag(_ context.Context, _ string, _ model.KV) error { return store.ErrNotFound }
-func (s *stubStore) SetTags(_ context.Context, _ string, _ []model.KV) error {
-	return store.ErrNotFound
-}
-func (s *stubStore) DeleteTag(_ context.Context, _, _ string) error { return store.ErrNotFound }
-func (s *stubStore) GetMetricHistory(_ context.Context, _, _ string, _ store.MetricHistoryOptions) ([]model.Metric, string, error) {
-	return nil, "", store.ErrNotFound
-}
-func (s *stubStore) GetMetricHistoryDownsampled(_ context.Context, _, _ string, _ int) ([]model.Metric, int64, error) {
-	return nil, 0, store.ErrNotFound
-}
-func (s *stubStore) GetParams(_ context.Context, _ string) ([]model.Param, error) {
-	return nil, store.ErrNotFound
-}
-func (s *stubStore) GetTags(_ context.Context, _ string) ([]model.KV, error) {
-	return nil, store.ErrNotFound
-}
-func (s *stubStore) GetLatestMetrics(_ context.Context, _ string) ([]model.Metric, error) {
-	return nil, store.ErrNotFound
-}
-func (s *stubStore) LogInputs(_ context.Context, _ string, _ []model.DatasetInput) error {
-	return store.ErrNotFound
-}
-func (s *stubStore) GetRunDatasets(_ context.Context, _ string) ([]model.DatasetInput, error) {
-	return nil, store.ErrNotFound
-}
-func (s *stubStore) SetRunNote(_ context.Context, _, _, _ string) error { return store.ErrNotFound }
-func (s *stubStore) GetRunNote(_ context.Context, _ string) (string, string, int64, error) {
-	return "", "", 0, store.ErrNotFound
-}
-func (s *stubStore) CreatePrompt(_ context.Context, _ *model.Prompt) (int64, error) {
-	return 0, store.ErrNotFound
-}
-func (s *stubStore) ListPrompts(_ context.Context) ([]*model.Prompt, error) {
-	return nil, nil
-}
-func (s *stubStore) GetLatestPrompt(_ context.Context, _ string) (*model.Prompt, error) {
-	return nil, store.ErrNotFound
-}
-func (s *stubStore) GetPromptVersion(_ context.Context, _ string, _ int64) (*model.Prompt, error) {
-	return nil, store.ErrNotFound
-}
-func (s *stubStore) ListPromptVersions(_ context.Context, _ string) ([]*model.Prompt, error) {
-	return nil, store.ErrNotFound
-}
-func (s *stubStore) SetPromptAlias(_ context.Context, _, _ string, _ int64) error {
-	return store.ErrNotFound
-}
-func (s *stubStore) GetPromptByAlias(_ context.Context, _, _ string) (*model.Prompt, error) {
-	return nil, store.ErrNotFound
-}
-func (s *stubStore) CreateEval(_ context.Context, _ *model.Eval) error { return store.ErrNotFound }
-func (s *stubStore) GetEval(_ context.Context, _ string) (*model.Eval, error) {
-	return nil, store.ErrNotFound
-}
-
-// Model registry stubs.
-func (s *stubStore) CreateRegisteredModel(_ context.Context, _ *model.RegisteredModel) error {
-	return store.ErrNotFound
-}
-func (s *stubStore) GetRegisteredModel(_ context.Context, _ string) (*model.RegisteredModel, error) {
-	return nil, store.ErrNotFound
-}
-func (s *stubStore) RenameRegisteredModel(_ context.Context, _, _ string) (*model.RegisteredModel, error) {
-	return nil, store.ErrNotFound
-}
-func (s *stubStore) UpdateRegisteredModel(_ context.Context, _ string, _ *string) (*model.RegisteredModel, error) {
-	return nil, store.ErrNotFound
-}
-func (s *stubStore) DeleteRegisteredModel(_ context.Context, _ string) error { return store.ErrNotFound }
-func (s *stubStore) SearchRegisteredModels(_ context.Context, _ string, _ int, _ string) (store.SearchResult[*model.RegisteredModel], error) {
-	return store.SearchResult[*model.RegisteredModel]{}, nil
-}
-func (s *stubStore) GetLatestModelVersions(_ context.Context, _ string, _ []string) ([]*model.ModelVersion, error) {
-	return nil, store.ErrNotFound
-}
-func (s *stubStore) SetRegisteredModelTag(_ context.Context, _, _, _ string) error {
-	return store.ErrNotFound
-}
-func (s *stubStore) DeleteRegisteredModelTag(_ context.Context, _, _ string) error {
-	return store.ErrNotFound
-}
-func (s *stubStore) SetModelAlias(_ context.Context, _, _ string, _ int64) error {
-	return store.ErrNotFound
-}
-func (s *stubStore) DeleteModelAlias(_ context.Context, _, _ string) error { return store.ErrNotFound }
-func (s *stubStore) GetModelByAlias(_ context.Context, _, _ string) (*model.ModelVersion, error) {
-	return nil, store.ErrNotFound
-}
-func (s *stubStore) CreateModelVersion(_ context.Context, _ *model.ModelVersion) (*model.ModelVersion, error) {
-	return nil, store.ErrNotFound
-}
-func (s *stubStore) GetModelVersion(_ context.Context, _ string, _ int64) (*model.ModelVersion, error) {
-	return nil, store.ErrNotFound
-}
-func (s *stubStore) UpdateModelVersion(_ context.Context, _ string, _ int64, _ *string) (*model.ModelVersion, error) {
-	return nil, store.ErrNotFound
-}
-func (s *stubStore) DeleteModelVersion(_ context.Context, _ string, _ int64) error {
-	return store.ErrNotFound
-}
-func (s *stubStore) SearchModelVersions(_ context.Context, _ string, _ int, _ string) (store.SearchResult[*model.ModelVersion], error) {
-	return store.SearchResult[*model.ModelVersion]{}, nil
-}
-func (s *stubStore) TransitionModelStage(_ context.Context, _ string, _ int64, _ string, _ bool) (*model.ModelVersion, error) {
-	return nil, store.ErrNotFound
-}
-func (s *stubStore) SetModelVersionTag(_ context.Context, _ string, _ int64, _, _ string) error {
-	return store.ErrNotFound
-}
-func (s *stubStore) DeleteModelVersionTag(_ context.Context, _ string, _ int64, _ string) error {
-	return store.ErrNotFound
-}
-
-// Workspace stubs.
-func (s *stubStore) CreateWorkspace(_ context.Context, _ *model.Workspace) error {
-	return store.ErrNotFound
-}
-func (s *stubStore) GetWorkspace(_ context.Context, _ string) (*model.Workspace, error) {
-	return nil, store.ErrNotFound
-}
-func (s *stubStore) ListWorkspaces(_ context.Context) ([]*model.Workspace, error) { return nil, nil }
-func (s *stubStore) UpdateWorkspace(_ context.Context, _ string, _ *string, _ *string) error {
-	return store.ErrNotFound
-}
-func (s *stubStore) DeleteWorkspace(_ context.Context, _ string) error { return store.ErrNotFound }
-func (s *stubStore) AddMember(_ context.Context, _, _, _ string) error { return store.ErrNotFound }
-func (s *stubStore) RemoveMember(_ context.Context, _, _ string) error { return store.ErrNotFound }
-func (s *stubStore) ListMembers(_ context.Context, _ string) ([]*model.WorkspaceMember, error) {
-	return nil, store.ErrNotFound
-}
-func (s *stubStore) GetMemberRole(_ context.Context, _, _ string) (string, error) {
-	return "", store.ErrNotFound
-}
-
-func (s *stubStore) ListProjects(_ context.Context, _ string) ([]store.ProjectSummary, error) {
-	return nil, nil
-}
-
-func (s *stubStore) SearchRunsByName(_ context.Context, _, _ string, _ int) ([]*model.Run, error) {
-	return nil, nil
-}
-func (s *stubStore) GetRunLineage(_ context.Context, _ string) (*store.RunLineage, error) {
-	return nil, store.ErrNotFound
-}
-func (s *stubStore) ArchiveStaleRuns(_ context.Context, _ int64) (int, error) { return 0, nil }
-func (s *stubStore) CreateWebhook(_ context.Context, _ *model.Webhook) (int64, error) {
-	return 0, nil
-}
-func (s *stubStore) ListWebhooks(_ context.Context, _ string, _ *int64) ([]*model.Webhook, error) {
-	return nil, nil
-}
-func (s *stubStore) GetWebhook(_ context.Context, _ int64) (*model.Webhook, error) {
-	return nil, store.ErrNotFound
-}
-func (s *stubStore) UpdateWebhook(_ context.Context, _ *model.Webhook) error { return nil }
-func (s *stubStore) DeleteWebhook(_ context.Context, _ int64) error          { return nil }
-func (s *stubStore) RecordWebhookAttempt(_ context.Context, _ int64, _ int, _ int64) error {
-	return nil
-}
-func (s *stubStore) CloneExperiment(_ context.Context, _ int64, _, _ string) (*model.Experiment, error) {
-	return nil, store.ErrNotFound
-}
-func (s *stubStore) GetDashboard(_ context.Context, _, _ string) (*model.Dashboard, error) {
-	return nil, store.ErrNotFound
-}
-func (s *stubStore) SaveDashboard(_ context.Context, _, _, _ string) (*model.Dashboard, error) {
-	return nil, store.ErrNotFound
-}
-func (s *stubStore) AnalyticsQuery(_ context.Context, _ store.AnalyticsQuery) (*store.AnalyticsResult, error) {
-	return &store.AnalyticsResult{}, nil
-}
-func (s *stubStore) CreateDatasetVersion(_ context.Context, _ *model.DatasetVersion, _ []int64) (*model.DatasetVersion, error) {
-	return nil, store.ErrNotFound
-}
-func (s *stubStore) ListDatasets(_ context.Context, _ string) ([]*model.DatasetVersion, error) { return nil, nil }
-func (s *stubStore) ListDatasetVersions(_ context.Context, _, _ string) ([]*model.DatasetVersion, error) { return nil, nil }
-func (s *stubStore) GetDatasetVersion(_ context.Context, _, _ string, _ int64) (*model.DatasetVersion, error) {
-	return nil, store.ErrNotFound
-}
-func (s *stubStore) GetDatasetLineage(_ context.Context, _, _ string, _ int64) (*model.DatasetLineage, error) {
-	return nil, store.ErrNotFound
-}
-func (s *stubStore) SoftDeleteDatasetVersion(_ context.Context, _, _ string, _ int64) error { return store.ErrNotFound }
-func (s *stubStore) DatasetHashStillReferenced(_ context.Context, _ string) (bool, error)   { return false, nil }
 
 // --- fuzz setup ---
 
