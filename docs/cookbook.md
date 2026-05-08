@@ -246,6 +246,98 @@ with tracer.start_as_current_span("inference") as span:
     # ... your code ...
 ```
 
+## 7b. Send traces via OTLP/gRPC
+
+LiteMLflow also accepts standard OTLP/gRPC at the address configured with
+`--otlp-grpc-addr`. This is the transport used by default in the Go and Java
+OpenTelemetry SDKs, and by the OpenTelemetry Collector.
+
+### Start LiteMLflow with the gRPC listener
+
+```bash
+litemlflow up --data ./data --otlp-grpc-addr 127.0.0.1:4317
+```
+
+The OTLP/gRPC default port is `4317`. The HTTP/JSON listener remains active
+on `--addr` (default `:5000`) in parallel.
+
+### Python example (OpenTelemetry SDK)
+
+```bash
+pip install opentelemetry-sdk opentelemetry-exporter-otlp-proto-grpc
+```
+
+```python
+from opentelemetry import trace
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+# Point the gRPC exporter at LiteMLflow's gRPC listener.
+provider = TracerProvider(resource=Resource.create({
+    "service.name": "my-rag-service",
+    "litemlflow.run_id": "f0a1b2c3...",  # optional: link to a run
+}))
+provider.add_span_processor(BatchSpanProcessor(
+    OTLPSpanExporter(
+        endpoint="http://localhost:4317",  # plaintext gRPC
+        insecure=True,
+    )
+))
+trace.set_tracer_provider(provider)
+
+tracer = trace.get_tracer(__name__)
+with tracer.start_as_current_span("inference") as span:
+    span.set_attribute("tokens.input", 120)
+    # ... your code ...
+```
+
+### OpenTelemetry Collector pipeline
+
+Forward spans from an OTel Collector to LiteMLflow:
+
+```yaml
+# otel-collector-config.yaml
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+exporters:
+  otlp/litemlflow:
+    endpoint: localhost:4317   # LiteMLflow gRPC listener
+    tls:
+      insecure: true
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [otlp/litemlflow]
+```
+
+### Production TLS
+
+The gRPC listener is plaintext. For production, terminate TLS at a sidecar:
+
+```bash
+# Envoy example (excerpt):
+#   listeners[0].filter_chains[0].filters[0].typed_config.route_config
+#   → cluster pointing to 127.0.0.1:4317 with grpc_web or h2 upstream.
+
+# Nginx (nginx >= 1.13.10 with --with-http_v2_module):
+server {
+    listen 4318 ssl http2;
+    ssl_certificate /etc/ssl/litemlflow.crt;
+    ssl_certificate_key /etc/ssl/litemlflow.key;
+    location / {
+        grpc_pass grpc://127.0.0.1:4317;
+    }
+}
+```
+
 ## 6. Filter runs by metric and param
 
 ```python

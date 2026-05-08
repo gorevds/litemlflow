@@ -95,11 +95,16 @@ GET /api/v1/runs/{run_id}/evals           # evals comparing this run to others
 
 ## OTLP ingest
 
+LiteMLflow supports two OTLP transports:
+
+### HTTP/JSON (default, always enabled)
+
 ```
-POST /v1/traces                           # OTLP/JSON, OpenTelemetry-compatible
+POST /v1/traces
 ```
 
-Accepts the OTLP `ExportTraceServiceRequest` shape. Spans are mapped to LiteMLflow's `traces` table by:
+Accepts the OTLP `ExportTraceServiceRequest` shape serialised as JSON.
+Spans are mapped to LiteMLflow's `traces` table by:
 
 - `trace_id`, `span_id` → IDs (hex)
 - `attributes` → `attributes_json`
@@ -107,7 +112,33 @@ Accepts the OTLP `ExportTraceServiceRequest` shape. Spans are mapped to LiteMLfl
 - `status` → status_code, status_message
 - `litemlflow.run_id` resource attribute → `run_id` (optional)
 
-A future v0.2 will add OTLP/gRPC.
+### gRPC (opt-in, v1.0)
+
+When `--otlp-grpc-addr` is set, LiteMLflow also starts a gRPC listener
+implementing `opentelemetry.proto.collector.trace.v1.TraceService.Export`.
+
+The field mapping is identical to the HTTP/JSON path. The response always
+reports `partial_success.rejected_spans = 0` — malformed IDs are recorded
+best-effort rather than rejected.
+
+**Configuration:**
+
+```bash
+# Start with gRPC OTLP on the standard OTLP port:
+litemlflow up --data ./data --otlp-grpc-addr 127.0.0.1:4317
+
+# Or via environment variable:
+export LITEMLFLOW_OTLP_GRPC_ADDR=127.0.0.1:4317
+litemlflow up --data ./data
+```
+
+**No TLS on the gRPC listener:** The listener accepts plaintext gRPC. For
+production, place a TLS-terminating sidecar (Envoy, Nginx `grpc_pass`, etc.)
+in front. This mirrors how the HTTP listener is deployed.
+
+**Dependency note:** The gRPC receiver adds `google.golang.org/grpc` and
+`go.opentelemetry.io/proto/otlp` to the binary. See
+`docs/adr/0002-grpc-otlp-deps.md` for the rationale.
 
 ## Workspaces (multi-tenancy)
 
