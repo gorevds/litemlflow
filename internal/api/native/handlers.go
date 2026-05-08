@@ -21,6 +21,7 @@ import (
 
 	"github.com/gorevds/litemlflow/internal/auth"
 	"github.com/gorevds/litemlflow/internal/config"
+	"github.com/gorevds/litemlflow/internal/datasets"
 	"github.com/gorevds/litemlflow/internal/model"
 	"github.com/gorevds/litemlflow/internal/store"
 	"github.com/gorevds/litemlflow/internal/webhooks"
@@ -35,6 +36,8 @@ type Handler struct {
 	SessionStore SessionStore
 	OIDCProvider OIDCProvider // nil when auth != "oidc"
 	EchoLog      *webhooks.EchoLog
+	// Datasets is the content-addressed CAS for v1.2 dataset uploads.
+	Datasets datasets.Store
 }
 
 // SessionStore is the session-persistence interface used by auth handlers.
@@ -100,6 +103,15 @@ func (h *Handler) Mount(r chi.Router) {
 
 	// ANALYTICS: templated DSL → safe SQL (v1.1).
 	r.Post("/api/v1/analytics/query", h.AnalyticsQuery)
+
+	// DATASETS v1.2: content-addressed versioned datasets.
+	r.Get("/api/v1/datasets", h.ListDatasets)
+	r.Get("/api/v1/datasets/{name}", h.ListDatasetVersions)
+	r.Post("/api/v1/datasets/{name}/versions", h.CreateDatasetVersion)
+	r.Get("/api/v1/datasets/{name}/versions/{version}", h.GetDatasetVersion)
+	r.Delete("/api/v1/datasets/{name}/versions/{version}", h.DeleteDatasetVersion)
+	r.Get("/api/v1/datasets/{name}/versions/{version}/content", h.GetDatasetContent)
+	r.Get("/api/v1/datasets/{name}/versions/{version}/lineage", h.GetDatasetLineage)
 
 	// Webhooks, lineage, and experiment clone (W7.C).
 	h.mountWebhookRoutes(r)

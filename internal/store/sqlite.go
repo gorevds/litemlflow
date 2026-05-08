@@ -1649,8 +1649,116 @@ func (s *SQLiteStore) LogInputs(ctx context.Context, runID string, inputs []mode
 				return fmt.Errorf("insert dataset_input_tag: %w", err)
 			}
 		}
+
+		// v1.2 compat shim: also mirror this (name, digest) into datasets_v2
+		// so it shows up on the new Datasets UI alongside content-uploaded
+		// versions. We treat the digest as content_hash; size is 0 because
+		// log_input doesn't carry bytes. If a row already exists with the
+		// same (workspace, name, content_hash) we reuse it.
+		//
+		// Workspace is taken from the experiment that owns the run — same
+		// rule the analytics layer uses.
+		if err := mirrorIntoDatasetsV2(ctx, tx, runID, ds.Name, ds.Digest); err != nil {
+			return fmt.Errorf("mirror to datasets_v2: %w", err)
+		}
 	}
 	return tx.Commit()
+}
+
+// mirrorIntoDatasetsV2 inserts a row into datasets_v2 if one with the same
+// (workspace, name, content_hash) doesn't already exist. Idempotent.
+//
+// Why a free-function: it runs inside the LogInputs transaction so the
+// mirror is atomic with the dataset_inputs insert.
+//
+// Concurrency: two MlflowClient.log_input calls with identical (workspace,
+// name, digest) executing in separate transactions can race in the
+// "existence check passes → MAX(version) → INSERT" window. The losing
+// transaction would then hit the UNIQUE(workspace_id, name, version)
+// constraint. We use a SAVEPOINT around the INSERT and retry on
+// constraint failure: after rollback-to-savepoint the existence check
+// will see the peer's row and return success.
+//
+// We bound the retry loop to 3 attempts so a misbehaving constraint
+// can't loop forever; in practice 1-2 attempts is the worst case.
+func mirrorIntoDatasetsV2(ctx context.Context, tx *sql.Tx, runID, name, digest string) error {
+	// Resolve the run's workspace via experiments.
+	var workspace string
+	err := tx.QueryRowContext(ctx, `
+		SELECT e.workspace_id
+		FROM runs r JOIN experiments e ON e.id = r.experiment_id
+		WHERE r.id = ?
+	`, runID).Scan(&workspace)
+	if err != nil {
+		return err
+	}
+	if workspace == "" {
+		workspace = "default"
+	}
+
+	const maxAttempts = 3
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		// Existence check (re-run on retry — peer may have inserted).
+		var existing int64
+		err := tx.QueryRowContext(ctx, `
+			SELECT id FROM datasets_v2
+			WHERE workspace_id = ? AND name = ? AND content_hash = ?
+		`, workspace, name, digest).Scan(&existing)
+		if err == nil {
+			return nil // peer mirrored already (or we did on the previous attempt)
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+
+		// SAVEPOINT so a UNIQUE constraint failure doesn't poison the
+		// outer LogInputs transaction.
+		if _, err := tx.ExecContext(ctx, "SAVEPOINT lmf_mirror"); err != nil {
+			return err
+		}
+
+		var maxVer sql.NullInt64
+		if err := tx.QueryRowContext(ctx,
+			`SELECT MAX(version) FROM datasets_v2 WHERE workspace_id = ? AND name = ?`,
+			workspace, name,
+		).Scan(&maxVer); err != nil {
+			_, _ = tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT lmf_mirror")
+			return err
+		}
+
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO datasets_v2(name, version, content_hash, size_bytes,
+			                        workspace_id, created_at, lifecycle_stage)
+			VALUES (?, ?, ?, 0, ?, ?, 'active')
+		`, name, maxVer.Int64+1, digest, workspace, time.Now().UnixMilli())
+		if err == nil {
+			_, _ = tx.ExecContext(ctx, "RELEASE SAVEPOINT lmf_mirror")
+			return nil
+		}
+
+		// Roll back the savepoint so the outer txn stays usable.
+		_, _ = tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT lmf_mirror")
+		if !isUniqueConstraintErr(err) {
+			return err
+		}
+		// fall through to next attempt — peer's row will be visible
+	}
+	// Three constraint failures in a row means the contract is broken;
+	// surface that rather than loop forever.
+	return fmt.Errorf("mirror_to_datasets_v2: UNIQUE constraint contention exhausted retries (%d)", maxAttempts)
+}
+
+// isUniqueConstraintErr returns true if err is a SQLite UNIQUE failure.
+// We match the error message rather than a typed code because
+// modernc.org/sqlite doesn't surface SQLite extended error codes through
+// database/sql. The string "UNIQUE constraint failed" is documented and
+// stable across SQLite versions.
+func isUniqueConstraintErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "UNIQUE constraint failed") ||
+		strings.Contains(err.Error(), "constraint failed: UNIQUE")
 }
 
 // GetRunDatasets returns all dataset inputs linked to a run.

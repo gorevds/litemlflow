@@ -691,6 +691,9 @@
       if (hash.startsWith("/webhooks")) return this.renderWebhooks();
       if (hash.startsWith("/dashboards")) return this.renderDashboardsIndex();
       if (hash.startsWith("/analytics")) return this.renderAnalytics();
+      const dsDetail = hash.match(/^\/datasets\/(.+)$/);
+      if (dsDetail) return this.renderDatasetDetail(decodeURIComponent(dsDetail[1]));
+      if (hash.startsWith("/datasets")) return this.renderDatasetsIndex();
       return this.renderExperiments();
     },
 
@@ -2907,6 +2910,233 @@ c.create_prompt("rag.system", "You are a helpful assistant.", description="seed 
       };
 
       renderPage();
+    },
+
+    // ── Datasets (v1.2) ──────────────────────────────────────────────────────
+    async renderDatasetsIndex() {
+      const main = $("#app");
+      main.innerHTML = `<div class="loading">Loading datasets…</div>`;
+      try {
+        const data = await fetchJSON("/api/v1/datasets");
+        const items = data.datasets || [];
+        const rows = items.map(d => `
+          <tr data-row-index="${escapeHTML(d.name)}" data-ds-name="${escapeHTML(d.name)}">
+            <td><a href="#/datasets/${encodeURIComponent(d.name)}">${escapeHTML(d.name)}</a></td>
+            <td class="mono">v${d.version}</td>
+            <td class="numeric mono">${formatBytes(d.size_bytes)}</td>
+            <td class="mono" style="font-size:11px;color:var(--fg-muted)">${escapeHTML(d.content_hash.slice(0, 12))}…</td>
+            <td>${formatTime(d.created_at)}</td>
+            <td>${escapeHTML(d.description || "—")}</td>
+          </tr>`).join("");
+        main.innerHTML = `
+          <div class="toolbar">
+            <h1 style="margin:0">Datasets</h1>
+            <button id="ds-upload-btn" class="btn-primary">+ Upload dataset</button>
+          </div>
+          <p style="color:var(--fg-muted);margin-top:0;font-size:13px">
+            Versioned, content-addressed. Re-uploading the same bytes under any name reuses the existing physical file. Each version has explicit lineage to its parents — useful for tracking joins, splits, and cleaning steps.
+          </p>
+          ${items.length ? `
+          <div class="card" style="padding:0">
+            <table>
+              <thead><tr><th>Name</th><th>Latest</th><th>Size</th><th>Hash</th><th>Created</th><th>Description</th></tr></thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>` : `
+          <div class="empty card">
+            <p>No datasets yet. Click <strong>+ Upload dataset</strong>, or push from Python:</p>
+            <pre>import requests
+requests.post("${location.origin}/api/v1/datasets/my-dataset/versions",
+              files={"file": open("data.csv", "rb")},
+              data={"meta": '{"description": "first upload"}'})</pre>
+          </div>`}`;
+
+        $("#ds-upload-btn").addEventListener("click", () => this._showDatasetUploadModal());
+        $$("tr[data-ds-name]", main).forEach(tr => {
+          tr.style.cursor = "pointer";
+          tr.addEventListener("click", e => {
+            if (e.target.tagName === "A") return;
+            location.hash = `#/datasets/${encodeURIComponent(tr.dataset.dsName)}`;
+          });
+        });
+      } catch (err) {
+        main.innerHTML = `<div class="empty">Failed to load: ${escapeHTML(String(err))}</div>`;
+      }
+    },
+
+    async renderDatasetDetail(name) {
+      const main = $("#app");
+      main.innerHTML = `<div class="loading">Loading ${escapeHTML(name)}…</div>`;
+      try {
+        const data = await fetchJSON(`/api/v1/datasets/${encodeURIComponent(name)}`);
+        const versions = data.versions || [];
+        if (versions.length === 0) {
+          main.innerHTML = `
+            <div class="crumbs"><a href="#/datasets">Datasets</a> / ${escapeHTML(name)}</div>
+            <div class="empty card">No versions for this dataset (it may have been deleted).</div>`;
+          return;
+        }
+        const latest = versions[0];
+
+        // Lineage of the latest version (newer versions on top of the table).
+        let lineage = null;
+        try {
+          lineage = await fetchJSON(`/api/v1/datasets/${encodeURIComponent(name)}/versions/${latest.version}/lineage`);
+        } catch { /* tolerate */ }
+
+        const rows = versions.map(v => `
+          <tr data-row-index="${v.version}">
+            <td class="mono">v${v.version}</td>
+            <td><span class="status-pill status-${v.lifecycle_stage === "active" ? "FINISHED" : "KILLED"}">${escapeHTML(v.lifecycle_stage)}</span></td>
+            <td class="numeric mono">${formatBytes(v.size_bytes)}</td>
+            <td class="mono" style="font-size:11px;color:var(--fg-muted)" title="${escapeHTML(v.content_hash)}">${escapeHTML(v.content_hash.slice(0, 16))}…</td>
+            <td>${formatTime(v.created_at)}</td>
+            <td>${escapeHTML(v.description || "—")}</td>
+            <td>
+              ${v.size_bytes > 0 ? `<a href="/api/v1/datasets/${encodeURIComponent(name)}/versions/${v.version}/content" download="${escapeHTML(name)}-v${v.version}">Download</a>` : `<span style="color:var(--fg-muted)">no bytes</span>`}
+              ${v.lifecycle_stage === "active" ? ` · <button class="ds-del-btn btn-ghost" data-version="${v.version}" style="font-size:11px;padding:2px 8px">Delete</button>` : ""}
+            </td>
+          </tr>`).join("");
+
+        const ancestors = (lineage && lineage.ancestors) || [];
+        const descendants = (lineage && lineage.descendants) || [];
+        const lineageHTML = (ancestors.length || descendants.length) ? `
+          <h2>Lineage (latest version v${latest.version})</h2>
+          <div class="card" style="padding:14px">
+            ${ancestors.length ? `<div><strong>Ancestors (${ancestors.length})</strong>
+              <ul style="margin:6px 0">
+                ${ancestors.map(a => `<li><a href="#/datasets/${encodeURIComponent(a.name)}">${escapeHTML(a.name)} v${a.version}</a></li>`).join("")}
+              </ul></div>` : ""}
+            ${descendants.length ? `<div style="margin-top:10px"><strong>Descendants (${descendants.length})</strong>
+              <ul style="margin:6px 0">
+                ${descendants.map(d => `<li><a href="#/datasets/${encodeURIComponent(d.name)}">${escapeHTML(d.name)} v${d.version}</a></li>`).join("")}
+              </ul></div>` : ""}
+          </div>` : "";
+
+        main.innerHTML = `
+          <div class="crumbs"><a href="#/datasets">Datasets</a> / ${escapeHTML(name)}</div>
+          <div class="toolbar">
+            <h1 style="margin:0">${escapeHTML(name)}</h1>
+            <span style="color:var(--fg-muted);font-size:13px">${versions.length} version${versions.length === 1 ? "" : "s"}</span>
+            <button id="ds-upload-new-version" class="btn-primary">+ New version</button>
+          </div>
+          <div class="card" style="padding:0;margin-bottom:18px">
+            <table>
+              <thead><tr><th>Version</th><th>Status</th><th>Size</th><th>Hash</th><th>Created</th><th>Description</th><th>Actions</th></tr></thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+          ${lineageHTML}`;
+
+        $("#ds-upload-new-version").addEventListener("click", () => this._showDatasetUploadModal(name));
+        $$(".ds-del-btn", main).forEach(b => b.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          const v = b.dataset.version;
+          if (!confirm(`Soft-delete ${name} v${v}? (Content stays in CAS for offline GC.)`)) return;
+          try {
+            const r = await fetch(`/api/v1/datasets/${encodeURIComponent(name)}/versions/${v}`, { method: "DELETE" });
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            showToast(`Deleted ${name} v${v}`);
+            App.renderDatasetDetail(name);
+          } catch (err) {
+            alert(`Delete failed: ${err}`);
+          }
+        }));
+      } catch (err) {
+        main.innerHTML = `<div class="empty">Failed to load: ${escapeHTML(String(err))}</div>`;
+      }
+    },
+
+    _showDatasetUploadModal(prefillName) {
+      const wrap = document.createElement("div");
+      wrap.className = "modal-backdrop";
+      wrap.innerHTML = `
+        <div class="card modal" style="max-width:520px">
+          <h2 style="margin-top:0">Upload dataset version</h2>
+          <p style="color:var(--fg-muted);font-size:13px;margin-top:0">
+            The server hashes the file as it streams. Identical bytes → one physical file regardless of name.
+          </p>
+          <table class="form-table">
+            <tr>
+              <th><label for="du-name">Name</label></th>
+              <td><input type="text" id="du-name" placeholder="e.g. wikipedia-2024-q1" value="${escapeHTML(prefillName || "")}" ${prefillName ? "readonly" : ""} style="width:100%"/></td>
+            </tr>
+            <tr>
+              <th><label for="du-file">File</label></th>
+              <td><input type="file" id="du-file" style="width:100%"/></td>
+            </tr>
+            <tr>
+              <th><label for="du-desc">Description</label></th>
+              <td><input type="text" id="du-desc" placeholder="optional" style="width:100%"/></td>
+            </tr>
+            <tr>
+              <th><label for="du-schema">Schema</label></th>
+              <td><textarea id="du-schema" rows="3" placeholder='optional JSON, e.g. {"cols":["a","b"]}' style="width:100%;font-family:var(--mono);font-size:12px"></textarea></td>
+            </tr>
+          </table>
+          <div id="du-progress" style="font-size:12px;color:var(--fg-muted);min-height:18px"></div>
+          <div id="du-err" style="color:var(--error);min-height:18px;font-size:13px"></div>
+          <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
+            <button id="du-cancel">Cancel</button>
+            <button id="du-save" class="btn-primary">Upload</button>
+          </div>
+        </div>`;
+      document.body.appendChild(wrap);
+      $("#du-name").focus();
+      const close = () => wrap.remove();
+      wrap.addEventListener("click", e => { if (e.target === wrap) close(); });
+      $("#du-cancel").addEventListener("click", close);
+
+      $("#du-save").addEventListener("click", async () => {
+        const name = $("#du-name").value.trim();
+        const fileInput = $("#du-file");
+        if (!name) { $("#du-err").textContent = "Name required."; return; }
+        if (!fileInput.files[0]) { $("#du-err").textContent = "Pick a file."; return; }
+
+        const meta = {};
+        const desc = $("#du-desc").value.trim();
+        const schema = $("#du-schema").value.trim();
+        if (desc) meta.description = desc;
+        if (schema) meta.schema_json = schema;
+
+        const fd = new FormData();
+        fd.append("file", fileInput.files[0]);
+        fd.append("meta", JSON.stringify(meta));
+
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", `/api/v1/datasets/${encodeURIComponent(name)}/versions`, true);
+        xhr.upload.addEventListener("progress", (e) => {
+          if (e.lengthComputable) {
+            const pct = ((e.loaded / e.total) * 100).toFixed(1);
+            $("#du-progress").textContent = `Uploading… ${pct}% (${formatBytes(e.loaded)} / ${formatBytes(e.total)})`;
+          }
+        });
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try {
+              const r = JSON.parse(xhr.responseText);
+              showToast(`Uploaded ${name} v${r.version} (${formatBytes(r.size_bytes)})`);
+              close();
+              location.hash = `#/datasets/${encodeURIComponent(name)}`;
+              App.renderDatasetDetail(name);
+            } catch {
+              showToast("Uploaded.");
+              close();
+              App.renderDatasetsIndex();
+            }
+          } else {
+            try {
+              const err = JSON.parse(xhr.responseText);
+              $("#du-err").textContent = err.message || `HTTP ${xhr.status}`;
+            } catch {
+              $("#du-err").textContent = `HTTP ${xhr.status}`;
+            }
+          }
+        };
+        xhr.onerror = () => { $("#du-err").textContent = "Network error."; };
+        $("#du-save").disabled = true;
+        xhr.send(fd);
+      });
     },
 
     // ── Dashboards ───────────────────────────────────────────────────────────

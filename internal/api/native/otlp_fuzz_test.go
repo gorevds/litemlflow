@@ -280,6 +280,19 @@ func (s *stubStore) SaveDashboard(_ context.Context, _, _, _ string) (*model.Das
 func (s *stubStore) AnalyticsQuery(_ context.Context, _ store.AnalyticsQuery) (*store.AnalyticsResult, error) {
 	return &store.AnalyticsResult{}, nil
 }
+func (s *stubStore) CreateDatasetVersion(_ context.Context, _ *model.DatasetVersion, _ []int64) (*model.DatasetVersion, error) {
+	return nil, store.ErrNotFound
+}
+func (s *stubStore) ListDatasets(_ context.Context, _ string) ([]*model.DatasetVersion, error) { return nil, nil }
+func (s *stubStore) ListDatasetVersions(_ context.Context, _, _ string) ([]*model.DatasetVersion, error) { return nil, nil }
+func (s *stubStore) GetDatasetVersion(_ context.Context, _, _ string, _ int64) (*model.DatasetVersion, error) {
+	return nil, store.ErrNotFound
+}
+func (s *stubStore) GetDatasetLineage(_ context.Context, _, _ string, _ int64) (*model.DatasetLineage, error) {
+	return nil, store.ErrNotFound
+}
+func (s *stubStore) SoftDeleteDatasetVersion(_ context.Context, _, _ string, _ int64) error { return store.ErrNotFound }
+func (s *stubStore) DatasetHashStillReferenced(_ context.Context, _ string) (bool, error)   { return false, nil }
 
 // --- fuzz setup ---
 

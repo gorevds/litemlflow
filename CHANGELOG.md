@@ -2,6 +2,43 @@
 
 All notable changes to LiteMLflow are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/) starting at v1.0.
 
+## [v1.2.0-rc1] — 2026-05-08
+
+Y2 Q2 release. Theme: **dataset versioning** — first-class versioned, content-addressed datasets with explicit lineage.
+
+### Added
+
+- **Content-addressed dataset store** (`internal/datasets`). Filesystem layout `<root>/<aa>/<bb…>` with 2-char hex shard prefix; atomic `.part`-rename writes; streaming SHA-256. Pure-Go, no CGO.
+- **`datasets_v2` table** (migration 011) — per-(workspace, name, version) row with server-verified `content_hash`, `size_bytes`, optional `schema_json`/`description`, and `lifecycle_stage`. Per-name version sequence is auto-incremented inside a transaction so concurrent uploads of the same name never collide.
+- **`dataset_lineage` edge table** for parent → child relationships. A child can have many parents; edges are validated at write time (parent must be in same workspace, no self-references, no cross-workspace leakage).
+- **REST API**:
+  - `POST /api/v1/datasets/{name}/versions` — multipart upload (`file` + `meta` JSON for description/schema/parents), 5 GiB cap.
+  - `GET /api/v1/datasets` — latest active version per name.
+  - `GET /api/v1/datasets/{name}` — all versions.
+  - `GET /api/v1/datasets/{name}/versions/{v}` — version metadata + parent IDs.
+  - `GET .../{v}/content` — stream the bytes (Content-Disposition + ETag = content-hash).
+  - `GET .../{v}/lineage` — ancestors + descendants (BFS with visited set + 256-depth cap).
+  - `DELETE .../{v}` — soft-delete (CAS bytes stay until offline GC).
+- **UI Datasets page** (`#/datasets`, `#/datasets/{name}`) with version table, lineage view, upload modal with live progress (XMLHttpRequest progress events), and per-row Download / Delete actions.
+- **MLflow compat shim**: `MlflowClient.log_input(...)` now also writes a row into `datasets_v2` inside the same transaction (idempotent on `(workspace, name, content_hash)`), so MLflow-driven dataset references show up on the new Datasets page automatically.
+- **Body-limit middleware exemption** for `POST /api/v1/datasets/.../versions` and the existing MLflow artifact upload route via a new `isLargeUploadPath` allowlist. The dataset handler installs its own `MaxBytesReader` capped at 5 GiB.
+
+### Performance / acceptance
+
+- **Dedup acceptance met**: integration test `TestDatasetDedup` uploads the same bytes under two different names and confirms the CAS root contains exactly **1 physical file** while `datasets_v2` has **2 rows** referencing the same `content_hash`. The 5 GiB scenario in the roadmap is qualitatively the same — limited only by upload time.
+
+### Backfill
+
+- Migration 011 backfills `datasets_v2` from v0.3 `datasets` + `dataset_inputs`: each (name, digest) pair becomes one row; per-name version sequence is computed by `ROW_NUMBER() OVER (PARTITION BY name ORDER BY created_at, digest)`; workspace is inferred from the first run linked to the pair (falls back to `"default"`); `size_bytes=0` for legacy rows because v0.3 didn't track it.
+
+### Cumulative test coverage
+
+- 7 new unit tests on the CAS (dedup, race-safe rename, shard layout, hash validation rejects path-traversal attempts, nil-reader, missing-hash).
+- 7 new HTTP integration tests on the dataset endpoints (upload+get, dedup, versioning, lineage, invalid-parent rejection, soft-delete, list-after-delete).
+- All 12 Go packages green with `-race`.
+
+
+
 ## [v1.1.0-rc1] — 2026-05-08
 
 First Y2 release. Theme: **analytics primitives** — cross-experiment OLAP queries without exporting to a notebook.

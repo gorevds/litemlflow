@@ -554,6 +554,19 @@ func (s *inMemStore) SaveDashboard(_ context.Context, _, _, _ string) (*model.Da
 func (s *inMemStore) AnalyticsQuery(_ context.Context, _ store.AnalyticsQuery) (*store.AnalyticsResult, error) {
 	return &store.AnalyticsResult{}, nil
 }
+func (s *inMemStore) CreateDatasetVersion(_ context.Context, _ *model.DatasetVersion, _ []int64) (*model.DatasetVersion, error) {
+	return nil, store.ErrNotFound
+}
+func (s *inMemStore) ListDatasets(_ context.Context, _ string) ([]*model.DatasetVersion, error) { return nil, nil }
+func (s *inMemStore) ListDatasetVersions(_ context.Context, _, _ string) ([]*model.DatasetVersion, error) { return nil, nil }
+func (s *inMemStore) GetDatasetVersion(_ context.Context, _, _ string, _ int64) (*model.DatasetVersion, error) {
+	return nil, store.ErrNotFound
+}
+func (s *inMemStore) GetDatasetLineage(_ context.Context, _, _ string, _ int64) (*model.DatasetLineage, error) {
+	return nil, store.ErrNotFound
+}
+func (s *inMemStore) SoftDeleteDatasetVersion(_ context.Context, _, _ string, _ int64) error { return store.ErrNotFound }
+func (s *inMemStore) DatasetHashStillReferenced(_ context.Context, _ string) (bool, error)   { return false, nil }
 
 // inMemArtifactStore records uploaded artifacts.
 type inMemArtifactStore struct {

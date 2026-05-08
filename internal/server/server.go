@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/gorevds/litemlflow/internal/artifact"
 	"github.com/gorevds/litemlflow/internal/auth"
 	"github.com/gorevds/litemlflow/internal/config"
+	"github.com/gorevds/litemlflow/internal/datasets"
 	"github.com/gorevds/litemlflow/internal/grpcotlp"
 	"github.com/gorevds/litemlflow/internal/metrics"
 	"github.com/gorevds/litemlflow/internal/store"
@@ -80,7 +82,16 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Server, 
 	// ring buffer captures deliveries to lmf:// URLs for the demo UI.
 	echoLog := webhooks.NewEchoLog(0)
 	dispatcher := webhooks.NewWithOptions(ctx, st, logger, webhooks.Options{Echo: echoLog})
-	router := buildRouter(cfg, logger, st, art, uiFS, dispatcher, echoLog)
+
+	// Datasets v1.2: content-addressed store rooted under <data>/datasets/.
+	// Errors here are fatal — dataset upload paths depend on it.
+	datasetCAS, err := datasets.NewFilesystemCAS(filepath.Join(cfg.DataDir, "datasets"))
+	if err != nil {
+		_ = st.Close()
+		return nil, fmt.Errorf("dataset cas: %w", err)
+	}
+
+	router := buildRouter(cfg, logger, st, art, uiFS, dispatcher, echoLog, datasetCAS)
 
 	httpSrv := &http.Server{
 		Addr:              cfg.Addr,
@@ -160,7 +171,7 @@ func (s *Server) Close() error {
 	return s.store.Close()
 }
 
-func buildRouter(cfg config.Config, logger *slog.Logger, st store.Store, art artifact.Store, uiFS fs.FS, dispatcher *webhooks.Dispatcher, echoLog *webhooks.EchoLog) http.Handler {
+func buildRouter(cfg config.Config, logger *slog.Logger, st store.Store, art artifact.Store, uiFS fs.FS, dispatcher *webhooks.Dispatcher, echoLog *webhooks.EchoLog, datasetCAS datasets.Store) http.Handler {
 	// Build the metrics registry before anything else so we can mount /metrics
 	// BEFORE the auth middleware (Prometheus scrapers don't send credentials).
 	reg := metrics.NewRegistry()
@@ -205,7 +216,7 @@ func buildRouter(cfg config.Config, logger *slog.Logger, st store.Store, art art
 	mlh.Mount(r)
 
 	// AUTH-OIDC: build native handler with full auth wiring.
-	nat := &native.Handler{Store: st, Cfg: cfg, SessionStore: nil, EchoLog: echoLog}
+	nat := &native.Handler{Store: st, Cfg: cfg, SessionStore: nil, EchoLog: echoLog, Datasets: datasetCAS}
 	if sqlSt, ok := st.(*store.SQLiteStore); ok {
 		nat.SessionStore = sqlSt
 	}

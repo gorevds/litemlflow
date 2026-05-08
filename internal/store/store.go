@@ -201,6 +201,18 @@ type Store interface {
 	// Analytics (templated DSL — see analytics.go for the contract).
 	AnalyticsQuery(ctx context.Context, q AnalyticsQuery) (*AnalyticsResult, error)
 
+	// Dataset versioning (v1.2). Datasets are content-addressed +
+	// per-workspace + per-name versioned. The Store is responsible for
+	// row CRUD only; the actual content bytes live in the CAS store
+	// (internal/datasets).
+	CreateDatasetVersion(ctx context.Context, d *model.DatasetVersion, parents []int64) (*model.DatasetVersion, error)
+	ListDatasets(ctx context.Context, workspaceID string) ([]*model.DatasetVersion, error)
+	ListDatasetVersions(ctx context.Context, workspaceID, name string) ([]*model.DatasetVersion, error)
+	GetDatasetVersion(ctx context.Context, workspaceID, name string, version int64) (*model.DatasetVersion, error)
+	GetDatasetLineage(ctx context.Context, workspaceID, name string, version int64) (*model.DatasetLineage, error)
+	SoftDeleteDatasetVersion(ctx context.Context, workspaceID, name string, version int64) error
+	DatasetHashStillReferenced(ctx context.Context, hash string) (bool, error)
+
 	// Workspaces.
 	CreateWorkspace(ctx context.Context, w *model.Workspace) error
 	GetWorkspace(ctx context.Context, id string) (*model.Workspace, error)

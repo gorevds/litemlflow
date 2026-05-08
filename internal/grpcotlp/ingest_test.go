@@ -238,6 +238,19 @@ func (nopStore) SaveDashboard(_ context.Context, _, _, _ string) (*model.Dashboa
 func (nopStore) AnalyticsQuery(_ context.Context, _ store.AnalyticsQuery) (*store.AnalyticsResult, error) {
 	return &store.AnalyticsResult{}, nil
 }
+func (nopStore) CreateDatasetVersion(_ context.Context, _ *model.DatasetVersion, _ []int64) (*model.DatasetVersion, error) {
+	panic("not impl")
+}
+func (nopStore) ListDatasets(_ context.Context, _ string) ([]*model.DatasetVersion, error)              { panic("not impl") }
+func (nopStore) ListDatasetVersions(_ context.Context, _, _ string) ([]*model.DatasetVersion, error)    { panic("not impl") }
+func (nopStore) GetDatasetVersion(_ context.Context, _, _ string, _ int64) (*model.DatasetVersion, error) {
+	panic("not impl")
+}
+func (nopStore) GetDatasetLineage(_ context.Context, _, _ string, _ int64) (*model.DatasetLineage, error) {
+	panic("not impl")
+}
+func (nopStore) SoftDeleteDatasetVersion(_ context.Context, _, _ string, _ int64) error { panic("not impl") }
+func (nopStore) DatasetHashStillReferenced(_ context.Context, _ string) (bool, error)   { panic("not impl") }
 
 // ---- in-memory gRPC server setup -------------------------------------------
 

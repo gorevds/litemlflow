@@ -126,12 +126,40 @@ func recoveryMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 func bodyLimitMiddleware(maxBytes int64) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Dataset uploads (POST /api/v1/datasets/{name}/versions) and
+			// artifact uploads stream gigabytes; the dataset handler installs
+			// its own MaxBytesReader. The MLflow artifact subrouter does the
+			// same. Skip the global limit for those paths.
+			if isLargeUploadPath(r.Method, r.URL.Path) {
+				next.ServeHTTP(w, r)
+				return
+			}
 			if r.Body != nil && maxBytes > 0 {
 				r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 			}
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// isLargeUploadPath returns true for routes that legitimately stream more
+// than the global body cap. The list is small and explicit so a typo in a
+// route can't accidentally lift the cap for everything.
+func isLargeUploadPath(method, path string) bool {
+	if method != http.MethodPost && method != http.MethodPut {
+		return false
+	}
+	// Dataset version upload.
+	if method == http.MethodPost &&
+		strings.HasPrefix(path, "/api/v1/datasets/") &&
+		strings.HasSuffix(path, "/versions") {
+		return true
+	}
+	// MLflow artifact upload (existing behaviour, made explicit).
+	if strings.HasPrefix(path, "/api/2.0/mlflow-artifacts/artifacts") {
+		return true
+	}
+	return false
 }
 
 // SessionLookup is the interface authMiddleware uses to validate session cookies.
