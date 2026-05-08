@@ -567,6 +567,51 @@ func (s *SQLiteStore) SearchRuns(ctx context.Context, opt SearchOptions) (Search
 	return SearchResult[*model.Run]{Items: out, NextPageToken: token}, nil
 }
 
+// SearchRunsByName returns active runs whose name contains query (case-insensitive),
+// scoped to workspace, ordered by start_time DESC, limited to max rows.
+func (s *SQLiteStore) SearchRunsByName(ctx context.Context, workspaceID, query string, max int) ([]*model.Run, error) {
+	if workspaceID == "" {
+		workspaceID = "default"
+	}
+	if max <= 0 {
+		max = 4
+	}
+	if max > 50 {
+		max = 50
+	}
+	pattern := "%" + query + "%"
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT r.id, r.experiment_id, COALESCE(r.name,''), r.status, r.start_time, r.end_time, r.artifact_uri,
+		       r.lifecycle_stage, COALESCE(r.user_id,''), COALESCE(r.source_type,''), COALESCE(r.source_name,''), r.run_kind
+		FROM runs r
+		JOIN experiments e ON e.id = r.experiment_id
+		WHERE e.workspace_id = ?
+		  AND r.lifecycle_stage = 'active'
+		  AND (r.name LIKE ? OR r.id LIKE ?)
+		ORDER BY r.start_time DESC
+		LIMIT ?
+	`, workspaceID, pattern, query+"%", max)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*model.Run
+	for rows.Next() {
+		var r model.Run
+		var endTime sql.NullInt64
+		if err := rows.Scan(&r.ID, &r.ExperimentID, &r.Name, &r.Status, &r.StartTime, &endTime, &r.ArtifactURI,
+			&r.LifecycleStage, &r.UserID, &r.SourceType, &r.SourceName, &r.Kind); err != nil {
+			return nil, err
+		}
+		if endTime.Valid {
+			v := endTime.Int64
+			r.EndTime = &v
+		}
+		out = append(out, &r)
+	}
+	return out, rows.Err()
+}
+
 // translateOrderBy maps MLflow order-by syntax (`attributes.start_time DESC`)
 // to a safe SQL ORDER BY clause built only from a known column whitelist.
 func translateOrderBy(order []string) (string, error) {

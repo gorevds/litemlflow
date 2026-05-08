@@ -629,3 +629,53 @@ button.btn-ghost:hover { background: var(--bg-alt); }
   color: var(--accent);
 }
 .proj-toggle button:hover { background: var(--bg-alt); }
+
+/* ── Toast notification ─────────────────────────────────────────────────────── */
+.lmf-toast {
+  position: fixed;
+  bottom: 80px;
+  left: 50%;
+  transform: translateX(-50%) translateY(12px);
+  background: var(--fg);
+  color: var(--bg);
+  padding: 8px 18px;
+  border-radius: 8px;
+  font-size: 13px;
+  z-index: 9999;
+  opacity: 0;
+  transition: opacity 0.18s, transform 0.18s;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.lmf-toast--show {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+/* ── Columns picker dropdown ────────────────────────────────────────────────── */
+.cols-dropdown {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 100;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.15);
+  min-width: 200px;
+  max-height: 340px;
+  overflow-y: auto;
+  padding: 4px 0 8px;
+}
+.cols-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.cols-item:hover { background: var(--bg-alt); }
+.cols-item input { cursor: pointer; }
+
+/* (diff-row td is defined earlier in the table section) */

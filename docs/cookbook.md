@@ -1150,3 +1150,96 @@ with mlflow.start_run(run_id="abc123..."):
    dependency.
 6. Select multiple runs with checkboxes, then click **Tags** in the bulk bar
    to add, remove, or replace the `lmf.project` tag on all selected runs at once.
+
+---
+
+## 13. Compare runs and find runs across experiments
+
+### Compare runs side-by-side
+
+Log several runs with different hyperparameters:
+
+```python
+import mlflow
+
+mlflow.set_tracking_uri("http://localhost:5000")
+mlflow.set_experiment("optimizer-sweep")
+
+for optimizer in ["adam", "adamw", "sgd"]:
+    with mlflow.start_run(run_name=f"run-{optimizer}"):
+        mlflow.log_param("optimizer", optimizer)
+        mlflow.log_param("lr", 0.01)
+        mlflow.log_metric("val_loss", {"adam": 0.42, "adamw": 0.38, "sgd": 0.51}[optimizer])
+        mlflow.log_metric("val_acc",  {"adam": 0.87, "adamw": 0.91, "sgd": 0.83}[optimizer])
+```
+
+In the UI:
+1. Open the `optimizer-sweep` experiment.
+2. Tick the checkboxes next to the three runs.
+3. Click **Compare** in the floating action bar.
+
+The compare view (`#/experiments/<id>/compare?runs=id1,id2,id3`) shows:
+
+- **Params table** — differing cells highlighted amber. Toggle "Show only differing" to hide identical rows.
+- **Metrics overlay** — one line per run per metric key, colored.
+- **Tags section** — differing tags highlighted.
+- **Run summary** — status, start/end, duration, artifact URI for each run.
+
+For exactly two runs the default mode is **Diff** (shows `optimizer: adam → adamw`). For three or more it defaults to **Side-by-side**. Switch via the Mode buttons at the top.
+
+### Find runs across experiments via global search
+
+Press **⌘K** (or **Ctrl+K**) to open the command palette. Type any of:
+
+- A run name substring — e.g. `"adamw"` → finds runs named `run-adamw`.
+- An experiment name substring — e.g. `"sweep"` → finds `optimizer-sweep`.
+- A run ID prefix (first 8 hex chars).
+- A prompt name substring (from `localStorage.litemlflow.knownPrompts`).
+
+The palette fetches results from `GET /api/v1/search?q=<query>&kind=all`. Results are capped at 10 (4 experiments + 4 runs + 2 prompts) and workspace-scoped to the active workspace selector.
+
+#### API: programmatic cross-experiment run search
+
+```bash
+# Find all runs named *alpha* in the default workspace
+curl "http://localhost:5000/api/v1/search?q=alpha&kind=runs"
+```
+
+```json
+{
+  "query": "alpha",
+  "items": [
+    {
+      "kind": "run",
+      "id": "a1b2c3d4e5f6...",
+      "name": "training-run-alpha",
+      "subtitle": "exp 3",
+      "status": "FINISHED",
+      "url": "#/experiments/3/runs/a1b2c3d4e5f6...",
+      "experiment_id": "3"
+    }
+  ]
+}
+```
+
+For workspace-scoped searches pass the `X-Workspace` header:
+
+```bash
+curl -H "X-Workspace: team-ml" "http://localhost:5000/api/v1/search?q=sweep&kind=experiments"
+```
+
+### Custom columns on the runs table
+
+Click the **Columns** button (top-right of the runs table) to toggle which columns are visible:
+
+- Default (always on): Name, Status, Started, Duration.
+- Optional: ID prefix, End time.
+- Per-experiment: any param or metric key from that experiment's runs.
+
+Column selections are persisted per-experiment in `localStorage.litemlflow.columns.<expID>` and survive page reloads.
+
+### Share a run or experiment
+
+Click the **🔗 Share** button on any experiment or run detail page. The current URL (including hash fragment with run ID or compare parameters) is copied to the clipboard and a "Link copied" toast appears.
+
+Share links for authenticated instances work as long as the recipient has access. Token-based read-only share links (for basic-auth instances) are planned for v1.1.
