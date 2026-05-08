@@ -556,10 +556,9 @@ func (h *Handler) SearchRuns(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		// Filter parse failures are client errors, not 500s. Caught by
-		// TestMlflowSearchRuns_BadFilter.
-		if strings.Contains(err.Error(), "unable to parse predicate") ||
-			strings.Contains(err.Error(), "invalid order by") ||
-			strings.Contains(err.Error(), "invalid filter") {
+		// TestMlflowSearchRuns_BadFilter; routed via the store-side
+		// ErrInvalidFilter sentinel rather than fragile message matching.
+		if errors.Is(err, store.ErrInvalidFilter) {
 			writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", err.Error())
 			return
 		}
@@ -1084,8 +1083,11 @@ func deprecated(next http.HandlerFunc, removeAt string) http.HandlerFunc {
 		// Sunset is the RFC 7231 IMF-fixdate when the endpoint will be
 		// removed. We don't have a hard date for v2.0 yet; per RFC 8594
 		// it's optional. We omit Sunset and use a free-form Link header.
+		// Absolute URL — `/docs/...` was relative-to-host but the server
+		// doesn't serve `/docs/*`, so clients following the pointer used
+		// to get 404. (Caught by the T1-T4 final review.)
 		w.Header().Set("Link",
-			`</docs/upgrade-to-v2.md>; rel="deprecation"; type="text/markdown"`)
+			`<https://github.com/gorevds/litemlflow/blob/master/docs/upgrade-to-v2.md>; rel="deprecation"; type="text/markdown"`)
 		w.Header().Set("X-LiteMLflow-Removed-At", removeAt)
 		next.ServeHTTP(w, r)
 	}

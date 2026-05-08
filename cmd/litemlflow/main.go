@@ -186,6 +186,16 @@ func runUp(args []string) error {
 			slog.String("scheduled_removal", "v2.0"),
 		)
 	}
+	// Surface the v0.3-to-v2 mirror opt-out so operators are reminded that
+	// new MLflow log_input rows will not flow into the v1.2 datasets UI.
+	if os.Getenv("LITEMLFLOW_DISABLE_V03_TO_V2_MIRROR") == "1" ||
+		os.Getenv("LITEMLFLOW_DISABLE_DATASETS_V03_MIRROR") == "1" {
+		logger.Warn(
+			"v0.3 → v1.2 datasets mirror is DISABLED. " +
+				"MLflow log_input will not appear in the new Datasets UI. " +
+				"Unset to re-enable. See docs/upgrade-to-v2.md#t417.",
+		)
+	}
 	srv, err := server.New(context.Background(), cfg, logger)
 	if err != nil {
 		return err

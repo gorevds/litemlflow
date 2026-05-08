@@ -181,7 +181,7 @@ func (h *Handler) CreateWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Name == "" || req.URL == "" || req.Events == "" {
-		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "name, url, and events are required")
+		writeMissingField(w, "name+url+events")
 		return
 	}
 	if err := validateWebhookURL(req.URL); err != nil {

@@ -853,7 +853,7 @@ func parseRunPredicate(c string) (string, []any, error) {
 			return scol + " " + realOp + " ?", []any{right}, nil
 		}
 	}
-	return "", nil, fmt.Errorf("unable to parse predicate %q", c)
+	return "", nil, fmt.Errorf("%w: unable to parse predicate %q", ErrInvalidFilter, c)
 }
 
 // tryParseIN handles "left IN ('a','b','c')" predicates.
@@ -1717,10 +1717,21 @@ func (s *SQLiteStore) LogInputs(ctx context.Context, runID string, inputs []mode
 }
 
 // datasetsV03MirrorDisabled reports whether the operator opted out of the
-// v0.3 → v1.2 datasets mirror via env. T4.17 escape hatch.
+// v0.3 → v1.2 datasets forward-fill mirror via env. T4.17 escape hatch.
+//
+// Env var name was renamed in the T1-T4 final review pass: the original
+// LITEMLFLOW_DISABLE_DATASETS_V03_MIRROR read as "disable v0.3" but
+// actually disables the *forward-fill of v0.3 log_input → datasets_v2*.
+// The legacy name is honoured for one minor for backwards compat.
 func datasetsV03MirrorDisabled() bool {
-	v := os.Getenv("LITEMLFLOW_DISABLE_DATASETS_V03_MIRROR")
-	return v == "1" || v == "true"
+	if v := os.Getenv("LITEMLFLOW_DISABLE_V03_TO_V2_MIRROR"); v == "1" || v == "true" {
+		return true
+	}
+	// Deprecated alias.
+	if v := os.Getenv("LITEMLFLOW_DISABLE_DATASETS_V03_MIRROR"); v == "1" || v == "true" {
+		return true
+	}
+	return false
 }
 
 // mirrorIntoDatasetsV2 inserts a row into datasets_v2 if one with the same

@@ -570,12 +570,15 @@
   // page. Front-end falls back to "all flags off" if /version hasn't
   // resolved yet — UI degrades gracefully instead of blocking on a fetch.
   const Features = {
-    _cache: { multi_tenant: false },
+    _cache: { multi_tenant: false, _version: "dev" },
     async init() {
       try {
         const data = await fetch("/version").then(r => r.json());
         if (data && typeof data.features === "object") {
           Object.assign(this._cache, data.features);
+        }
+        if (data && typeof data.version === "string") {
+          this._cache._version = data.version;
         }
       } catch {}
     },
@@ -883,19 +886,18 @@
         }
       });
 
-      // Version pill — also pulls feature flags (T4.22 multi_tenant).
-      fetch("/version").then(r => r.json()).then(v => {
-        $("#version").textContent = v.version || "dev";
-        if (v && typeof v.features === "object") {
-          Object.assign(Features._cache, v.features);
-          // Re-evaluate workspace nav visibility now that flags are known.
-          const wsLink = $('header nav a[href="#/workspaces"]');
-          if (wsLink && !Features.multiTenant()) wsLink.style.display = "none";
-        }
+      // T4.22 final-review fix: feature flags must resolve BEFORE the
+      // workspace selector queries them — otherwise --enable-multi-tenant
+      // never lights up on first paint. Single fetch, both consumers.
+      Features.init().then(() => {
+        $("#version").textContent = (Features._cache._version) || "dev";
+        // Re-evaluate workspace nav visibility now that flags are known.
+        const wsLink = $('header nav a[href="#/workspaces"]');
+        if (wsLink && !Features.multiTenant()) wsLink.style.display = "none";
+        // Workspace selector is gated on multi_tenant; init AFTER the
+        // flags have resolved so the gate sees the real value.
+        WorkspaceSelector.init();
       });
-
-      // Workspace selector (gated on multi_tenant feature inside init).
-      WorkspaceSelector.init();
 
       // Keyboard shortcuts
       Shortcuts.init();

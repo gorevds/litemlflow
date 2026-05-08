@@ -1,13 +1,14 @@
 package mlflow
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
-	"strings"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/gorevds/litemlflow/internal/model"
+	"github.com/gorevds/litemlflow/internal/store"
 )
 
 // mountRegistry wires all Model Registry endpoints onto r.
@@ -604,11 +605,10 @@ func (h *Handler) TransitionModelStage(w http.ResponseWriter, r *http.Request) {
 	}
 	mv, err := h.Store.TransitionModelStage(r.Context(), req.Name, ver, req.Stage, req.ArchiveExistingVersions)
 	if err != nil {
-		// "invalid stage" is a client-side validation error, not a store
-		// failure; surface it as 400 INVALID_PARAMETER_VALUE rather than
-		// the catch-all 500 INTERNAL_ERROR. Caught by
+		// Validation errors map to 400; sentinel-typed (store.ErrInvalidStage)
+		// rather than message-matched. Caught by
 		// TestMlflowTransitionModelVersion_BadStage.
-		if strings.Contains(err.Error(), "invalid stage") {
+		if errors.Is(err, store.ErrInvalidStage) {
 			writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", err.Error())
 			return
 		}

@@ -19,6 +19,12 @@ var (
 	ErrNotFound      = errors.New("not found")
 	ErrAlreadyExists = errors.New("already exists")
 	ErrConflict      = errors.New("conflict")
+
+	// Validation sentinels — surfaced as 400 INVALID_PARAMETER_VALUE by
+	// the HTTP handlers via errors.Is. Replaces the brittle
+	// strings.Contains(err.Error(), "...") guards introduced in T2.5.
+	ErrInvalidFilter = errors.New("invalid filter")
+	ErrInvalidStage  = errors.New("invalid stage")
 )
 
 // SearchOptions controls listing endpoints.

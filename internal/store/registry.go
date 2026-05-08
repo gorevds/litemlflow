@@ -648,7 +648,7 @@ func parseModelVersionFilter(f string) (string, []any, error) {
 // If archiveExisting is true, existing Production versions are moved to Archived.
 func (s *SQLiteStore) TransitionModelStage(ctx context.Context, name string, version int64, stage string, archiveExisting bool) (*model.ModelVersion, error) {
 	if !model.ValidStage(stage) {
-		return nil, fmt.Errorf("invalid stage %q: must be one of None, Staging, Production, Archived", stage)
+		return nil, fmt.Errorf("%w: %q must be one of None, Staging, Production, Archived", ErrInvalidStage, stage)
 	}
 	now := time.Now().UnixMilli()
 
