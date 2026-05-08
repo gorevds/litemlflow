@@ -28,7 +28,7 @@ Default deployment assumes a trusted network. Exposing to the open internet is s
 ## Threats (STRIDE)
 
 ### Spoofing
-- **Forged user identity**: mitigated by OIDC (verified ID tokens with signature check) or basic auth + TLS.
+- **Forged user identity**: mitigated by OIDC (verified ID tokens with signature check) or basic auth + TLS. The `verifyIDToken` function is continuously exercised by fuzz tests (`FuzzVerifyIDToken`, `FuzzVerifyIDToken_SignatureCorruption`) that verify no malformed token can cause a panic or a false-positive verification.
 - **Forged plugin identity**: plugins authenticate via UNIX socket + capability handshake. Plugins cannot listen on TCP.
 
 ### Tampering
@@ -48,10 +48,11 @@ Default deployment assumes a trusted network. Exposing to the open internet is s
 - **Large request bodies**: max body size enforced (default 100 MB for non-artifact, 5 GB for artifact upload — configurable).
 - **Slow-loris**: read/write/idle timeouts set to 30s/30s/120s on the HTTP server.
 - **Metric flood**: `log-batch` is capped at 1000 metrics + 100 params + 100 tags per call (matching MLflow).
+- **Malformed OTLP/JSON**: the `IngestOTLP` and `IngestTraces` handlers are fuzz-tested with oversized arrays, deeply nested structures, wrong field types, and extreme timestamp values to ensure no panic or hang occurs.
 
 ### Elevation of privilege
 - **Arbitrary file read via artifact path**: same path-traversal mitigation as above.
-- **SQL injection**: every query uses parameter binding; no string concatenation.
+- **SQL injection**: every query uses parameter binding; no string concatenation. The filter/predicate parsers (`parseRunFilter`, `parseRunPredicate`, `parseExperimentFilter`) are continuously exercised by Go native fuzz tests (`FuzzParseRunPredicate`, `FuzzParseRunFilter`, `FuzzParseExperimentFilter`) that assert the generated SQL never contains a bare single-quote character outside `?` placeholders — see `docs/contributing-fuzz.md`.
 - **Plugin escape**: plugins are subprocesses with restricted capabilities and no access to the SQLite file directly.
 
 ## What is *not* protected by v0.1

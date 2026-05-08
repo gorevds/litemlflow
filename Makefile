@@ -9,7 +9,7 @@ LDFLAGS    := -X github.com/litemlflow/litemlflow/pkg/version.Version=$(shell gi
               -X github.com/litemlflow/litemlflow/pkg/version.Commit=$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown) \
               -X github.com/litemlflow/litemlflow/pkg/version.Date=$(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
-.PHONY: help build run dev test test-go test-py test-integration lint fmt vet clean docker compat-test py-install py-build dist-helm-lint dist-helm-template dist-deb dist-rpm
+.PHONY: help build run dev test test-go test-py test-integration lint fmt vet clean docker compat-test py-install py-build dist-helm-lint dist-helm-template dist-deb dist-rpm fuzz-short test-chaos mutation
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -81,6 +81,24 @@ dist-deb: build ## Build a .deb package from the local binary (requires dpkg-bui
 	@rm -f litemlflow
 	@rm -rf debian
 	@echo "Done — .deb is in the parent directory."
+
+fuzz-short: ## Run each fuzz target for 20s (CI smoke run — seed corpus + brief fuzzing)
+	$(GO) test -fuzz='^FuzzParseRunPredicate$$'     -fuzztime=20s ./internal/store/
+	$(GO) test -fuzz='^FuzzParseRunFilter$$'        -fuzztime=20s ./internal/store/
+	$(GO) test -fuzz='^FuzzParseExperimentFilter$$' -fuzztime=20s ./internal/store/
+	$(GO) test -fuzz='^FuzzSplitOnAnd$$'            -fuzztime=20s ./internal/store/
+	$(GO) test -fuzz='^FuzzVerifyIDToken$$'         -fuzztime=20s ./internal/auth/
+	$(GO) test -fuzz='^FuzzVerifyIDToken_SignatureCorruption$$' -fuzztime=20s ./internal/auth/
+	$(GO) test -fuzz='^FuzzIngestOTLP$$'            -fuzztime=20s ./internal/api/native/
+	$(GO) test -fuzz='^FuzzIngestTraces$$'          -fuzztime=20s ./internal/api/native/
+
+test-chaos: ## Run chaos tests (requires Linux; some scenarios need CAP_SYS_ADMIN)
+	$(GO) test -v -count=1 -tags=chaos -timeout=5m ./internal/store/ -run TestChaos
+
+mutation: ## Run gremlins mutation testing on internal/store and internal/auth (70% threshold)
+	@command -v gremlins >/dev/null 2>&1 || (echo "gremlins not found; run: go install github.com/go-gremlins/gremlins/cmd/gremlins@latest"; exit 1)
+	gremlins unleash --threshold-efficacy 70 ./internal/store/...
+	gremlins unleash --threshold-efficacy 70 ./internal/auth/...
 
 dist-rpm: build ## Build an .rpm package from the local binary (requires rpmbuild)
 	@mkdir -p ~/rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
