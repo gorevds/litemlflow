@@ -29,6 +29,16 @@ type Config struct {
 	BasicUser     string
 	BasicPassHash string
 
+	// AUTH-OIDC: OIDC provider settings (all required when Auth=="oidc").
+	OIDCIssuer       string // e.g. "https://accounts.google.com"
+	OIDCClientID     string
+	OIDCClientSecret string // empty for public clients (PKCE-only)
+	OIDCRedirectURL  string // e.g. "https://my-host/api/v1/auth/oidc/callback"
+	OIDCScopes       string // space-separated; default "openid email profile"
+
+	// SessionTTL is the lifetime of session cookies (default 7 days).
+	SessionTTL time.Duration
+
 	// MaxArtifactSize bounds artifact uploads (default 5 GiB).
 	MaxArtifactSize int64
 	// MaxRequestSize bounds non-artifact requests (default 100 MiB).
@@ -60,6 +70,8 @@ func defaults() Config {
 	return Config{
 		Addr:            ":5000",
 		Auth:            "none",
+		OIDCScopes:      "openid email profile",
+		SessionTTL:      7 * 24 * time.Hour,
 		MaxArtifactSize: 5 << 30,
 		MaxRequestSize:  100 << 20,
 		ReadTimeout:     30 * time.Second,
@@ -89,6 +101,27 @@ func overlayFromEnv(c Config) Config {
 			c.MaxArtifactSize = n
 		}
 	}
+	// AUTH-OIDC: OIDC env vars
+	if v := os.Getenv("LITEMLFLOW_OIDC_ISSUER"); v != "" {
+		c.OIDCIssuer = v
+	}
+	if v := os.Getenv("LITEMLFLOW_OIDC_CLIENT_ID"); v != "" {
+		c.OIDCClientID = v
+	}
+	if v := os.Getenv("LITEMLFLOW_OIDC_CLIENT_SECRET"); v != "" {
+		c.OIDCClientSecret = v
+	}
+	if v := os.Getenv("LITEMLFLOW_OIDC_REDIRECT_URL"); v != "" {
+		c.OIDCRedirectURL = v
+	}
+	if v := os.Getenv("LITEMLFLOW_OIDC_SCOPES"); v != "" {
+		c.OIDCScopes = v
+	}
+	if v := os.Getenv("LITEMLFLOW_SESSION_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			c.SessionTTL = d
+		}
+	}
 	if v := os.Getenv("LITEMLFLOW_DEV"); v == "1" {
 		c.DevMode = true
 	}
@@ -116,6 +149,25 @@ func overlay(base, explicit Config) Config {
 	}
 	if explicit.BasicPassHash != "" {
 		base.BasicPassHash = explicit.BasicPassHash
+	}
+	// AUTH-OIDC: overlay OIDC fields
+	if explicit.OIDCIssuer != "" {
+		base.OIDCIssuer = explicit.OIDCIssuer
+	}
+	if explicit.OIDCClientID != "" {
+		base.OIDCClientID = explicit.OIDCClientID
+	}
+	if explicit.OIDCClientSecret != "" {
+		base.OIDCClientSecret = explicit.OIDCClientSecret
+	}
+	if explicit.OIDCRedirectURL != "" {
+		base.OIDCRedirectURL = explicit.OIDCRedirectURL
+	}
+	if explicit.OIDCScopes != "" {
+		base.OIDCScopes = explicit.OIDCScopes
+	}
+	if explicit.SessionTTL != 0 {
+		base.SessionTTL = explicit.SessionTTL
 	}
 	if explicit.MaxArtifactSize != 0 {
 		base.MaxArtifactSize = explicit.MaxArtifactSize
@@ -150,6 +202,10 @@ func (c *Config) Validate() error {
 	}
 	if c.Auth == "basic" && (c.BasicUser == "" || c.BasicPassHash == "") {
 		return errors.New("basic auth requires user and pass-hash to be set")
+	}
+	// AUTH-OIDC: oidc mode requires issuer and client_id at minimum.
+	if c.Auth == "oidc" && (c.OIDCIssuer == "" || c.OIDCClientID == "") {
+		return errors.New("oidc auth requires oidc-issuer and oidc-client-id to be set")
 	}
 	return nil
 }

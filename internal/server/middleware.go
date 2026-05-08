@@ -10,7 +10,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/litemlflow/litemlflow/internal/auth"
 	"github.com/litemlflow/litemlflow/internal/config"
+	"github.com/litemlflow/litemlflow/internal/model"
 )
 
 type ctxKey int
@@ -18,6 +20,8 @@ type ctxKey int
 const (
 	ctxKeyRequestID ctxKey = iota
 	ctxKeyUser
+	// AUTH-OIDC: session carried in context so handlers can access it.
+	ctxKeySession
 )
 
 // requestIDMiddleware attaches a short request id to context and response.
@@ -120,25 +124,64 @@ func bodyLimitMiddleware(maxBytes int64) func(http.Handler) http.Handler {
 	}
 }
 
-// authMiddleware enforces config.Auth. "none" is a no-op; "basic" requires
-// HTTP basic auth with the configured user/pass; "oidc" returns 501 in v0.1
-// (placeholder; full OIDC lands in v0.2).
-func authMiddleware(cfg config.Config) func(http.Handler) http.Handler {
+// SessionLookup is the interface authMiddleware uses to validate session cookies.
+// AUTH-OIDC: defined here so server.go can wire *store.SQLiteStore without a
+// full import of the native package's SessionStore alias.
+type SessionLookup interface {
+	GetSession(ctx context.Context, id string) (*model.Session, error)
+	TouchSession(ctx context.Context, id string, lastSeen int64) error
+}
+
+// authMiddleware enforces config.Auth.
+//
+// AUTH-OIDC: Session cookie support has been added. Regardless of cfg.Auth,
+// a valid session cookie is always accepted — this lets users who logged in via
+// basic auth continue using their session without re-sending credentials on
+// every request. Auth order:
+//
+//  1. Strip inbound X-LiteMLflow-User (anti-smuggling).
+//  2. If a valid session cookie is present, use the session identity.
+//  3. Else if cfg.Auth=="basic", require HTTP Basic credentials.
+//  4. Else if cfg.Auth=="oidc" and the request accepts HTML, redirect to IdP start.
+//  5. Else if cfg.Auth=="none", user = "anonymous".
+func authMiddlewareWithSessions(cfg config.Config, sessions SessionLookup) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Always strip the user-identity header from inbound requests
-			// so a client cannot smuggle it past auth.
+			// 1. Strip identity header so clients cannot smuggle it.
 			r.Header.Del("X-LiteMLflow-User")
-			// Always allow operational endpoints.
+			r.Header.Del("X-LiteMLflow-Auth-Method")
+
+			// Public paths bypass auth entirely.
 			if isPublicPath(r.URL.Path) {
 				next.ServeHTTP(w, r)
 				return
 			}
+
+			// 2. Session cookie — accepted regardless of cfg.Auth mode.
+			if sessions != nil {
+				if sessID, err := auth.GetSessionID(r); err == nil {
+					if sess, err := sessions.GetSession(r.Context(), sessID); err == nil {
+						// Touch last_seen asynchronously; ignore errors.
+						go func() {
+							_ = sessions.TouchSession(context.Background(), sessID, time.Now().UnixMilli())
+						}()
+						ctx := context.WithValue(r.Context(), ctxKeyUser, sess.UserID)
+						ctx = context.WithValue(ctx, ctxKeySession, sess)
+						r.Header.Set("X-LiteMLflow-User", sess.UserID)
+						r.Header.Set("X-LiteMLflow-Auth-Method", sess.AuthMethod)
+						next.ServeHTTP(w, r.WithContext(ctx))
+						return
+					}
+				}
+			}
+
+			// 3-5. No valid session; fall back to cfg.Auth mode.
 			switch cfg.Auth {
 			case "none":
 				ctx := context.WithValue(r.Context(), ctxKeyUser, "anonymous")
 				r.Header.Set("X-LiteMLflow-User", "anonymous")
 				next.ServeHTTP(w, r.WithContext(ctx))
+
 			case "basic":
 				user, pass, ok := r.BasicAuth()
 				if !ok {
@@ -152,14 +195,30 @@ func authMiddleware(cfg config.Config) func(http.Handler) http.Handler {
 				}
 				ctx := context.WithValue(r.Context(), ctxKeyUser, user)
 				r.Header.Set("X-LiteMLflow-User", user)
+				r.Header.Set("X-LiteMLflow-Auth-Method", "basic")
 				next.ServeHTTP(w, r.WithContext(ctx))
+
 			case "oidc":
-				writeError(w, http.StatusNotImplemented, CodeNotImplemented, "OIDC is planned for v0.2")
+				// If the client accepts HTML (browser), redirect to OIDC start.
+				// Otherwise return 401 so API clients get a machine-readable error.
+				if strings.Contains(r.Header.Get("Accept"), "text/html") {
+					http.Redirect(w, r, "/api/v1/auth/oidc/start?return_to="+r.URL.RequestURI(), http.StatusFound)
+					return
+				}
+				writeError(w, http.StatusUnauthorized, CodeUnauthenticated, "OIDC authentication required; visit /api/v1/auth/oidc/start")
+
 			default:
 				writeError(w, http.StatusInternalServerError, CodeInternalError, "unknown auth mode")
 			}
 		})
 	}
+}
+
+// authMiddleware is the original single-argument version for callers that don't
+// have a session store (tests, etc.). It delegates to authMiddlewareWithSessions
+// with a nil store, which skips cookie checks.
+func authMiddleware(cfg config.Config) func(http.Handler) http.Handler {
+	return authMiddlewareWithSessions(cfg, nil)
 }
 
 func isPublicPath(p string) bool {
@@ -168,6 +227,14 @@ func isPublicPath(p string) bool {
 		return true
 	}
 	if strings.HasPrefix(p, "/ui/") || p == "/ui" || p == "/" {
+		return true
+	}
+	// AUTH-OIDC: the login, logout, and OIDC redirect endpoints are public
+	// because they are the entry points for unauthenticated users. Whoami is
+	// NOT public — it reports the resolved identity, so the middleware must run.
+	switch p {
+	case "/api/v1/auth/login", "/api/v1/auth/logout",
+		"/api/v1/auth/oidc/start", "/api/v1/auth/oidc/callback":
 		return true
 	}
 	return false

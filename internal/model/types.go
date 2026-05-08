@@ -186,6 +186,19 @@ func NewSpanID() string {
 	return hex.EncodeToString(b)
 }
 
+// Session represents an authenticated session stored in the DB.
+// The ID is a 32-byte random hex string used as the cookie value.
+type Session struct {
+	ID         string `json:"id"`
+	UserID     string `json:"user_id"`
+	UserEmail  string `json:"user_email,omitempty"`
+	UserName   string `json:"user_name,omitempty"`
+	AuthMethod string `json:"auth_method"` // "basic" | "oidc"
+	CreatedAt  int64  `json:"created_at"`  // unix ms
+	ExpiresAt  int64  `json:"expires_at"`  // unix ms
+	LastSeen   int64  `json:"last_seen"`   // unix ms
+}
+
 // NewTraceID returns a 32-hex trace id.
 func NewTraceID() string {
 	b := make([]byte, 16)
