@@ -152,6 +152,12 @@ type Store interface {
 	SetModelVersionTag(ctx context.Context, name string, version int64, key, value string) error
 	DeleteModelVersionTag(ctx context.Context, name string, version int64, key string) error
 
+	// Cross-experiment search (native /api/v1/search endpoint).
+	// SearchRunsByName returns runs whose name LIKE %query% within the given
+	// workspace, ordered by start_time DESC, limited to max results.
+	// workspaceID="" falls back to "default".
+	SearchRunsByName(ctx context.Context, workspaceID, query string, max int) ([]*model.Run, error)
+
 	// Workspaces.
 	CreateWorkspace(ctx context.Context, w *model.Workspace) error
 	GetWorkspace(ctx context.Context, id string) (*model.Workspace, error)

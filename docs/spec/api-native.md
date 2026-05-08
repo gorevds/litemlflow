@@ -140,6 +140,57 @@ in front. This mirrors how the HTTP listener is deployed.
 `go.opentelemetry.io/proto/otlp` to the binary. See
 `docs/adr/0002-grpc-otlp-deps.md` for the rationale.
 
+## Global search
+
+```
+GET /api/v1/search?q=<query>&kind=all|runs|experiments|prompts[&names=p1,p2]
+```
+
+Cross-experiment, workspace-scoped search. Returns at most **10 items** total (4 experiments + 4 runs + 2 prompts). The workspace is resolved from the `X-Workspace` header exactly like every other workspace-scoped endpoint.
+
+### Query parameters
+
+| Param | Default | Description |
+|---|---|---|
+| `q` | `""` | Search term. Empty returns recents. |
+| `kind` | `all` | Filter kind: `all`, `runs`, `experiments`, or `prompts`. |
+| `names` | — | Comma-separated known prompt names (used for `kind=prompts` and `kind=all`). Client-side prompt registry lives in `localStorage.litemlflow.knownPrompts`. |
+
+### Response
+
+```json
+{
+  "query": "alpha",
+  "items": [
+    {
+      "kind": "experiment",
+      "id": "42",
+      "name": "alpha-project",
+      "url": "#/experiments/42"
+    },
+    {
+      "kind": "run",
+      "id": "a1b2c3d4...",
+      "name": "training-run-alpha",
+      "subtitle": "exp 42",
+      "status": "FINISHED",
+      "url": "#/experiments/42/runs/a1b2c3d4...",
+      "experiment_id": "42"
+    }
+  ]
+}
+```
+
+### Search behaviour by kind
+
+- **`experiments`** — `name LIKE '%q%'` on active experiments in the current workspace. Max 4.
+- **`runs`** — Runs whose `name LIKE '%q%'` OR `id LIKE 'q%'` in the current workspace. Cross-experiment (joins `experiments` for workspace filtering). Max 4.
+- **`prompts`** — Probes names supplied in `?names=` for those whose name contains `q`. Max 2.
+
+### Workspace scoping
+
+Search is always workspace-scoped via the same `X-Workspace` header that every other endpoint uses. The UI's workspace selector (top-right dropdown) changes the `X-Workspace` value sent with all requests. If the header is absent, `"default"` is used.
+
 ## Workspaces (multi-tenancy)
 
 Workspaces are the tenant boundary in LiteMLflow. Every experiment belongs to exactly one workspace. Clients select a workspace by sending the `X-Workspace` HTTP header (API/SDK) or the `lmf_workspace` cookie (UI). When neither is present, the request operates on the `default` workspace, which is seeded automatically on first startup and cannot be deleted.

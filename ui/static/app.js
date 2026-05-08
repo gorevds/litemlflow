@@ -118,6 +118,50 @@
     };
   }
 
+  // ─── Toast notification ───────────────────────────────────────────────────────
+  function showToast(msg, durationMs) {
+    durationMs = durationMs || 2200;
+    let el = document.createElement("div");
+    el.className = "lmf-toast";
+    el.textContent = msg;
+    document.body.appendChild(el);
+    // Force reflow so the transition fires.
+    el.getBoundingClientRect();
+    el.classList.add("lmf-toast--show");
+    setTimeout(() => {
+      el.classList.remove("lmf-toast--show");
+      setTimeout(() => el.remove(), 300);
+    }, durationMs);
+  }
+
+  // ─── Column picker state ─────────────────────────────────────────────────────
+  const ColumnPicker = {
+    _default: ["name", "status", "started", "duration"],
+    _optional: ["id", "end_time"],
+
+    _key(expID) { return `litemlflow.columns.${expID}`; },
+
+    load(expID, extras) {
+      // extras = [{id: "metric.loss", label: "loss", kind: "metric"}, ...]
+      let saved;
+      try { saved = JSON.parse(localStorage.getItem(this._key(expID))); } catch {}
+      if (!Array.isArray(saved)) {
+        saved = [...this._default, ...this._optional];
+      }
+      const all = [
+        ...this._default.map(id => ({ id, label: id, kind: "default", locked: true })),
+        ...this._optional.map(id => ({ id, label: id.replace("_", " "), kind: "optional" })),
+        ...(extras || []),
+      ];
+      return all.map(c => ({ ...c, enabled: saved.includes(c.id) || c.locked }));
+    },
+
+    save(expID, cols) {
+      const enabled = cols.filter(c => c.enabled).map(c => c.id);
+      localStorage.setItem(this._key(expID), JSON.stringify(enabled));
+    },
+  };
+
   // ─── Chart ───────────────────────────────────────────────────────────────────
   function simpleChart(key, points, downsampledFrom) {
     if (!points.length) return "";
@@ -362,19 +406,36 @@
       let items = [...this._staticCmds];
 
       if (query) {
-        // Dynamic: search experiments by name
         try {
-          const data = await fetchJSON("/api/2.0/mlflow/experiments/search?max_results=1000");
-          const exps = (data.experiments || []).filter(e => e.lifecycle_stage === "active");
-          const ql = query.toLowerCase();
-          const matched = exps
-            .filter(e => e.name.toLowerCase().includes(ql) || e.experiment_id.startsWith(ql))
-            .slice(0, 5)
-            .map(e => ({
-              label: `Search: ${e.name}`,
-              action: () => { location.hash = `#/experiments/${e.experiment_id}`; },
-            }));
-          items = [...matched, ...items];
+          // Use the new /api/v1/search endpoint for cross-entity search
+          const qs = new URLSearchParams({ q: query, kind: "all" });
+          // Also pass known prompts so the server can filter them
+          let knownPrompts = [];
+          try { knownPrompts = JSON.parse(localStorage.getItem("litemlflow.knownPrompts")) || []; } catch {}
+          if (knownPrompts.length) qs.set("names", knownPrompts.slice(0, 20).join(","));
+          const data = await fetchJSON(`/api/v1/search?${qs}`);
+          const hits = (data.items || []).map(item => {
+            if (item.kind === "experiment") {
+              return {
+                label: `Experiment: ${item.name}`,
+                action: () => { location.hash = item.url || `#/experiments/${item.id}`; },
+              };
+            }
+            if (item.kind === "run") {
+              return {
+                label: `Run: ${item.name || item.id.slice(0, 8)} (${item.subtitle || ""})`,
+                action: () => { location.hash = item.url; },
+              };
+            }
+            if (item.kind === "prompt") {
+              return {
+                label: `Prompt: ${item.name}`,
+                action: () => { location.hash = item.url; },
+              };
+            }
+            return null;
+          }).filter(Boolean);
+          items = [...hits, ...items];
         } catch {}
       }
 
@@ -649,7 +710,7 @@ mlflow.log_metric("loss", 0.42)</pre>
       }
     },
 
-    // ── Experiment detail (runs table + bulk select) ──────────────────────────
+    // ── Experiment detail (runs table + bulk select + columns picker + share) ──
     async renderExperiment(expID) {
       const main = $("#app");
       BulkSelect.reset(expID);
@@ -664,25 +725,70 @@ mlflow.log_metric("loss", 0.42)</pre>
         const e = exp.experiment;
         const runs = runsRes.runs || [];
 
-        const rows = runs.map((r, i) => {
+        // Collect all param and metric keys from runs for the column picker
+        const paramKeys = [...new Set(runs.flatMap(r => (r.data.params || []).map(p => p.key)))].sort();
+        const metricKeys = [...new Set(runs.flatMap(r => (r.data.metrics || []).map(m => m.key)))].sort();
+        const extraCols = [
+          ...paramKeys.map(k => ({ id: "param." + k, label: k, kind: "param" })),
+          ...metricKeys.map(k => ({ id: "metric." + k, label: k, kind: "metric" })),
+        ];
+        let cols = ColumnPicker.load(expID, extraCols);
+
+        const buildRows = () => runs.map((r, i) => {
           const info = r.info, data = r.data;
-          const metrics = (data.metrics || []).map(m => `${escapeHTML(m.key)}=${m.value.toPrecision(4)}`).join(", ");
+          const cells = cols.filter(c => c.enabled).map(c => {
+            const href = `#/experiments/${expID}/runs/${info.run_id}`;
+            let cell = "";
+            switch (c.id) {
+              case "id":      cell = `<td class="mono" onclick="location.hash='${href}'">${info.run_id.slice(0, 8)}</td>`; break;
+              case "name":    cell = `<td onclick="location.hash='${href}'">${escapeHTML(info.run_name || "—")}</td>`; break;
+              case "status":  cell = `<td onclick="location.hash='${href}'"><span class="status-pill status-${info.status}">${info.status}</span></td>`; break;
+              case "started": cell = `<td onclick="location.hash='${href}'">${formatTime(info.start_time)}</td>`; break;
+              case "duration":cell = `<td onclick="location.hash='${href}'">${info.end_time ? formatDuration(info.end_time - info.start_time) : "—"}</td>`; break;
+              case "end_time":cell = `<td onclick="location.hash='${href}'">${info.end_time ? formatTime(info.end_time) : "—"}</td>`; break;
+              default: {
+                if (c.id.startsWith("param.")) {
+                  const key = c.id.slice(6);
+                  const found = (data.params || []).find(p => p.key === key);
+                  cell = `<td class="mono" onclick="location.hash='${href}'">${escapeHTML(found ? found.value : "—")}</td>`;
+                } else if (c.id.startsWith("metric.")) {
+                  const key = c.id.slice(7);
+                  const found = (data.metrics || []).find(m => m.key === key);
+                  cell = `<td class="numeric" onclick="location.hash='${href}'">${found ? found.value.toPrecision(4) : "—"}</td>`;
+                } else {
+                  cell = `<td onclick="location.hash='${href}'">&mdash;</td>`;
+                }
+              }
+            }
+            return cell;
+          }).join("");
           const checked = BulkSelect.has(info.run_id) ? "checked" : "";
-          return `
-            <tr data-row-index="${i}" data-run-id="${info.run_id}">
-              <td class="bulk-col"><input type="checkbox" class="bulk-cb" data-run-id="${info.run_id}" ${checked} /></td>
-              <td class="mono" onclick="location.hash='#/experiments/${expID}/runs/${info.run_id}'">${info.run_id.slice(0, 8)}</td>
-              <td onclick="location.hash='#/experiments/${expID}/runs/${info.run_id}'">${escapeHTML(info.run_name || "—")}</td>
-              <td onclick="location.hash='#/experiments/${expID}/runs/${info.run_id}'"><span class="status-pill status-${info.status}">${info.status}</span></td>
-              <td onclick="location.hash='#/experiments/${expID}/runs/${info.run_id}'">${formatTime(info.start_time)}</td>
-              <td onclick="location.hash='#/experiments/${expID}/runs/${info.run_id}'">${info.end_time ? formatDuration(info.end_time - info.start_time) : "—"}</td>
-              <td class="mono" onclick="location.hash='#/experiments/${expID}/runs/${info.run_id}'">${escapeHTML(metrics)}</td>
-            </tr>`;
+          return `<tr data-row-index="${i}" data-run-id="${info.run_id}">
+            <td class="bulk-col"><input type="checkbox" class="bulk-cb" data-run-id="${info.run_id}" ${checked} /></td>
+            ${cells}
+          </tr>`;
         }).join("");
+
+        const buildHeader = () => cols.filter(c => c.enabled).map(c => {
+          const labels = { id: "ID", name: "Name", status: "Status", started: "Started", duration: "Duration", end_time: "Ended" };
+          return `<th>${escapeHTML(labels[c.id] || c.label)}</th>`;
+        }).join("");
+
+        const colCount = () => cols.filter(c => c.enabled).length + 1; // +1 for checkbox
+
+        const renderTable = () => {
+          const tbody = $("#exp-tbody");
+          const thead = $("#exp-thead-cols");
+          if (tbody) tbody.innerHTML = buildRows() || `<tr><td colspan="${colCount()}" class="empty">No runs yet.</td></tr>`;
+          if (thead) thead.innerHTML = buildHeader();
+        };
 
         main.innerHTML = `
           <div class="crumbs"><a href="#/experiments">Experiments</a> / ${escapeHTML(e.name)}</div>
-          <h1>${escapeHTML(e.name)}</h1>
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+            <h1 style="margin:0;flex:1">${escapeHTML(e.name)}</h1>
+            <button id="share-exp-btn" class="btn-ghost" title="Copy link">🔗 Share</button>
+          </div>
           <div class="card">
             <div class="kv-table">
               <table>
@@ -693,18 +799,70 @@ mlflow.log_metric("loss", 0.42)</pre>
               </table>
             </div>
           </div>
-          <h2>Runs (${runs.length})</h2>
+          <div style="display:flex;align-items:center;gap:8px;margin:12px 0 6px">
+            <h2 style="margin:0;flex:1">Runs (${runs.length})</h2>
+            <div style="position:relative">
+              <button id="cols-btn" style="font-size:12px;padding:4px 10px">Columns</button>
+              <div id="cols-dropdown" class="cols-dropdown" style="display:none"></div>
+            </div>
+          </div>
           <div class="card" style="padding:0">
             <table>
               <thead>
                 <tr>
                   <th class="bulk-col"><input type="checkbox" id="bulk-all" title="Select all" /></th>
-                  <th>ID</th><th>Name</th><th>Status</th><th>Started</th><th>Duration</th><th>Metrics</th>
+                  <span id="exp-thead-cols"></span>
                 </tr>
               </thead>
-              <tbody>${rows || `<tr><td colspan="7" class="empty">No runs yet.</td></tr>`}</tbody>
+              <tbody id="exp-tbody"></tbody>
             </table>
           </div>`;
+
+        renderTable();
+
+        // Share button
+        const shareBtn = $("#share-exp-btn");
+        if (shareBtn) {
+          shareBtn.addEventListener("click", () => {
+            navigator.clipboard.writeText(location.href).then(() => showToast("Link copied")).catch(() => prompt("Copy:", location.href));
+          });
+        }
+
+        // Columns dropdown
+        const colsBtn = $("#cols-btn");
+        const colsDrop = $("#cols-dropdown");
+        if (colsBtn && colsDrop) {
+          const renderDropdown = () => {
+            colsDrop.innerHTML = `<div style="font-size:11px;color:var(--fg-muted);padding:6px 10px 2px;font-weight:600;text-transform:uppercase">Toggle columns</div>` +
+              cols.map(c => `<label class="cols-item" style="${c.locked ? "opacity:0.5" : ""}">
+                <input type="checkbox" ${c.enabled ? "checked" : ""} ${c.locked ? "disabled" : ""} data-col-id="${escapeHTML(c.id)}">
+                ${escapeHTML(c.label)} <span style="font-size:10px;color:var(--fg-muted)">${c.kind}</span>
+              </label>`).join("");
+            $$(".cols-item input", colsDrop).forEach(cb => {
+              cb.addEventListener("change", () => {
+                const id = cb.dataset.colId;
+                const col = cols.find(c => c.id === id);
+                if (col && !col.locked) col.enabled = cb.checked;
+                ColumnPicker.save(expID, cols);
+                renderTable();
+              });
+            });
+          };
+          colsBtn.addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            if (colsDrop.style.display === "none") {
+              renderDropdown();
+              colsDrop.style.display = "block";
+            } else {
+              colsDrop.style.display = "none";
+            }
+          });
+          document.addEventListener("click", function hideOnOutside(ev) {
+            if (!colsDrop.contains(ev.target) && ev.target !== colsBtn) {
+              colsDrop.style.display = "none";
+            }
+          }, { once: false });
+        }
 
         // Checkbox wiring
         $$(".bulk-cb", main).forEach(cb => {
@@ -713,18 +871,19 @@ mlflow.log_metric("loss", 0.42)</pre>
             this._updateBulkBar(expID, runs);
           });
         });
-        // select-all
         const allCb = $("#bulk-all");
-        allCb.addEventListener("change", () => {
-          const toCheck = allCb.checked;
-          $$(".bulk-cb", main).forEach(cb => {
-            cb.checked = toCheck;
-            const id = cb.dataset.runId;
-            if (toCheck) BulkSelect._checked.add(id);
-            else BulkSelect._checked.delete(id);
+        if (allCb) {
+          allCb.addEventListener("change", () => {
+            const toCheck = allCb.checked;
+            $$(".bulk-cb", main).forEach(cb => {
+              cb.checked = toCheck;
+              const id = cb.dataset.runId;
+              if (toCheck) BulkSelect._checked.add(id);
+              else BulkSelect._checked.delete(id);
+            });
+            this._updateBulkBar(expID, runs);
           });
-          this._updateBulkBar(expID, runs);
-        });
+        }
 
         // Restore checked state (survives re-render)
         $$(".bulk-cb", main).forEach(cb => {
@@ -798,42 +957,116 @@ mlflow.log_metric("loss", 0.42)</pre>
     // ── Compare view ─────────────────────────────────────────────────────────
     async renderCompare(expID) {
       const main = $("#app");
-      const params = new URLSearchParams(location.hash.split("?")[1] || "");
-      const ids = (params.get("runs") || "").split(",").filter(Boolean);
+      const hashParams = new URLSearchParams(location.hash.split("?")[1] || "");
+      const allIds = (hashParams.get("runs") || "").split(",").filter(Boolean);
+      const MAX_COMPARE = 6;
+      const truncated = allIds.length > MAX_COMPARE;
+      const ids = allIds.slice(0, MAX_COMPARE);
+      // mode: "diff" shows only differing params; "full" shows side-by-side (default)
+      const autoMode = allIds.length === 2 ? "diff" : "full";
+      let mode = hashParams.get("mode") || autoMode;
+
       if (ids.length < 2) {
         main.innerHTML = `<div class="empty">Select at least 2 runs to compare.</div>`;
         return;
       }
+
+      main.innerHTML = `<div class="loading">Loading runs…</div>`;
+
       try {
-        const runDatas = await Promise.all(ids.map(id =>
-          fetchJSON(`/api/v1/runs/${id}/data`).catch(() => null)
-        ));
-        const valid = runDatas.filter(Boolean);
+        // Fetch experiment name + all runs in parallel
+        const [expData, ...runDatas] = await Promise.all([
+          fetchJSON(`/api/2.0/mlflow/experiments/get?experiment_id=${expID}`).catch(() => ({ experiment: { name: "exp " + expID } })),
+          ...ids.map(id => fetchJSON(`/api/2.0/mlflow/runs/get?run_id=${id}`).catch(() => null)),
+        ]);
+        const expName = expData.experiment ? expData.experiment.name : "exp " + expID;
+        const valid = runDatas.filter(Boolean).map(d => d.run);
         if (!valid.length) { main.innerHTML = `<div class="empty">Could not load run data.</div>`; return; }
 
-        // Params comparison
-        const allParamKeys = [...new Set(valid.flatMap(r => (r.params || []).map(p => p.Key || p.key)))].sort();
-        const paramRows = allParamKeys.map(k => {
+        const COLORS = ["#4a90e2","#e2914a","#50c878","#e2504a","#9b59b6","#1abc9c"];
+        const runName = r => (r.info.run_name || r.info.run_id.slice(0, 8));
+
+        // ── Section 1: Params ──
+        const allParamKeys = [...new Set(valid.flatMap(r => (r.data.params || []).map(p => p.key)))].sort();
+        const buildParamRows = (filterDiff) => allParamKeys.map(k => {
           const vals = valid.map(r => {
-            const found = (r.params || []).find(p => (p.Key || p.key) === k);
-            return found ? (found.Value || found.value) : "—";
+            const found = (r.data.params || []).find(p => p.key === k);
+            return found ? found.value : "—";
           });
           const differ = new Set(vals).size > 1;
-          return `<tr class="${differ ? "diff-row" : ""}"><td class="mono">${escapeHTML(k)}</td>${vals.map(v => `<td class="mono">${escapeHTML(v)}</td>`).join("")}</tr>`;
-        }).join("");
+          if (filterDiff && !differ) return "";
+          const equal = !differ;
+          return `<tr class="${differ ? "diff-row" : ""}">
+            <td class="mono" style="${equal ? "color:var(--fg-muted)" : ""}">${escapeHTML(k)}</td>
+            ${vals.map(v => `<td class="mono" style="${equal ? "color:var(--fg-muted)" : ""}">${escapeHTML(v)}</td>`).join("")}
+          </tr>`;
+        }).filter(Boolean).join("");
 
-        // Metrics — small sparklines per common metric
-        const allMetricKeys = [...new Set(valid.flatMap(r => (r.metrics || []).map(m => m.Key || m.key)))].sort();
-        let charts = "";
+        const diffOnlyCount = allParamKeys.filter(k => {
+          const vals = valid.map(r => { const f = (r.data.params||[]).find(p=>p.key===k); return f?f.value:"—"; });
+          return new Set(vals).size > 1;
+        }).length;
+
+        const paramSection = () => `
+          <h2 style="display:flex;align-items:center;gap:12px">
+            Parameters
+            <span style="font-size:12px;font-weight:400;color:var(--fg-muted)">${diffOnlyCount} differing of ${allParamKeys.length}</span>
+            <label style="font-size:12px;font-weight:400;display:flex;align-items:center;gap:4px;margin-left:auto;cursor:pointer">
+              <input type="checkbox" id="cmp-diff-only" ${mode === "diff" ? "checked" : ""}> Show only differing
+            </label>
+          </h2>
+          <div class="card" style="padding:0;overflow-x:auto" id="cmp-params-card">
+            <table id="cmp-params-table">
+              <thead>
+                <tr>
+                  <th>Param</th>
+                  ${valid.map(r => `<th class="mono">${escapeHTML(runName(r).slice(0, 16))}</th>`).join("")}
+                </tr>
+              </thead>
+              <tbody id="cmp-params-tbody">
+                ${buildParamRows(mode === "diff") || `<tr><td colspan="${valid.length + 1}" class="empty">${mode === "diff" ? "All params identical." : "No params."}</td></tr>`}
+              </tbody>
+            </table>
+          </div>`;
+
+        // ── Diff mode text (2-run only) ──
+        const diffTextSection = () => {
+          if (valid.length !== 2) return "";
+          const r0 = valid[0], r1 = valid[1];
+          const diffKeys = allParamKeys.filter(k => {
+            const v0 = (r0.data.params||[]).find(p=>p.key===k)?.value ?? "—";
+            const v1 = (r1.data.params||[]).find(p=>p.key===k)?.value ?? "—";
+            return v0 !== v1;
+          });
+          const sameKeys = allParamKeys.filter(k => {
+            const v0 = (r0.data.params||[]).find(p=>p.key===k)?.value ?? "—";
+            const v1 = (r1.data.params||[]).find(p=>p.key===k)?.value ?? "—";
+            return v0 === v1;
+          });
+          if (!diffKeys.length) return `<div class="card" style="padding:12px;color:var(--fg-muted)">All params identical.</div>`;
+          const kw = Math.max(...diffKeys.map(k => k.length), 10) + 2;
+          const lines = diffKeys.map(k => {
+            const v0 = (r0.data.params||[]).find(p=>p.key===k)?.value ?? "—";
+            const v1 = (r1.data.params||[]).find(p=>p.key===k)?.value ?? "—";
+            return `<div class="diff-ctx" style="padding:2px 12px"><span style="color:var(--fg-muted);display:inline-block;width:${kw}ch">${escapeHTML(k)}:</span> <span style="color:var(--error)">${escapeHTML(v0)}</span> → <span style="color:var(--success)">${escapeHTML(v1)}</span></div>`;
+          }).join("");
+          const same = sameKeys.length ? `<div class="diff-ctx" style="padding:4px 12px;color:var(--fg-muted);font-size:12px">(unchanged: ${escapeHTML(sameKeys.slice(0,6).join(", "))}${sameKeys.length>6?" …":""})</div>` : "";
+          return `<div class="card diff-block" style="padding:0">${lines}${same}</div>`;
+        };
+
+        // ── Section 2: Metrics overlay ──
+        const allMetricKeys = [...new Set(valid.flatMap(r => (r.data.metrics || []).map(m => m.key)))].sort();
+        let chartsHtml = "";
+        const W = 660, H = 160, pad = 22;
         for (const mk of allMetricKeys) {
           const perRun = await Promise.all(valid.map(r =>
-            fetchJSON(`/api/2.0/mlflow/metrics/get-history?run_id=${r.id}&metric_key=${encodeURIComponent(mk)}&downsample=200`)
+            fetchJSON(`/api/2.0/mlflow/metrics/get-history?run_id=${r.info.run_id}&metric_key=${encodeURIComponent(mk)}&downsample=200`)
               .then(d => d.metrics || []).catch(() => [])
           ));
           const allPts = perRun.flatMap(pts => pts);
           if (!allPts.length) continue;
-          const W = 600, H = 150, pad = 20;
-          const colors = ["var(--accent)", "var(--success)", "var(--warning)", "var(--error)"];
+          const presentCount = perRun.filter(pts => pts.length > 0).length;
+          const label = presentCount < valid.length ? `<span style="font-size:11px;color:var(--fg-muted)">${presentCount}/${valid.length} runs</span>` : "";
           const tmin = Math.min(...allPts.map(p => p.timestamp));
           const tmax = Math.max(...allPts.map(p => p.timestamp));
           const vmin = Math.min(...allPts.map(p => p.value));
@@ -846,34 +1079,107 @@ mlflow.log_metric("loss", 0.42)</pre>
               const y = H - pad - ((p.value - vmin) / vspan) * (H - 2 * pad);
               return (i === 0 ? "M" : "L") + x.toFixed(1) + "," + y.toFixed(1);
             }).join("");
-            return `<path d="${d}" fill="none" stroke="${colors[ci % colors.length]}" stroke-width="1.5" />`;
+            return `<path d="${d}" fill="none" stroke="${COLORS[ci % COLORS.length]}" stroke-width="1.8" />`;
           }).join("");
-
-          charts += `
-            <div class="card" style="padding:8px 12px">
-              <strong>${escapeHTML(mk)}</strong>
+          const legend = valid.map((r, ci) => perRun[ci].length
+            ? `<span style="display:inline-flex;align-items:center;gap:4px;margin-right:10px;font-size:12px"><span style="width:14px;height:3px;background:${COLORS[ci%COLORS.length]};display:inline-block;border-radius:2px"></span>${escapeHTML(runName(r).slice(0,20))}</span>`
+            : "").join("");
+          chartsHtml += `
+            <div class="card" style="padding:8px 12px;margin-bottom:12px">
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+                <strong>${escapeHTML(mk)}</strong>${label}
+              </div>
               <div class="metric-chart">
                 <svg width="100%" height="100%" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${paths}</svg>
               </div>
+              <div style="margin-top:4px">${legend}</div>
             </div>`;
         }
 
-        main.innerHTML = `
-          <div class="crumbs"><a href="#/experiments">Experiments</a> / <a href="#/experiments/${expID}">exp ${expID}</a> / Compare</div>
-          <h1>Compare Runs</h1>
+        // ── Section 3: Tags ──
+        const allTagKeys = [...new Set(valid.flatMap(r => (r.data.tags || []).map(t => t.key)))].sort();
+        const tagSection = allTagKeys.length ? `
+          <h2>Tags</h2>
           <div class="card" style="padding:0;overflow-x:auto">
             <table>
-              <thead>
-                <tr>
-                  <th>Param</th>
-                  ${valid.map(r => `<th class="mono">${escapeHTML((r.name || r.id || "").slice(0, 12))}</th>`).join("")}
-                </tr>
-              </thead>
-              <tbody>${paramRows || `<tr><td colspan="${valid.length + 1}" class="empty">No params.</td></tr>`}</tbody>
+              <thead><tr><th>Tag</th>${valid.map(r => `<th class="mono">${escapeHTML(runName(r).slice(0,16))}</th>`).join("")}</tr></thead>
+              <tbody>
+                ${allTagKeys.map(k => {
+                  const vals = valid.map(r => { const f=(r.data.tags||[]).find(t=>t.key===k); return f?f.value:"—"; });
+                  const differ = new Set(vals).size > 1;
+                  return `<tr class="${differ?"diff-row":""}"><td class="mono">${escapeHTML(k)}</td>${vals.map(v=>`<td class="mono">${escapeHTML(v)}</td>`).join("")}</tr>`;
+                }).join("")}
+              </tbody>
             </table>
+          </div>` : "";
+
+        // ── Section 4: Run summary ──
+        const summarySection = `
+          <h2>Run summary</h2>
+          <div class="card" style="padding:0;overflow-x:auto">
+            <table>
+              <thead><tr><th>Field</th>${valid.map(r=>`<th class="mono">${escapeHTML(runName(r).slice(0,16))}</th>`).join("")}</tr></thead>
+              <tbody>
+                <tr><td>Status</td>${valid.map(r=>`<td><span class="status-pill status-${r.info.status}">${r.info.status}</span></td>`).join("")}</tr>
+                <tr><td>Started</td>${valid.map(r=>`<td>${formatTime(r.info.start_time)}</td>`).join("")}</tr>
+                <tr><td>Ended</td>${valid.map(r=>`<td>${r.info.end_time?formatTime(r.info.end_time):"—"}</td>`).join("")}</tr>
+                <tr><td>Duration</td>${valid.map(r=>`<td>${r.info.end_time?formatDuration(r.info.end_time-r.info.start_time):"—"}</td>`).join("")}</tr>
+                <tr><td>Artifact URI</td>${valid.map(r=>`<td class="mono" style="font-size:11px">${escapeHTML(r.info.artifact_uri||"—")}</td>`).join("")}</tr>
+              </tbody>
+            </table>
+          </div>`;
+
+        const modeSwitcher = `
+          <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center">
+            <span style="color:var(--fg-muted);font-size:13px">Mode:</span>
+            <button id="cmp-mode-full" class="${mode==="full"?"":"btn-ghost"}" style="padding:3px 10px;font-size:12px">Side-by-side</button>
+            <button id="cmp-mode-diff" class="${mode==="diff"?"":"btn-ghost"}" style="padding:3px 10px;font-size:12px">Diff</button>
+          </div>`;
+
+        main.innerHTML = `
+          <div class="crumbs"><a href="#/experiments">Experiments</a> / <a href="#/experiments/${expID}">${escapeHTML(expName)}</a> / Compare</div>
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+            <h1 style="margin:0">Comparing ${valid.length} run${valid.length===1?"":"s"} from ${escapeHTML(expName)}</h1>
+            ${truncated ? `<span class="tag" style="background:rgba(176,123,28,0.12);border-color:var(--warning);color:var(--warning)">Showing first ${MAX_COMPARE} of ${allIds.length}</span>` : ""}
           </div>
+          ${modeSwitcher}
+          ${mode === "diff" && valid.length === 2 ? diffTextSection() : ""}
+          ${paramSection()}
           <h2>Metric history</h2>
-          ${charts || `<div class="empty">No shared metrics.</div>`}`;
+          ${chartsHtml || `<div class="empty card">No metrics to compare.</div>`}
+          ${tagSection}
+          ${summarySection}`;
+
+        // Wire mode toggle buttons
+        const setMode = (m) => {
+          const hash = location.hash.split("?")[0];
+          const p = new URLSearchParams(location.hash.split("?")[1] || "");
+          p.set("mode", m);
+          p.set("runs", ids.join(","));
+          location.hash = hash + "?" + p.toString();
+        };
+        const btnFull = $("#cmp-mode-full"), btnDiff = $("#cmp-mode-diff");
+        if (btnFull) btnFull.addEventListener("click", () => setMode("full"));
+        if (btnDiff) btnDiff.addEventListener("click", () => setMode("diff"));
+
+        // Wire "show only differing" checkbox
+        const diffCb = $("#cmp-diff-only");
+        if (diffCb) {
+          diffCb.addEventListener("change", () => {
+            const tbody = $("#cmp-params-tbody");
+            if (!tbody) return;
+            const filterOn = diffCb.checked;
+            const rows = buildParamRows(filterOn) || `<tr><td colspan="${valid.length + 1}" class="empty">${filterOn ? "All params identical." : "No params."}</td></tr>`;
+            tbody.innerHTML = rows;
+            // Sync mode param in URL without re-render
+            const hash = location.hash.split("?")[0];
+            const p = new URLSearchParams(location.hash.split("?")[1] || "");
+            p.set("mode", filterOn ? "diff" : "full");
+            p.set("runs", ids.join(","));
+            history.replaceState(null, "", location.pathname + location.search + hash + "?" + p.toString());
+          });
+        }
+
       } catch (err) {
         main.innerHTML = `<div class="empty">Failed: ${escapeHTML(String(err))}</div>`;
       }
@@ -894,11 +1200,14 @@ mlflow.log_metric("loss", 0.42)</pre>
             <a href="#/experiments">Experiments</a> /
             <a href="#/experiments/${expID}">exp ${expID}</a> / ${data.id}
           </div>
-          <h1>
-            ${escapeHTML(data.name || "(unnamed run)")}
-            <span class="kind-pill">${data.kind}</span>
-            <span class="status-pill status-${data.status}">${data.status}</span>
-          </h1>
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+            <h1 style="margin:0;flex:1">
+              ${escapeHTML(data.name || "(unnamed run)")}
+              <span class="kind-pill">${data.kind}</span>
+              <span class="status-pill status-${data.status}">${data.status}</span>
+            </h1>
+            <button id="share-btn" class="btn-ghost" style="white-space:nowrap" title="Copy link">🔗 Share</button>
+          </div>
           <div class="card">
             <div class="kv-table">
               <table>
@@ -926,6 +1235,17 @@ mlflow.log_metric("loss", 0.42)</pre>
 
           ${isTrace ? this.renderSpanWaterfall(data.spans || []) : await this.renderMetricCharts(data.id, metrics)}
         `;
+        // Wire share button
+        const shareBtn = $("#share-btn");
+        if (shareBtn) {
+          shareBtn.addEventListener("click", () => {
+            navigator.clipboard.writeText(location.href).then(() => {
+              showToast("Link copied");
+            }).catch(() => {
+              prompt("Copy this URL:", location.href);
+            });
+          });
+        }
       } catch (err) {
         main.innerHTML = `<div class="empty">Failed to load: ${escapeHTML(String(err))}</div>`;
       }

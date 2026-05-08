@@ -516,6 +516,10 @@ func (s *inMemStore) ListProjects(_ context.Context, _ string) ([]store.ProjectS
 	return nil, nil
 }
 
+func (s *inMemStore) SearchRunsByName(_ context.Context, _, _ string, _ int) ([]*model.Run, error) {
+	return nil, nil
+}
+
 // inMemArtifactStore records uploaded artifacts.
 type inMemArtifactStore struct {
 	files map[string][]byte

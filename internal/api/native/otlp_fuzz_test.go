@@ -240,6 +240,10 @@ func (s *stubStore) ListProjects(_ context.Context, _ string) ([]store.ProjectSu
 	return nil, nil
 }
 
+func (s *stubStore) SearchRunsByName(_ context.Context, _, _ string, _ int) ([]*model.Run, error) {
+	return nil, nil
+}
+
 // --- fuzz setup ---
 
 func newTestHandler() *native.Handler {

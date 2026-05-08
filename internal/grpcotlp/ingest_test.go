@@ -202,6 +202,10 @@ func (nopStore) ListProjects(_ context.Context, _ string) ([]store.ProjectSummar
 	return nil, nil
 }
 
+func (nopStore) SearchRunsByName(_ context.Context, _, _ string, _ int) ([]*model.Run, error) {
+	return nil, nil
+}
+
 // ---- in-memory gRPC server setup -------------------------------------------
 
 // newBufconnServer starts a grpcotlp.Server over an in-memory bufconn listener

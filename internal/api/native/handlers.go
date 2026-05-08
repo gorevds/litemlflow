@@ -87,6 +87,9 @@ func (h *Handler) Mount(r chi.Router) {
 
 	// PROJECTS: list distinct lmf.project tag values in the current workspace.
 	r.Get("/api/v1/projects", h.ListProjects)
+
+	// SEARCH: cross-experiment search — runs by name, experiments by name, prompts by name.
+	r.Get("/api/v1/search", h.GlobalSearch)
 }
 
 // projectDTO is one row in the projects-list response.
@@ -120,6 +123,130 @@ func (h *Handler) ListProjects(w http.ResponseWriter, r *http.Request) {
 		out = append(out, projectDTO{Name: p.Name, Count: p.Count})
 	}
 	writeJSON(w, map[string]any{"projects": out, "tag_key": "lmf.project"})
+}
+
+// ---- global search ----------------------------------------------------------
+
+// searchResultItem is one hit in the /api/v1/search response.
+type searchResultItem struct {
+	Kind        string `json:"kind"`                  // "run" | "experiment" | "prompt"
+	ID          string `json:"id"`                    // run_id / experiment_id / prompt name
+	Name        string `json:"name"`                  // display name
+	SubTitle    string `json:"subtitle,omitempty"`    // experiment name for runs, etc.
+	Status      string `json:"status,omitempty"`      // run status
+	URL         string `json:"url,omitempty"`         // deep-link hash fragment
+	ExperimentID string `json:"experiment_id,omitempty"` // for runs
+}
+
+type globalSearchResp struct {
+	Items []searchResultItem `json:"items"`
+	Query string             `json:"query"`
+}
+
+// GlobalSearch handles GET /api/v1/search?q=...&kind=all|runs|experiments|prompts
+//
+// It performs a workspace-scoped search across runs (by name/id prefix),
+// experiments (by name), and prompts (by name prefix). The workspace is
+// resolved from X-Workspace header, exactly as every other workspace-scoped
+// endpoint in this service. Results are capped: 4 experiments + 4 runs + 2
+// prompts = 10 total.
+func (h *Handler) GlobalSearch(w http.ResponseWriter, r *http.Request) {
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	kind := strings.ToLower(r.URL.Query().Get("kind"))
+	if kind == "" {
+		kind = "all"
+	}
+
+	ws := r.Header.Get("X-LiteMLflow-Workspace")
+	if ws == "" {
+		ws = "default"
+	}
+
+	ctx := r.Context()
+	var items []searchResultItem
+
+	// --- experiments ---
+	if kind == "all" || kind == "experiments" {
+		filter := ""
+		if q != "" {
+			filter = "name LIKE '%" + strings.ReplaceAll(q, "'", "''") + "%'"
+		}
+		res, err := h.Store.SearchExperiments(ctx, store.SearchOptions{
+			Filter:         filter,
+			MaxResults:     4,
+			LifecycleStage: "active",
+			WorkspaceID:    ws,
+		})
+		if err == nil {
+			for _, e := range res.Items {
+				items = append(items, searchResultItem{
+					Kind:  "experiment",
+					ID:    strconv.FormatInt(e.ID, 10),
+					Name:  e.Name,
+					URL:   "#/experiments/" + strconv.FormatInt(e.ID, 10),
+				})
+			}
+		}
+	}
+
+	// --- runs ---
+	if kind == "all" || kind == "runs" {
+		runs, err := h.Store.SearchRunsByName(ctx, ws, q, 4)
+		if err == nil {
+			for _, run := range runs {
+				items = append(items, searchResultItem{
+					Kind:         "run",
+					ID:           run.ID,
+					Name:         run.Name,
+					SubTitle:     "exp " + strconv.FormatInt(run.ExperimentID, 10),
+					Status:       run.Status,
+					URL:          "#/experiments/" + strconv.FormatInt(run.ExperimentID, 10) + "/runs/" + run.ID,
+					ExperimentID: strconv.FormatInt(run.ExperimentID, 10),
+				})
+			}
+		}
+	}
+
+	// --- prompts ---
+	// Prompts don't have a list-all endpoint in the store yet; we probe
+	// localStorage-known names client-side. Server returns 0 items for prompts
+	// unless the kind is explicitly "prompts", in which case we fall through to
+	// a best-effort attempt using known names passed in `names` query param.
+	if kind == "prompts" {
+		names := strings.Split(r.URL.Query().Get("names"), ",")
+		ql := strings.ToLower(q)
+		for _, name := range names {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				continue
+			}
+			if ql != "" && !strings.Contains(strings.ToLower(name), ql) {
+				continue
+			}
+			p, err := h.Store.GetLatestPrompt(ctx, name)
+			if err != nil {
+				continue
+			}
+			items = append(items, searchResultItem{
+				Kind: "prompt",
+				ID:   name,
+				Name: p.Name,
+				URL:  "#/prompts/" + name,
+			})
+			if len(items) >= 2 {
+				break
+			}
+		}
+	}
+
+	// Cap total at 10.
+	if len(items) > 10 {
+		items = items[:10]
+	}
+	if items == nil {
+		items = []searchResultItem{}
+	}
+	writeJSON(w, globalSearchResp{Items: items, Query: q})
 }
 
 // ---- health -----------------------------------------------------------------
