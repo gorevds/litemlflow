@@ -197,3 +197,53 @@ func NewTraceID() string {
 	}
 	return hex.EncodeToString(b)
 }
+
+// ---- Model Registry ---------------------------------------------------------
+
+// Stage constants for model version lifecycle.
+const (
+	StageNone       = "None"
+	StageStaging    = "Staging"
+	StageProduction = "Production"
+	StageArchived   = "Archived"
+)
+
+// ValidStage returns true when s is one of the four legal stage values.
+func ValidStage(s string) bool {
+	switch s {
+	case StageNone, StageStaging, StageProduction, StageArchived:
+		return true
+	}
+	return false
+}
+
+// RegisteredModel is a named model in the registry.
+type RegisteredModel struct {
+	Name           string `json:"name"`
+	Description    string `json:"description,omitempty"`
+	CreationTime   int64  `json:"creation_time"`
+	LastUpdateTime int64  `json:"last_update_time"`
+	Tags           []KV   `json:"tags,omitempty"`
+	// LatestVersions is populated on demand (GetLatestModelVersions).
+	LatestVersions []*ModelVersion `json:"latest_versions,omitempty"`
+}
+
+// ModelVersion is one versioned snapshot of a registered model.
+type ModelVersion struct {
+	Name           string `json:"name"`
+	Version        int64  `json:"version"`
+	Description    string `json:"description,omitempty"`
+	UserID         string `json:"user_id,omitempty"`
+	CurrentStage   string `json:"current_stage"`
+	Source         string `json:"source"`
+	RunID          string `json:"run_id,omitempty"`
+	Status         string `json:"status"`
+	StatusMessage  string `json:"status_message,omitempty"`
+	CreationTime   int64  `json:"creation_time"`
+	LastUpdateTime int64  `json:"last_update_time"`
+	Tags           []KV   `json:"tags,omitempty"`
+}
+
+// ModelTag is a key/value tag scoped to a registered model or model version.
+// Alias for KV for clarity in registry context; KV is used internally.
+type ModelTag = KV

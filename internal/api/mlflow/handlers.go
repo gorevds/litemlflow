@@ -55,6 +55,9 @@ func (h *Handler) Mount(r chi.Router) {
 	// Artifacts
 	r.Get("/api/2.0/mlflow/artifacts/list", h.ListArtifacts)
 	r.Mount("/api/2.0/mlflow-artifacts/artifacts", artifactsRouter(h))
+
+	// COMPAT-REGISTRY: Model Registry endpoints added in v0.2.
+	h.mountRegistry(r)
 }
 
 // ---- experiments ------------------------------------------------------------

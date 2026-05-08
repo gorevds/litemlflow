@@ -88,4 +88,30 @@ type Store interface {
 	// Evals.
 	CreateEval(ctx context.Context, e *model.Eval) error
 	GetEval(ctx context.Context, runID string) (*model.Eval, error)
+
+	// Model Registry — Registered Models.
+	CreateRegisteredModel(ctx context.Context, m *model.RegisteredModel) error
+	GetRegisteredModel(ctx context.Context, name string) (*model.RegisteredModel, error)
+	RenameRegisteredModel(ctx context.Context, name, newName string) (*model.RegisteredModel, error)
+	UpdateRegisteredModel(ctx context.Context, name string, description *string) (*model.RegisteredModel, error)
+	DeleteRegisteredModel(ctx context.Context, name string) error
+	SearchRegisteredModels(ctx context.Context, filter string, maxResults int, pageToken string) (SearchResult[*model.RegisteredModel], error)
+	GetLatestModelVersions(ctx context.Context, name string, stages []string) ([]*model.ModelVersion, error)
+	SetRegisteredModelTag(ctx context.Context, name, key, value string) error
+	DeleteRegisteredModelTag(ctx context.Context, name, key string) error
+
+	// Model Registry — Aliases.
+	SetModelAlias(ctx context.Context, name, alias string, version int64) error
+	DeleteModelAlias(ctx context.Context, name, alias string) error
+	GetModelByAlias(ctx context.Context, name, alias string) (*model.ModelVersion, error)
+
+	// Model Registry — Model Versions.
+	CreateModelVersion(ctx context.Context, mv *model.ModelVersion) (*model.ModelVersion, error)
+	GetModelVersion(ctx context.Context, name string, version int64) (*model.ModelVersion, error)
+	UpdateModelVersion(ctx context.Context, name string, version int64, description *string) (*model.ModelVersion, error)
+	DeleteModelVersion(ctx context.Context, name string, version int64) error
+	SearchModelVersions(ctx context.Context, filter string, maxResults int, pageToken string) (SearchResult[*model.ModelVersion], error)
+	TransitionModelStage(ctx context.Context, name string, version int64, stage string, archiveExisting bool) (*model.ModelVersion, error)
+	SetModelVersionTag(ctx context.Context, name string, version int64, key, value string) error
+	DeleteModelVersionTag(ctx context.Context, name string, version int64, key string) error
 }

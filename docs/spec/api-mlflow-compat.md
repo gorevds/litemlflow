@@ -45,10 +45,53 @@ The wire format is JSON over HTTP, request and response shapes match MLflow exac
 | `/api/2.0/mlflow-artifacts/artifacts/{path...}` | PUT | upload |
 | `/api/2.0/mlflow-artifacts/artifacts/{path...}` | DELETE | delete |
 
+### Model Registry (v0.2)
+
+#### Registered Models
+
+| Endpoint | Method | Notes |
+|---|---|---|
+| `/api/2.0/mlflow/registered-models/create` | POST | `name`, `description`, `tags` |
+| `/api/2.0/mlflow/registered-models/get` | GET | by `name` query param |
+| `/api/2.0/mlflow/registered-models/rename` | POST | `name`, `new_name` |
+| `/api/2.0/mlflow/registered-models/update` | POST | update `description` |
+| `/api/2.0/mlflow/registered-models/delete` | POST | cascades to all versions |
+| `/api/2.0/mlflow/registered-models/search` | POST/GET | filter: `name =`, `name LIKE`, `tags.X =` |
+| `/api/2.0/mlflow/registered-models/get-latest-versions` | POST/GET | one version per stage (highest version number wins) |
+| `/api/2.0/mlflow/registered-models/set-tag` | POST | upsert |
+| `/api/2.0/mlflow/registered-models/delete-tag` | POST | |
+| `/api/2.0/mlflow/registered-models/alias` | POST | set alias (upsert) |
+| `/api/2.0/mlflow/registered-models/alias` | DELETE | by `name`+`alias` query params |
+| `/api/2.0/mlflow/registered-models/alias` | GET | resolve alias → version |
+
+#### Model Versions
+
+| Endpoint | Method | Notes |
+|---|---|---|
+| `/api/2.0/mlflow/model-versions/create` | POST | auto-increments version per name (first = 1); `source` required |
+| `/api/2.0/mlflow/model-versions/get` | GET | by `name`+`version` query params |
+| `/api/2.0/mlflow/model-versions/update` | POST | update `description` |
+| `/api/2.0/mlflow/model-versions/delete` | POST | cascades aliases and version tags |
+| `/api/2.0/mlflow/model-versions/search` | POST/GET | filter: `name =`, `name LIKE`, `tags.X =`, `run_id =` |
+| `/api/2.0/mlflow/model-versions/get-download-uri` | GET | returns `source` URI registered with the version |
+| `/api/2.0/mlflow/model-versions/transition-stage` | POST | `archive_existing_versions=true` moves other Production → Archived |
+| `/api/2.0/mlflow/model-versions/set-tag` | POST | upsert |
+| `/api/2.0/mlflow/model-versions/delete-tag` | POST | |
+
+**Registry quirks and design notes:**
+
+- **PK rename**: SQLite does not cascade `ON UPDATE` for primary-key changes. `RenameRegisteredModel` acquires a dedicated `sql.Conn`, disables FK enforcement, updates all child table `name` columns, updates the PK, then re-enables FK enforcement before returning the connection to the pool.
+- **Version numbering**: versions are `INTEGER` auto-incremented per `(name)`, not global. Concurrent creates under the same name are serialised via `BEGIN IMMEDIATE` inside a transaction.
+- **Stage values**: `None` (default), `Staging`, `Production`, `Archived`. Invalid values return `INVALID_PARAMETER_VALUE`.
+- **`archive_existing_versions`**: only effective when transitioning to `Production`. Moves all other `Production` versions of the same model to `Archived` atomically.
+- **`get-latest-versions`**: returns one version per stage (the highest version number in that stage). If `stages` is empty all stages are included. Versions in `None` stage are included.
+- **`get-download-uri`**: returns the `source` field verbatim — no URL rewriting. Clients that need actual byte access should use the artifacts API with the `run_id`.
+- **Aliases**: upsert semantics (POST), delete by `name`+`alias` query params (DELETE), resolve by `name`+`alias` (GET).
+- **Tags**: all tag operations are upsert. Tags cascade-delete with their parent model/version.
+- **Migration**: schema lives in `internal/migrations/004_registry.sql`.
+
 ## Deferred to v0.2
 
-- `/api/2.0/mlflow/registered-models/...` — model registry
-- `/api/2.0/mlflow/model-versions/...` — model version lifecycle
 - `/api/2.0/mlflow/runs/log-inputs` — dataset linkage
 
 ## Explicitly out of scope (use native API instead)
