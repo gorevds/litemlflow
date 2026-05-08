@@ -1,6 +1,7 @@
 package mlflow
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -16,10 +17,17 @@ import (
 	"github.com/gorevds/litemlflow/internal/store"
 )
 
+// EventNotifier is the minimal interface the mlflow handler needs from
+// the webhook dispatcher to fire run-status events.
+type EventNotifier interface {
+	Notify(ctx context.Context, event string, run *model.Run)
+}
+
 // Handler bundles dependencies for the MLflow REST API.
 type Handler struct {
-	Store     store.Store
-	Artifacts artifact.Store
+	Store      store.Store
+	Artifacts  artifact.Store
+	Dispatcher EventNotifier // nil when webhooks are disabled
 }
 
 // Mount attaches the MLflow REST API to the given router.
@@ -339,12 +347,23 @@ func (h *Handler) CreateRun(w http.ResponseWriter, r *http.Request) {
 		StartTime:    req.StartTime,
 		Name:         req.RunName,
 	}
+	// Extract parent_run_id from tags if the MLflow client set it.
+	for _, t := range req.Tags {
+		if t.Key == "mlflow.parentRunId" {
+			run.ParentRunID = t.Value
+			break
+		}
+	}
 	if err := h.Store.CreateRun(r.Context(), run); err != nil {
 		writeStoreErr(w, err)
 		return
 	}
 	for _, t := range req.Tags {
 		_ = h.Store.SetTag(r.Context(), run.ID, model.KV{Key: t.Key, Value: t.Value})
+	}
+	// Fire webhook for run creation.
+	if h.Dispatcher != nil {
+		h.Dispatcher.Notify(r.Context(), "run_started", run)
 	}
 	writeJSON(w, runResp{Run: runDTO{
 		Info: runInfoToDTO(run),
@@ -454,6 +473,12 @@ func (h *Handler) UpdateRun(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeStoreErr(w, err)
 		return
+	}
+	// Fire webhook when status transitions to a terminal state.
+	if h.Dispatcher != nil && status != nil {
+		if event := statusToWebhookEvent(*status); event != "" {
+			h.Dispatcher.Notify(r.Context(), event, run)
+		}
 	}
 	writeJSON(w, struct {
 		RunInfo runInfoDTO `json:"run_info"`
@@ -1032,4 +1057,19 @@ func writeError(w http.ResponseWriter, status int, code, msg string) {
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// statusToWebhookEvent maps a run status to the webhook event name for terminal
+// transitions. Returns "" for non-terminal statuses (e.g. RUNNING, SCHEDULED).
+func statusToWebhookEvent(status string) string {
+	switch status {
+	case model.StatusFinished:
+		return "run_finished"
+	case model.StatusFailed:
+		return "run_failed"
+	case model.StatusKilled:
+		return "run_killed"
+	default:
+		return ""
+	}
 }

@@ -657,6 +657,7 @@
       if (hash.startsWith("/workspaces")) return this.renderWorkspaces();
       if (hash.startsWith("/prompts")) return this.renderPrompts();
       if (hash.startsWith("/about"))   return this.renderAbout();
+      if (hash.startsWith("/webhooks")) return this.renderWebhooks();
       return this.renderExperiments();
     },
 
@@ -895,6 +896,7 @@ mlflow.log_metric("loss", 0.42)</pre>
           <div class="crumbs"><a href="#/experiments">Experiments</a> / ${escapeHTML(e.name)}</div>
           <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
             <h1 style="margin:0;flex:1">${escapeHTML(e.name)}</h1>
+            <button id="exp-clone-btn" title="Clone this experiment">Clone</button>
             <button id="share-exp-btn" class="btn-ghost" title="Copy link">🔗 Share</button>
           </div>
           <div class="card">
@@ -1020,6 +1022,27 @@ mlflow.log_metric("loss", 0.42)</pre>
           if (BulkSelect.has(cb.dataset.runId)) cb.checked = true;
         });
         this._updateBulkBar(expID, runs);
+
+        // Clone experiment button
+        $("#exp-clone-btn").addEventListener("click", async () => {
+          const btn = $("#exp-clone-btn");
+          btn.disabled = true;
+          btn.textContent = "Cloning…";
+          try {
+            const res = await fetchJSON(`/api/v1/experiments/${expID}/clone`, { method: "POST", body: "{}" });
+            const newID = res.experiment_id || (res.experiment && res.experiment.experiment_id);
+            if (newID) {
+              location.hash = `#/experiments/${newID}`;
+            } else {
+              btn.textContent = "Cloned!";
+              setTimeout(() => { btn.disabled = false; btn.textContent = "Clone"; }, 2000);
+            }
+          } catch (err) {
+            alert(`Clone failed: ${err}`);
+            btn.disabled = false;
+            btn.textContent = "Clone";
+          }
+        });
 
       } catch (err) {
         main.innerHTML = `<div class="empty">Failed to load: ${escapeHTML(String(err))}</div>`;
@@ -1427,9 +1450,10 @@ mlflow.log_metric("loss", 0.42)</pre>
       const STARRED_TAG = "lmf.starred";
 
       try {
-        const [data, noteRes] = await Promise.all([
+        const [data, noteRes, lineageRes] = await Promise.all([
           fetchJSON(`/api/v1/runs/${runID}/data`),
           fetchJSON(`/api/v1/runs/${runID}/note`).catch(() => null),
+          fetchJSON(`/api/v1/runs/${runID}/lineage`).catch(() => null),
         ]);
         const params = (data.params || []).map(p => `<tr><td>${escapeHTML(p.Key || p.key)}</td><td class="mono">${escapeHTML(p.Value || p.value)}</td></tr>`).join("");
         const allTags = data.tags || [];
@@ -1439,6 +1463,9 @@ mlflow.log_metric("loss", 0.42)</pre>
         const metrics = data.metrics || [];
         const isTrace = data.kind === "trace";
         const starIcon = isStarred ? "&#9733;" : "&#9734;";
+
+        // Build lineage section
+        const lineageHTML = this._renderLineage(expID, runID, lineageRes);
 
         main.innerHTML = `
           <div class="crumbs">
@@ -1466,6 +1493,8 @@ mlflow.log_metric("loss", 0.42)</pre>
               </table>
             </div>
           </div>
+
+          ${lineageHTML}
 
           <div class="run-grid">
             <div class="card">
@@ -1748,6 +1777,39 @@ mlflow.log_metric("loss", 0.42)</pre>
       }
     },
 
+    _renderLineage(expID, runID, lineage) {
+      if (!lineage) return "";
+      const ancestors = lineage.ancestors || [];
+      const descendants = lineage.descendants || [];
+      if (!ancestors.length && !descendants.length) return "";
+
+      const runLink = (r) => {
+        const rExpID = r.experiment_id || expID;
+        const label = escapeHTML(r.name || r.id.slice(0, 8));
+        return `<a href="#/experiments/${rExpID}/runs/${r.id}" class="lineage-node">${label} <span class="mono" style="font-size:11px">${r.id.slice(0, 8)}</span></a>`;
+      };
+
+      // Build ancestor chain (outermost ancestor first)
+      const ancestorChain = ancestors.map(r =>
+        `<div class="lineage-item lineage-ancestor">${runLink(r)}</div><div class="lineage-arrow">↓</div>`
+      ).join("");
+
+      // Current run node
+      const currentNode = `<div class="lineage-item lineage-current"><strong>${escapeHTML(runID.slice(0, 8))}</strong> <span style="color:var(--fg-muted)">(this run)</span></div>`;
+
+      // Children (direct descendants shown as a list)
+      const childrenHTML = descendants.length
+        ? `<div class="lineage-arrow">↓</div><div class="lineage-children">${descendants.map(r =>
+            `<div class="lineage-item lineage-child">${runLink(r)}</div>`
+          ).join("")}</div>`
+        : "";
+
+      return `
+        <h2>Lineage</h2>
+        <div class="card lineage-tree">
+          ${ancestorChain}${currentNode}${childrenHTML}
+        </div>`;
+    },
     async renderMetricCharts(runID, metrics) {
       if (!metrics || metrics.length === 0) return "";
       const charts = [];
@@ -2153,6 +2215,250 @@ mlflow.log_metric("loss", 0.42)</pre>
 
       addBtn.addEventListener("click", doAdd);
       $("#new-user-id").addEventListener("keydown", e => { if (e.key === "Enter") doAdd(); });
+    },
+
+    // ── Webhooks ─────────────────────────────────────────────────────────────
+    async renderWebhooks() {
+      const main = $("#app");
+      const ALL_EVENTS = ["run_started", "run_finished", "run_failed", "run_killed"];
+
+      const load = async () => {
+        const data = await fetchJSON("/api/v1/webhooks").catch(() => ({ webhooks: [] }));
+        return data.webhooks || [];
+      };
+
+      const renderPage = async () => {
+        const webhooks = await load();
+
+        const rows = webhooks.map((wh, i) => {
+          const evBadges = (wh.events || "").split(",").filter(Boolean)
+            .map(e => `<span class="tag">${escapeHTML(e.trim())}</span>`).join(" ");
+          const statusClass = wh.last_status >= 200 && wh.last_status < 300
+            ? "status-FINISHED" : wh.last_status ? "status-FAILED" : "";
+          const statusText = wh.last_status ? String(wh.last_status) : "—";
+          return `
+            <tr data-row-index="${i}" data-wh-id="${wh.id}">
+              <td class="mono">${wh.id}</td>
+              <td>${escapeHTML(wh.name)}</td>
+              <td class="mono" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHTML(wh.url)}">${escapeHTML(wh.url)}</td>
+              <td>${evBadges || "—"}</td>
+              <td><span class="status-pill ${statusClass}">${statusText}</span></td>
+              <td>
+                <label class="toggle-label">
+                  <input type="checkbox" class="wh-enabled" data-wh-id="${wh.id}" ${wh.enabled ? "checked" : ""} />
+                  <span>${wh.enabled ? "on" : "off"}</span>
+                </label>
+              </td>
+              <td class="wh-actions">
+                <button class="wh-test-btn" data-wh-id="${wh.id}" title="Send test delivery">Test</button>
+                <button class="wh-edit-btn" data-wh-id="${wh.id}" title="Edit webhook">Edit</button>
+                <button class="wh-del-btn btn-danger" data-wh-id="${wh.id}" title="Delete webhook">Delete</button>
+              </td>
+            </tr>`;
+        }).join("");
+
+        main.innerHTML = `
+          <div class="toolbar">
+            <h1 style="margin:0">Webhooks</h1>
+            <button id="wh-add-btn">+ Add webhook</button>
+          </div>
+
+          <div class="card" style="padding:0;margin-bottom:20px">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width:40px">ID</th>
+                  <th>Name</th>
+                  <th>URL</th>
+                  <th>Events</th>
+                  <th>Last status</th>
+                  <th>Enabled</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>${rows || `<tr><td colspan="7" class="empty">No webhooks configured.</td></tr>`}</tbody>
+            </table>
+          </div>
+
+          <div id="wh-form-panel" class="card" style="display:none">
+            <h2 id="wh-form-title" style="margin-top:0">Add webhook</h2>
+            <div class="kv-table" style="margin-bottom:12px">
+              <table>
+                <tr>
+                  <td>Name</td>
+                  <td><input type="text" id="wh-name" placeholder="My webhook" style="width:100%" /></td>
+                </tr>
+                <tr>
+                  <td>URL</td>
+                  <td><input type="url" id="wh-url" placeholder="https://hooks.example.com/…" style="width:100%" /></td>
+                </tr>
+                <tr>
+                  <td>Events</td>
+                  <td id="wh-events-cell">
+                    ${ALL_EVENTS.map(ev =>
+                      `<label style="margin-right:12px;display:inline-flex;align-items:center;gap:4px">
+                        <input type="checkbox" class="wh-ev-cb" value="${ev}" checked /> ${escapeHTML(ev)}
+                      </label>`
+                    ).join("")}
+                  </td>
+                </tr>
+                <tr>
+                  <td>Secret <span style="color:var(--fg-muted);font-size:11px">(optional)</span></td>
+                  <td><input type="password" id="wh-secret" placeholder="HMAC signing secret" style="width:100%" /></td>
+                </tr>
+                <tr>
+                  <td>Enabled</td>
+                  <td><input type="checkbox" id="wh-enabled-cb" checked /></td>
+                </tr>
+              </table>
+            </div>
+            <div id="wh-form-err" style="color:var(--error);font-size:13px;margin-bottom:8px"></div>
+            <div style="display:flex;gap:8px">
+              <button id="wh-save-btn">Save</button>
+              <button id="wh-cancel-btn" class="btn-ghost">Cancel</button>
+            </div>
+          </div>`;
+
+        // State for edit mode
+        let editID = null;
+
+        const showForm = (wh) => {
+          editID = wh ? wh.id : null;
+          $("#wh-form-title").textContent = wh ? "Edit webhook" : "Add webhook";
+          $("#wh-name").value = wh ? wh.name : "";
+          $("#wh-url").value = wh ? wh.url : "";
+          $("#wh-secret").value = "";  // never pre-fill secret
+          $("#wh-enabled-cb").checked = wh ? wh.enabled : true;
+          // Set event checkboxes
+          const selectedEvents = new Set((wh ? wh.events : ALL_EVENTS.join(",")).split(",").map(s => s.trim()));
+          $$(".wh-ev-cb", main).forEach(cb => {
+            cb.checked = selectedEvents.has(cb.value);
+          });
+          $("#wh-form-err").textContent = "";
+          $("#wh-form-panel").style.display = "";
+          $("#wh-name").focus();
+        };
+
+        const hideForm = () => {
+          editID = null;
+          $("#wh-form-panel").style.display = "none";
+        };
+
+        const saveWebhook = async () => {
+          const name = $("#wh-name").value.trim();
+          const url = $("#wh-url").value.trim();
+          const events = $$(".wh-ev-cb", main).filter(cb => cb.checked).map(cb => cb.value).join(",");
+          const secret = $("#wh-secret").value;
+          const enabled = $("#wh-enabled-cb").checked;
+
+          if (!name || !url) {
+            $("#wh-form-err").textContent = "Name and URL are required.";
+            return;
+          }
+          if (!events) {
+            $("#wh-form-err").textContent = "Select at least one event.";
+            return;
+          }
+
+          const body = { name, url, events, enabled };
+          if (secret) body.secret = secret;
+
+          try {
+            if (editID != null) {
+              await fetchJSON(`/api/v1/webhooks/${editID}`, {
+                method: "PATCH",
+                body: JSON.stringify(body),
+              });
+            } else {
+              await fetchJSON("/api/v1/webhooks", {
+                method: "POST",
+                body: JSON.stringify(body),
+              });
+            }
+            hideForm();
+            renderPage();
+          } catch (err) {
+            $("#wh-form-err").textContent = `Error: ${err}`;
+          }
+        };
+
+        // Wire buttons
+        $("#wh-add-btn").addEventListener("click", () => showForm(null));
+        $("#wh-save-btn").addEventListener("click", saveWebhook);
+        $("#wh-cancel-btn").addEventListener("click", hideForm);
+
+        // Enable/disable toggles
+        $$(".wh-enabled", main).forEach(cb => {
+          cb.addEventListener("change", async () => {
+            const id = cb.dataset.whId;
+            const label = cb.nextElementSibling;
+            try {
+              await fetchJSON(`/api/v1/webhooks/${id}`, {
+                method: "PATCH",
+                body: JSON.stringify({ enabled: cb.checked }),
+              });
+              if (label) label.textContent = cb.checked ? "on" : "off";
+            } catch (err) {
+              cb.checked = !cb.checked;  // revert
+              alert(`Failed to update: ${err}`);
+            }
+          });
+        });
+
+        // Test buttons
+        $$(".wh-test-btn", main).forEach(btn => {
+          btn.addEventListener("click", async () => {
+            const id = btn.dataset.whId;
+            btn.disabled = true;
+            btn.textContent = "…";
+            try {
+              const res = await fetchJSON(`/api/v1/webhooks/${id}/test`, { method: "POST", body: "{}" });
+              btn.textContent = res.status >= 200 && res.status < 300 ? "OK" : `${res.status}`;
+              btn.style.color = res.status >= 200 && res.status < 300 ? "var(--success)" : "var(--error)";
+            } catch {
+              btn.textContent = "err";
+              btn.style.color = "var(--error)";
+            }
+            setTimeout(() => {
+              btn.disabled = false;
+              btn.textContent = "Test";
+              btn.style.color = "";
+            }, 3000);
+          });
+        });
+
+        // Edit buttons — fetch fresh data to populate form
+        $$(".wh-edit-btn", main).forEach(btn => {
+          btn.addEventListener("click", async () => {
+            const id = btn.dataset.whId;
+            try {
+              const wh = await fetchJSON(`/api/v1/webhooks/${id}`);
+              showForm(wh);
+            } catch {
+              showForm(webhooks.find(w => String(w.id) === String(id)));
+            }
+          });
+        });
+
+        // Delete buttons
+        $$(".wh-del-btn", main).forEach(btn => {
+          btn.addEventListener("click", async () => {
+            const id = btn.dataset.whId;
+            if (!confirm("Delete this webhook?")) return;
+            try {
+              await fetch(`/api/v1/webhooks/${id}`, {
+                method: "DELETE",
+                headers: Object.assign({ "Content-Type": "application/json" }, Workspace.header()),
+              });
+              renderPage();
+            } catch (err) {
+              alert(`Failed: ${err}`);
+            }
+          });
+        });
+      };
+
+      renderPage();
     },
 
     // ── About ────────────────────────────────────────────────────────────────

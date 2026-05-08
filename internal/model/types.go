@@ -79,6 +79,22 @@ type Run struct {
 	SourceType     string `json:"source_type,omitempty"`
 	SourceName     string `json:"source_name,omitempty"`
 	Kind           string `json:"kind"`
+	ParentRunID    string `json:"parent_run_id,omitempty"`
+}
+
+// Webhook is a configured notification endpoint.
+type Webhook struct {
+	ID           int64  `json:"id"`
+	Name         string `json:"name"`
+	URL          string `json:"url"`
+	Events       string `json:"events"` // comma-separated: run_finished,run_failed,run_started
+	ExperimentID *int64 `json:"experiment_id,omitempty"`
+	WorkspaceID  string `json:"workspace_id"`
+	Secret       string `json:"secret,omitempty"`
+	CreatedAt    int64  `json:"created_at"`
+	LastStatus   *int   `json:"last_status,omitempty"`
+	LastAttempt  *int64 `json:"last_attempt,omitempty"`
+	Enabled      bool   `json:"enabled"`
 }
 
 // Metric is a single metric observation.

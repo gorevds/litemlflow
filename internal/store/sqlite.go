@@ -406,6 +406,12 @@ func (s *SQLiteStore) CreateRun(ctx context.Context, r *model.Run) error {
 		}
 		return err
 	}
+	// Persist parent_run_id and mirror as tag if set.
+	if r.ParentRunID != "" {
+		if err := s.setParentRunID(ctx, r.ID, r.ParentRunID); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -413,12 +419,13 @@ func (s *SQLiteStore) CreateRun(ctx context.Context, r *model.Run) error {
 func (s *SQLiteStore) GetRun(ctx context.Context, id string) (*model.Run, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, experiment_id, COALESCE(name,''), status, start_time, end_time, artifact_uri, lifecycle_stage,
-		       COALESCE(user_id,''), COALESCE(source_type,''), COALESCE(source_name,''), run_kind
+		       COALESCE(user_id,''), COALESCE(source_type,''), COALESCE(source_name,''), run_kind,
+		       COALESCE(parent_run_id,'')
 		FROM runs WHERE id = ?
 	`, id)
 	var r model.Run
 	var endTime sql.NullInt64
-	if err := row.Scan(&r.ID, &r.ExperimentID, &r.Name, &r.Status, &r.StartTime, &endTime, &r.ArtifactURI, &r.LifecycleStage, &r.UserID, &r.SourceType, &r.SourceName, &r.Kind); err != nil {
+	if err := row.Scan(&r.ID, &r.ExperimentID, &r.Name, &r.Status, &r.StartTime, &endTime, &r.ArtifactURI, &r.LifecycleStage, &r.UserID, &r.SourceType, &r.SourceName, &r.Kind, &r.ParentRunID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -521,7 +528,8 @@ func (s *SQLiteStore) SearchRuns(ctx context.Context, opt SearchOptions) (Search
 	}
 	q := `
 		SELECT id, experiment_id, COALESCE(name,''), status, start_time, end_time, artifact_uri,
-		       lifecycle_stage, COALESCE(user_id,''), COALESCE(source_type,''), COALESCE(source_name,''), run_kind
+		       lifecycle_stage, COALESCE(user_id,''), COALESCE(source_type,''), COALESCE(source_name,''), run_kind,
+		       COALESCE(parent_run_id,'')
 		FROM runs`
 	if len(where) > 0 {
 		q += " WHERE " + strings.Join(where, " AND ")
@@ -547,7 +555,7 @@ func (s *SQLiteStore) SearchRuns(ctx context.Context, opt SearchOptions) (Search
 		var r model.Run
 		var endTime sql.NullInt64
 		if err := rows.Scan(&r.ID, &r.ExperimentID, &r.Name, &r.Status, &r.StartTime, &endTime, &r.ArtifactURI,
-			&r.LifecycleStage, &r.UserID, &r.SourceType, &r.SourceName, &r.Kind); err != nil {
+			&r.LifecycleStage, &r.UserID, &r.SourceType, &r.SourceName, &r.Kind, &r.ParentRunID); err != nil {
 			return SearchResult[*model.Run]{}, err
 		}
 		if endTime.Valid {
@@ -1053,6 +1061,8 @@ func (s *SQLiteStore) LogParams(ctx context.Context, runID string, ps []model.Pa
 }
 
 // SetTag upserts a tag.
+// When the key is "mlflow.parentRunId" the value is also persisted into the
+// parent_run_id column to keep the structural field and the MLflow tag in sync.
 func (s *SQLiteStore) SetTag(ctx context.Context, runID string, t model.KV) error {
 	if err := model.ValidKey(t.Key); err != nil {
 		return err
@@ -1064,7 +1074,14 @@ func (s *SQLiteStore) SetTag(ctx context.Context, runID string, t model.KV) erro
 		INSERT INTO tags(run_id, key, value) VALUES (?, ?, ?)
 		ON CONFLICT(run_id, key) DO UPDATE SET value = excluded.value
 	`, runID, t.Key, t.Value)
-	return err
+	if err != nil {
+		return err
+	}
+	// Keep parent_run_id column in sync with the MLflow client's tag.
+	if t.Key == "mlflow.parentRunId" && t.Value != "" {
+		return s.syncParentRunIDFromTag(ctx, runID, t.Value)
+	}
+	return nil
 }
 
 // SetTags upserts multiple tags atomically.

@@ -209,6 +209,25 @@ func (nopStore) ListProjects(_ context.Context, _ string) ([]store.ProjectSummar
 func (nopStore) SearchRunsByName(_ context.Context, _, _ string, _ int) ([]*model.Run, error) {
 	return nil, nil
 }
+func (nopStore) GetRunLineage(_ context.Context, _ string) (*store.RunLineage, error) {
+	return nil, store.ErrNotFound
+}
+func (nopStore) ArchiveStaleRuns(_ context.Context, _ int64) (int, error)         { return 0, nil }
+func (nopStore) CreateWebhook(_ context.Context, _ *model.Webhook) (int64, error) { return 0, nil }
+func (nopStore) ListWebhooks(_ context.Context, _ string, _ *int64) ([]*model.Webhook, error) {
+	return nil, nil
+}
+func (nopStore) GetWebhook(_ context.Context, _ int64) (*model.Webhook, error) {
+	return nil, store.ErrNotFound
+}
+func (nopStore) UpdateWebhook(_ context.Context, _ *model.Webhook) error { return nil }
+func (nopStore) DeleteWebhook(_ context.Context, _ int64) error          { return nil }
+func (nopStore) RecordWebhookAttempt(_ context.Context, _ int64, _ int, _ int64) error {
+	return nil
+}
+func (nopStore) CloneExperiment(_ context.Context, _ int64, _, _ string) (*model.Experiment, error) {
+	return nil, store.ErrNotFound
+}
 
 // ---- in-memory gRPC server setup -------------------------------------------
 

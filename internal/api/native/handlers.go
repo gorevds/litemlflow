@@ -94,6 +94,9 @@ func (h *Handler) Mount(r chi.Router) {
 
 	// SEARCH: cross-experiment search — runs by name, experiments by name, prompts by name.
 	r.Get("/api/v1/search", h.GlobalSearch)
+
+	// Webhooks, lineage, and experiment clone (W7.C).
+	h.mountWebhookRoutes(r)
 }
 
 // projectDTO is one row in the projects-list response.
