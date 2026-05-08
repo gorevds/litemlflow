@@ -18,6 +18,7 @@ import (
 	"github.com/litemlflow/litemlflow/internal/artifact"
 	"github.com/litemlflow/litemlflow/internal/auth"
 	"github.com/litemlflow/litemlflow/internal/config"
+	"github.com/litemlflow/litemlflow/internal/metrics"
 	"github.com/litemlflow/litemlflow/internal/store"
 	"github.com/litemlflow/litemlflow/ui"
 )
@@ -118,10 +119,18 @@ func (s *Server) Close() error {
 }
 
 func buildRouter(cfg config.Config, logger *slog.Logger, st store.Store, art artifact.Store, uiFS fs.FS) http.Handler {
+	// Build the metrics registry before anything else so we can mount /metrics
+	// BEFORE the auth middleware (Prometheus scrapers don't send credentials).
+	reg := metrics.NewRegistry()
+	std := metrics.NewStandard(reg, cfg.DBPath)
+
 	r := chi.NewRouter()
 	r.Use(requestIDMiddleware)
 	r.Use(recoveryMiddleware(logger))
 	r.Use(loggingMiddleware(logger))
+	// Metrics middleware runs before auth so it captures every request,
+	// including unauthenticated ones that are rejected by auth.
+	r.Use(metricsMiddleware(std))
 	// Body limit applies to all non-artifact endpoints; artifact subrouter
 	// re-applies its own (larger) limit.
 	r.Use(bodyLimitMiddleware(cfg.MaxRequestSize))
@@ -137,6 +146,13 @@ func buildRouter(cfg config.Config, logger *slog.Logger, st store.Store, art art
 	// to all downstream handlers. It validates the X-Workspace header /
 	// lmf_workspace cookie against the store and falls back to "default".
 	r.Use(workspaceMiddleware(st))
+
+	// /metrics is public (see isPublicPath). Auth middleware skips it, so
+	// Prometheus can scrape without credentials even when auth=basic.
+	r.Get("/metrics", func(w http.ResponseWriter, req *http.Request) {
+		std.RefreshProcess()
+		metrics.Handler(reg)(w, req)
+	})
 
 	// Mount API surfaces.
 	mlh := &mlflow.Handler{Store: st, Artifacts: art}

@@ -8,11 +8,15 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+
 	"github.com/litemlflow/litemlflow/internal/auth"
 	"github.com/litemlflow/litemlflow/internal/config"
+	"github.com/litemlflow/litemlflow/internal/metrics"
 	"github.com/litemlflow/litemlflow/internal/model"
 	"github.com/litemlflow/litemlflow/internal/store"
 )
@@ -227,7 +231,7 @@ func authMiddleware(cfg config.Config) func(http.Handler) http.Handler {
 
 func isPublicPath(p string) bool {
 	switch p {
-	case "/healthz", "/readyz", "/version":
+	case "/healthz", "/readyz", "/version", "/metrics":
 		return true
 	}
 	if strings.HasPrefix(p, "/ui/") || p == "/ui" || p == "/" {
@@ -318,4 +322,51 @@ func CurrentWorkspace(r *http.Request) string {
 		return ws
 	}
 	return "default"
+}
+
+// metricsMiddleware records HTTP request counts and latency into the provided
+// Standard metrics set.
+//
+// Path normalization: after the handler runs, chi.RouteContext holds the
+// matched route pattern (e.g. "/api/v1/prompts/{name}"). Using that instead
+// of r.URL.Path prevents cardinality explosion from run-IDs, experiment-IDs,
+// or any other path variables. If no route was matched (e.g. 404) we fall
+// back to the literal path, but only the first two path segments to bound
+// cardinality.
+func metricsMiddleware(std *metrics.Standard) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			start := time.Now()
+			ww := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+			next.ServeHTTP(ww, r)
+			dur := time.Since(start).Seconds()
+
+			// Prefer the chi route pattern to avoid label cardinality explosion.
+			path := r.URL.Path
+			if rctx := chi.RouteContext(r.Context()); rctx != nil {
+				if p := rctx.RoutePattern(); p != "" {
+					path = p
+				}
+			}
+			// Fallback truncation: keep only the first two path segments for
+			// unmatched routes so we don't create unbounded label values.
+			if path == r.URL.Path {
+				path = truncatePath(path, 2)
+			}
+
+			status := strconv.Itoa(ww.status)
+			std.HTTPRequestsTotal.Inc(r.Method, path, status)
+			std.HTTPRequestDurationSeconds.Observe(dur, r.Method, path)
+		})
+	}
+}
+
+// truncatePath returns the first n segments of a slash-delimited path,
+// preserving the leading slash. E.g. truncatePath("/a/b/c/d", 2) → "/a/b".
+func truncatePath(p string, n int) string {
+	parts := strings.SplitN(strings.TrimPrefix(p, "/"), "/", n+1)
+	if len(parts) > n {
+		parts = parts[:n]
+	}
+	return "/" + strings.Join(parts, "/")
 }

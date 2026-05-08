@@ -386,3 +386,47 @@ sudo systemctl enable --now litemlflow
 ```
 
 Put a Caddy/Nginx in front for TLS (Caddy auto-provisions Let's Encrypt; v0.2 will bring this in-process).
+
+## 11. Scrape LiteMLflow with Prometheus
+
+LiteMLflow exposes `GET /metrics` in OpenMetrics text format. The endpoint is
+public (no credentials required) even when `auth=basic` is configured.
+
+### prometheus.yml
+
+```yaml
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: litemlflow
+    static_configs:
+      - targets: ["localhost:5000"]
+    # No authentication needed — /metrics is always public.
+    # If you want to restrict access at the network layer, put LiteMLflow
+    # behind a reverse proxy and allow-list the Prometheus scraper IP.
+```
+
+Point Prometheus at your LiteMLflow instance and it will scrape every 15 s.
+
+### Quick smoke test (no Prometheus required)
+
+```bash
+# Check the endpoint is reachable and returns OpenMetrics text.
+curl -s http://localhost:5000/metrics | grep "^litemlflow_"
+
+# Verify at least the HTTP request counter is present.
+curl -s http://localhost:5000/metrics | grep litemlflow_http_requests_total
+
+# Watch the request counter grow in real time.
+watch -n 5 'curl -s http://localhost:5000/metrics | grep litemlflow_http_requests_total'
+```
+
+### Key metrics to alert on
+
+| Alert | Expression | Meaning |
+|---|---|---|
+| High error rate | `rate(litemlflow_http_requests_total{status=~"5.."}[5m]) > 0.01` | More than 1% of requests are 5xx |
+| Slow p95 latency | `histogram_quantile(0.95, rate(litemlflow_http_request_duration_seconds_bucket[5m])) > 0.5` | 95th-percentile latency above 500 ms |
+| DB growth | `litemlflow_db_size_bytes > 5e9` | Database is larger than 5 GiB |
+| Process restarted | `increase(litemlflow_build_info[5m]) > 0` | Build-info gauge resets on restart |
