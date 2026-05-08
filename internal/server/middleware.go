@@ -30,6 +30,8 @@ const (
 	ctxKeySession
 	// TENANCY: workspace id carried in context for downstream scoping.
 	ctxKeyWorkspace
+	// RBAC: resolved role for the current user in the current workspace.
+	ctxKeyRole
 )
 
 // requestIDMiddleware attaches a short request id to context and response.
@@ -322,6 +324,83 @@ func CurrentWorkspace(r *http.Request) string {
 		return ws
 	}
 	return "default"
+}
+
+// rbacMiddleware enforces role-based access control after workspaceMiddleware.
+//
+// Open-mode rules (pass-through with no role gate):
+//  1. cfg.Auth == "none": single-user mode, RBAC inactive.
+//  2. Workspace is "default" AND it has zero configured members: fresh-install
+//     open mode — preserves backward compat for MLflow clients and solo users.
+//
+// For all other requests:
+//   - The user's role in the workspace is resolved via store.GetMemberRole.
+//   - If the user is not a member: 403 Forbidden.
+//   - The resolved role is stashed in ctxKeyRole and forwarded as the
+//     X-LiteMLflow-Role request header so downstream handlers can read it
+//     without importing the server package (avoids circular deps).
+//   - requiredRole (see rbac.go) maps (method, path) to a minimum role;
+//     if the user's role is insufficient: 403 Forbidden.
+func rbacMiddleware(cfg config.Config, st store.Store) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// 1. auth=none → RBAC inactive.
+			if cfg.Auth == "none" {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			ws, _ := r.Context().Value(ctxKeyWorkspace).(string)
+			if ws == "" {
+				ws = "default"
+			}
+
+			// 2. default workspace with zero members → open mode.
+			if ws == "default" {
+				members, err := st.ListMembers(r.Context(), ws)
+				if err != nil || len(members) == 0 {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+
+			// Resolve user identity.
+			user, _ := r.Context().Value(ctxKeyUser).(string)
+			if user == "" {
+				user = r.Header.Get("X-LiteMLflow-User")
+			}
+
+			// Look up membership.
+			role, err := st.GetMemberRole(r.Context(), ws, user)
+			if err != nil {
+				writeError(w, http.StatusForbidden, "PERMISSION_DENIED",
+					"you are not a member of workspace "+ws)
+				return
+			}
+
+			// Stash role in context and header.
+			ctx := context.WithValue(r.Context(), ctxKeyRole, role)
+			r = r.WithContext(ctx)
+			r.Header.Set("X-LiteMLflow-Role", role)
+
+			// Check whether the route requires a higher role.
+			required := requiredRole(r.Method, r.URL.Path)
+			if required != "" && !roleAtLeast(role, required) {
+				writeError(w, http.StatusForbidden, "PERMISSION_DENIED",
+					"role "+role+" cannot perform this operation (requires "+required+")")
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// roleAtLeast returns true if actual satisfies the minimum required role.
+// Role hierarchy: admin > editor > viewer.
+func roleAtLeast(actual, required string) bool {
+	rank := map[string]int{"viewer": 1, "editor": 2, "admin": 3}
+	return rank[actual] >= rank[required]
 }
 
 // metricsMiddleware records HTTP request counts and latency into the provided

@@ -147,6 +147,10 @@ type PKCEState struct {
 	// CodeVerifier is the PKCE plain-text verifier; only the SHA-256 hash
 	// (code_challenge) is sent to the IdP.
 	CodeVerifier string `json:"cv"`
+	// Nonce is the OIDC nonce sent to the IdP and expected back in the
+	// ID token "nonce" claim. Empty for cookies set before nonce support was
+	// added (v0.2→v0.3 in-flight upgrade); Exchange skips the check when empty.
+	Nonce string `json:"nonce,omitempty"`
 	// ReturnTo is the original URL the user wanted to reach (optional).
 	ReturnTo string `json:"r,omitempty"`
 }

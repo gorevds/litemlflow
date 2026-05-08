@@ -171,6 +171,39 @@ Valid roles: `viewer`, `editor`, `admin`. Upserts — calling again changes the 
 
 Workspace IDs are slugs: lowercase letters, digits, and hyphens; max 64 characters. They are immutable after creation. The `default` workspace is seeded by migration 005 and may not be deleted.
 
+### Roles (RBAC)
+
+Every workspace member has exactly one role. Roles are hierarchical: `admin > editor > viewer`.
+
+| Action | viewer | editor | admin |
+|---|:---:|:---:|:---:|
+| Read experiments / runs / metrics in workspace | ✅ | ✅ | ✅ |
+| Create / update experiments, runs, metrics | ❌ | ✅ | ✅ |
+| Manage workspace settings (rename, delete) | ❌ | ❌ | ✅ |
+| Add / remove members | ❌ | ❌ | ✅ |
+
+Roles are enforced by `rbacMiddleware`, which runs after `workspaceMiddleware`. The workspace used for the RBAC check is the one resolved from `X-Workspace` / `lmf_workspace` / fallback, not the workspace ID embedded in the URL path.
+
+#### Open mode (no-gate rule)
+
+RBAC is **inactive** (pass-through) in two cases:
+
+1. **`auth=none`** — single-user / anonymous mode. No roles are checked.
+2. **Default workspace with zero configured members** — fresh-install open mode. This preserves backward compatibility for solo users and MLflow clients that have never configured workspace membership. As soon as the first member is added to `"default"`, the role gate activates.
+
+The open-mode rule for non-default workspaces does **not** apply: any workspace that is not `"default"` requires explicit membership regardless of whether it has zero members.
+
+#### Path classification
+
+The middleware classifies routes into three permission tiers:
+
+| Tier | Examples |
+|---|---|
+| `admin` | `POST /api/v1/workspaces`, `PATCH/DELETE /api/v1/workspaces/{id}`, `PUT/DELETE /api/v1/workspaces/{id}/members/...` |
+| `editor` | `POST/PUT/DELETE /api/2.0/mlflow/...`, `POST /api/v1/traces`, `POST /api/v1/prompts`, `POST /api/v1/evals` |
+| `viewer` | `GET /api/2.0/mlflow/...`, `GET /api/v1/...` (non-auth, non-health) |
+| *(none)* | `/healthz`, `/readyz`, `/version`, `/metrics`, `/ui/...`, `/api/v1/auth/...` |
+
 ### MLflow compat layer
 
 The MLflow API endpoints (`/api/2.0/mlflow/experiments/...`) are workspace-aware: `CreateExperiment`, `SearchExperiments`, and `GetExperimentByName` all operate within the workspace resolved from the request. Existing MLflow Python clients that send no `X-Workspace` header continue to use the `default` workspace unchanged.
@@ -210,4 +243,4 @@ Set `--auth=oidc` and provide:
 
 **JWT verification:** v1 supports RS256 only. The JWKS is fetched once at startup and cached; rotate keys by restarting the server. ES256 / EdDSA support is planned for v0.3.
 
-**Security notes:** The PKCE `code_challenge` uses S256 (SHA-256). The anti-CSRF `state` is 24 bytes of `crypto/rand`. The `lmf_oidc_state` cookie is short-lived (10 minutes) and HttpOnly. Session IDs are 32 bytes of `crypto/rand` hex-encoded.
+**Security notes:** The PKCE `code_challenge` uses S256 (SHA-256). The anti-CSRF `state` is 24 bytes of `crypto/rand`. A 32-byte `nonce` is generated per login attempt, included in the auth URL, stashed in the state cookie, and validated against the `nonce` claim in the returned ID token — preventing token replay across sessions. The `lmf_oidc_state` cookie is short-lived (10 minutes) and HttpOnly. Session IDs are 32 bytes of `crypto/rand` hex-encoded.
