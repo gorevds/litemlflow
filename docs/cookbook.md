@@ -891,6 +891,121 @@ LiteMLflow uses **Largest-Triangle-Three-Buckets (LTTB)** by Steinarsson (2013).
 | Programmatic access that needs every point | `?max_results=N&page_token=...` |
 | Small series (≤ N points) | Either; LTTB returns all points unchanged |
 
+## 14. Provision experiments and prompts via Terraform
+
+LiteMLflow ships a Terraform provider (`terraform/`) that lets infrastructure
+teams declare experiments, prompts, registered models, and workspaces in HCL
+and apply them through the standard `terraform apply` lifecycle.
+
+### Install (local dev_overrides)
+
+```bash
+# Build the provider binary (Go 1.22+ required).
+make terraform-build
+# → bin/terraform-provider-litemlflow
+
+# Tell Terraform to use the local binary instead of the registry.
+# Create or edit ~/.terraformrc:
+cat >> ~/.terraformrc <<'EOF'
+provider_installation {
+  dev_overrides {
+    "litemlflow/litemlflow" = "/path/to/repo/bin"
+  }
+  direct {}
+}
+EOF
+```
+
+### Provider configuration
+
+```hcl
+terraform {
+  required_providers {
+    litemlflow = {
+      source  = "litemlflow/litemlflow"
+      version = "~> 0.1"
+    }
+  }
+}
+
+provider "litemlflow" {
+  url      = "https://lmf.example.com"
+  username = "alice"
+  password = var.litemlflow_password  # use a variable, not a literal
+}
+```
+
+Alternatively, set environment variables:
+```bash
+export LITEMLFLOW_URL=https://lmf.example.com
+export LITEMLFLOW_BASIC_USER=alice
+export LITEMLFLOW_BASIC_PASS=secret
+```
+
+### Declare resources
+
+```hcl
+resource "litemlflow_experiment" "training" {
+  name              = "production-training"
+  artifact_location = "mlflow-artifacts:/training"
+  tags = {
+    team   = "ml-platform"
+    domain = "search"
+  }
+}
+
+resource "litemlflow_prompt" "rag_system" {
+  name        = "rag.system"
+  content     = file("${path.module}/prompts/rag-system.txt")
+  description = "Production RAG system prompt"
+}
+
+resource "litemlflow_prompt_alias" "rag_system_prod" {
+  name    = litemlflow_prompt.rag_system.name
+  alias   = "production"
+  version = litemlflow_prompt.rag_system.version
+}
+
+resource "litemlflow_registered_model" "retriever" {
+  name        = "rag-retriever"
+  description = "Production RAG retrieval model"
+  tags        = { framework = "sentence-transformers" }
+}
+
+resource "litemlflow_workspace" "team_nlp" {
+  id          = "team-nlp"
+  name        = "NLP Team"
+  description = "Sentence embeddings and RAG work"
+}
+```
+
+### Apply
+
+```bash
+terraform plan    # preview changes
+terraform apply   # create/update resources
+```
+
+### Key design notes
+
+- **Prompts are append-only**: changing `content` creates a new version on the
+  server. Terraform updates the `version` attribute in state automatically.
+- **Prompt alias is mutable**: changing `version` re-points the alias without
+  destroying and recreating it.
+- **Experiment tags**: the MLflow compat API supports upsert but not
+  `delete-experiment-tag`, so tags removed from HCL are left on the server.
+  Registered model tags are fully synced (upsert + delete).
+- **Workspace IDs** are immutable slugs; changing `id` triggers a replace.
+
+### Running provider tests
+
+```bash
+make terraform-test
+# → go test ./... inside terraform/ (pure unit tests, no live server needed)
+```
+
+A complete runnable example is at `terraform/examples/basic/`.
+
 ## 8. Run as a systemd service
 
 `/etc/systemd/system/litemlflow.service`:
