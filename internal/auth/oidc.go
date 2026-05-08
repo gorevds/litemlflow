@@ -88,6 +88,11 @@ func NewProvider(issuer, clientID, clientSecret, redirectURL string, scopes []st
 
 // EnsureDiscovery fetches and caches the OIDC discovery document if not already
 // cached. Subsequent calls are no-ops.
+//
+// SECURITY: validates that the issuer, token endpoint, and JWKS URI all use
+// HTTPS. Loopback (http://127.0.0.1, http://localhost) is allowed for local
+// dev / tests. Any other plain-HTTP URL is rejected to prevent the token
+// endpoint exchange or JWKS fetch from happening over plaintext.
 func (p *Provider) EnsureDiscovery(ctx context.Context) error {
 	p.mu.RLock()
 	already := p.discoveryDoc != nil
@@ -95,11 +100,20 @@ func (p *Provider) EnsureDiscovery(ctx context.Context) error {
 	if already {
 		return nil
 	}
+	if err := requireSecureURL("issuer", p.issuer); err != nil {
+		return err
+	}
 
 	wellKnown := strings.TrimRight(p.issuer, "/") + "/.well-known/openid-configuration"
 	doc, err := fetchJSON[oidcDiscovery](ctx, wellKnown)
 	if err != nil {
 		return fmt.Errorf("fetch OIDC discovery from %s: %w", wellKnown, err)
+	}
+	if err := requireSecureURL("token_endpoint", doc.TokenEndpoint); err != nil {
+		return err
+	}
+	if err := requireSecureURL("jwks_uri", doc.JWKSURI); err != nil {
+		return err
 	}
 
 	jwks, err := fetchJWKS(ctx, doc.JWKSURI)
@@ -112,6 +126,25 @@ func (p *Provider) EnsureDiscovery(ctx context.Context) error {
 	p.jwks = jwks
 	p.mu.Unlock()
 	return nil
+}
+
+// requireSecureURL rejects plaintext-HTTP URLs unless they target a loopback
+// host (allowed for local dev). This stops the OIDC handshake from sending
+// the auth code, client secret, or JWKS over plaintext.
+func requireSecureURL(label, raw string) error {
+	if raw == "" {
+		return fmt.Errorf("%s URL is empty", label)
+	}
+	switch {
+	case strings.HasPrefix(raw, "https://"):
+		return nil
+	case strings.HasPrefix(raw, "http://127.0.0.1"),
+		strings.HasPrefix(raw, "http://localhost"),
+		strings.HasPrefix(raw, "http://[::1]"):
+		return nil
+	default:
+		return fmt.Errorf("%s URL must use HTTPS (or loopback HTTP for dev): %s", label, raw)
+	}
 }
 
 // NewPKCEVerifier generates a high-entropy PKCE code verifier (RFC 7636 §4.1).

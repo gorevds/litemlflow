@@ -624,7 +624,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
 			return
 		}
-		auth.SetSessionCookieInsecure(w, sess.ID, time.UnixMilli(sess.ExpiresAt))
+		auth.SetSessionCookieAuto(w, r, sess.ID, time.UnixMilli(sess.ExpiresAt))
 		writeJSON(w, map[string]any{"ok": true, "session_expires_at": sess.ExpiresAt})
 	case "none":
 		// In "none" mode we still support sessions so the UI can carry identity.
@@ -633,7 +633,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
 			return
 		}
-		auth.SetSessionCookieInsecure(w, sess.ID, time.UnixMilli(sess.ExpiresAt))
+		auth.SetSessionCookieAuto(w, r, sess.ID, time.UnixMilli(sess.ExpiresAt))
 		writeJSON(w, map[string]any{"ok": true, "session_expires_at": sess.ExpiresAt})
 	default:
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "unknown auth mode")
@@ -674,7 +674,7 @@ func (h *Handler) OIDCStart(w http.ResponseWriter, r *http.Request) {
 
 	returnTo := r.URL.Query().Get("return_to")
 	pkceState := auth.PKCEState{State: state, CodeVerifier: verifier, ReturnTo: returnTo}
-	if err := auth.SetOIDCStateCookieInsecure(w, pkceState); err != nil {
+	if err := auth.SetOIDCStateCookieAuto(w, r, pkceState); err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to set state cookie")
 		return
 	}
@@ -747,7 +747,7 @@ func (h *Handler) OIDCCallback(w http.ResponseWriter, r *http.Request) {
 
 	// Clear the PKCE state cookie — it's single-use.
 	auth.ClearOIDCStateCookie(w)
-	auth.SetSessionCookieInsecure(w, sess.ID, time.UnixMilli(sess.ExpiresAt))
+	auth.SetSessionCookieAuto(w, r, sess.ID, time.UnixMilli(sess.ExpiresAt))
 
 	returnTo := pkceState.ReturnTo
 	if returnTo == "" || !strings.HasPrefix(returnTo, "/") {

@@ -56,6 +56,43 @@ func SetSessionCookie(w http.ResponseWriter, sessionID string, expiresAt time.Ti
 	})
 }
 
+// IsRequestSecure returns true if the inbound request was carried over TLS
+// (either directly or via a trusted reverse proxy that set X-Forwarded-Proto).
+// Handlers use this to decide whether to set the Secure flag on outbound
+// cookies — never assume; always check, so we don't accidentally send
+// Secure cookies that browsers silently drop, and don't send insecure
+// cookies when TLS is actually available.
+func IsRequestSecure(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if r.TLS != nil {
+		return true
+	}
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto == "https" {
+		return true
+	}
+	return false
+}
+
+// SetSessionCookieAuto chooses the Secure flag based on request transport.
+// Prefer this over SetSessionCookie / SetSessionCookieInsecure in handlers.
+func SetSessionCookieAuto(w http.ResponseWriter, r *http.Request, sessionID string, expiresAt time.Time) {
+	if IsRequestSecure(r) {
+		SetSessionCookie(w, sessionID, expiresAt)
+	} else {
+		SetSessionCookieInsecure(w, sessionID, expiresAt)
+	}
+}
+
+// SetOIDCStateCookieAuto picks Secure based on transport.
+func SetOIDCStateCookieAuto(w http.ResponseWriter, r *http.Request, state PKCEState) error {
+	if IsRequestSecure(r) {
+		return SetOIDCStateCookie(w, state)
+	}
+	return SetOIDCStateCookieInsecure(w, state)
+}
+
 // SetSessionCookieInsecure is like SetSessionCookie but omits the Secure flag.
 // Use in tests and plain-HTTP dev environments only.
 func SetSessionCookieInsecure(w http.ResponseWriter, sessionID string, expiresAt time.Time) {

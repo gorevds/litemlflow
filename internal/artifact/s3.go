@@ -55,6 +55,12 @@ func NewS3Store(cfg S3Config) (*S3Store, error) {
 	if cfg.Bucket == "" {
 		return nil, fmt.Errorf("s3: bucket is required")
 	}
+	// Defense-in-depth bucket name validation (S3 actually rejects invalid
+	// names too, but catching it at construction yields a clearer error and
+	// blocks accidental host-header injection in virtual-hosted-style URLs).
+	if !validBucketName(cfg.Bucket) {
+		return nil, fmt.Errorf("s3: bucket name %q must be 3-63 chars, lowercase alphanumeric, hyphen, or dot", cfg.Bucket)
+	}
 	if cfg.Region == "" {
 		return nil, fmt.Errorf("s3: region is required")
 	}
@@ -93,30 +99,37 @@ func NewS3Store(cfg S3Config) (*S3Store, error) {
 
 // ---- Store implementation ---------------------------------------------------
 
-// Upload stores r at runID/relPath, enforcing maxSize when > 0.
+// defaultUploadCap is the implicit upload cap when caller passes maxSize<=0.
+// It exists so a malicious client streaming an unbounded body cannot exhaust
+// server memory. Operators who need to upload >5GiB must explicitly raise
+// the per-server cap (config.MaxArtifactSize) AND pass it to Upload().
+const defaultUploadCap = int64(5) << 30 // 5 GiB
+
+// Upload stores r at runID/relPath, enforcing maxSize when > 0. When
+// maxSize <= 0, defaultUploadCap (5 GiB) is applied as a safety belt.
 func (s *S3Store) Upload(runID, relPath string, r io.Reader, maxSize int64) error {
 	if err := validateRunID(runID); err != nil {
 		return err
 	}
 	key := s.key(runID, relPath)
 
-	var body io.Reader = r
-	var contentLength int64 = -1 // unknown
-
-	if maxSize > 0 {
-		// Read into buffer to (a) enforce size cap, (b) know Content-Length.
-		buf := &bytes.Buffer{}
-		lr := io.LimitReader(r, maxSize+1)
-		n, err := io.Copy(buf, lr)
-		if err != nil {
-			return fmt.Errorf("s3 upload read: %w", err)
-		}
-		if n > maxSize {
-			return ErrPayloadTooBig
-		}
-		body = buf
-		contentLength = n
+	if maxSize <= 0 {
+		maxSize = defaultUploadCap
 	}
+
+	// Read into buffer to (a) enforce size cap, (b) know Content-Length for
+	// SigV4 (S3 wants Content-Length on every PUT).
+	buf := &bytes.Buffer{}
+	lr := io.LimitReader(r, maxSize+1)
+	n, err := io.Copy(buf, lr)
+	if err != nil {
+		return fmt.Errorf("s3 upload read: %w", err)
+	}
+	if n > maxSize {
+		return ErrPayloadTooBig
+	}
+	body := io.Reader(buf)
+	contentLength := n
 
 	req, err := s.newRequest(http.MethodPut, key, body, contentLength, nil)
 	if err != nil {
@@ -295,22 +308,40 @@ func (s *S3Store) key(runID, relPath string) string {
 	return base + clean
 }
 
-// objectURL builds the full HTTP URL for a specific key.
+// objectURL builds the full HTTP URL for a specific key. Each path segment
+// of the key is percent-encoded so keys with spaces, parentheses, etc. don't
+// break either url.Parse or SigV4 canonicalization.
+//
 // When key is empty it targets the bucket root (for listing).
 func (s *S3Store) objectURL(key string) string {
+	encoded := encodeKeyPath(key)
 	if s.pathStyle {
-		if key == "" {
+		if encoded == "" {
 			return s.endpoint + "/" + s.bucket
 		}
-		return s.endpoint + "/" + s.bucket + "/" + key
+		return s.endpoint + "/" + s.bucket + "/" + encoded
 	}
 	// Virtual-hosted style: inject bucket into host.
 	u, _ := url.Parse(s.endpoint)
 	u.Host = s.bucket + "." + u.Host
-	if key == "" {
+	if encoded == "" {
 		return u.String()
 	}
-	return u.String() + "/" + key
+	return u.String() + "/" + encoded
+}
+
+// encodeKeyPath percent-encodes each segment of the key while preserving
+// segment separators ("/"). url.PathEscape would also escape "/", which is
+// wrong for S3 keys.
+func encodeKeyPath(key string) string {
+	if key == "" {
+		return ""
+	}
+	parts := strings.Split(key, "/")
+	for i, p := range parts {
+		parts[i] = url.PathEscape(p)
+	}
+	return strings.Join(parts, "/")
 }
 
 // newRequest creates a signed HTTP request.
@@ -619,4 +650,27 @@ func validateRunID(runID string) error {
 		return ErrInvalidPath
 	}
 	return nil
+}
+
+// validBucketName checks the AWS S3 bucket-naming rules: 3-63 chars,
+// lowercase alphanumeric, hyphens, dots; cannot start/end with hyphen or
+// dot; cannot be formatted as an IP address; cannot have adjacent dots.
+// Real S3 also rejects more cases; this is defense in depth, not validation.
+func validBucketName(name string) bool {
+	if len(name) < 3 || len(name) > 63 {
+		return false
+	}
+	for i, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= '0' && r <= '9':
+		case r == '-' || r == '.':
+			if i == 0 || i == len(name)-1 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return !strings.Contains(name, "..")
 }
