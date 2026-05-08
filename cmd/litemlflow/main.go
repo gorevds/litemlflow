@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -190,7 +191,7 @@ func runMigrate(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
+	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
 		return err
 	}
 	st, err := store.OpenSQLite(context.Background(), cfg.DBPath, cfg.DataDir)
@@ -317,7 +318,7 @@ func runRestore(args []string) error {
 	if entries, _ := os.ReadDir(cfg.DataDir); len(entries) > 0 {
 		return errors.New("data directory is not empty; restore into a fresh directory")
 	}
-	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
+	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
 		return err
 	}
 	f, err := os.Open(*in)
@@ -330,7 +331,19 @@ func runRestore(args []string) error {
 		return err
 	}
 	defer gz.Close()
-	tr := tar.NewReader(gz)
+	// Decompression-bomb defense: cap the inflated size at a high but finite
+	// ceiling. Real-world LiteMLflow backups are under 100 GiB; the cap lets
+	// large legitimate restores succeed but stops a malicious 1 KiB → 1 EiB
+	// gzip from filling the disk. Operators with bigger backups can override
+	// via LITEMLFLOW_RESTORE_MAX_GIB.
+	maxGiB := int64(200)
+	if v := os.Getenv("LITEMLFLOW_RESTORE_MAX_GIB"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			maxGiB = n
+		}
+	}
+	limited := io.LimitReader(gz, maxGiB<<30)
+	tr := tar.NewReader(limited)
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -347,17 +360,17 @@ func runRestore(args []string) error {
 		dst := filepath.Join(cfg.DataDir, clean)
 		switch hdr.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(dst, 0o755); err != nil {
+			if err := os.MkdirAll(dst, 0o750); err != nil {
 				return err
 			}
 		case tar.TypeReg, tar.TypeRegA:
-			if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
 				return err
 			}
 			// Sanitize file modes: never restore world-writable, setuid, or
 			// other dangerous bits even if the archive specifies them.
-			// Keep only the user/group/other read-write-execute bits.
-			mode := os.FileMode(hdr.Mode) & 0o644
+			// Keep only owner+group bits.
+			mode := os.FileMode(hdr.Mode) & 0o640
 			out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
 			if err != nil {
 				return err
@@ -394,7 +407,7 @@ func runImportMLflow(args []string) error {
 	}
 
 	// Initialise the target data directory and SQLite store.
-	if err := os.MkdirAll(*dataDir, 0o755); err != nil {
+	if err := os.MkdirAll(*dataDir, 0o750); err != nil {
 		return fmt.Errorf("create data dir: %w", err)
 	}
 	dbPath := filepath.Join(*dataDir, "litemlflow.db")

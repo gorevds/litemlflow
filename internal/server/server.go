@@ -38,7 +38,7 @@ type Server struct {
 // New constructs a server, opening the store and preparing the router.
 // Call Run to start serving.
 func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Server, error) {
-	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
+	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
 		return nil, err
 	}
 	st, err := store.OpenSQLite(ctx, cfg.DBPath, cfg.DataDir)

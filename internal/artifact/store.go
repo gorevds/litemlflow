@@ -52,7 +52,7 @@ func NewFilesystemStore(root string) (*FilesystemStore, error) {
 	if root == "" {
 		return nil, errors.New("artifact root is required")
 	}
-	if err := os.MkdirAll(root, 0o755); err != nil {
+	if err := os.MkdirAll(root, 0o750); err != nil {
 		return nil, fmt.Errorf("mkdir artifact root: %w", err)
 	}
 	return &FilesystemStore{Root: root}, nil
@@ -69,11 +69,11 @@ func (f *FilesystemStore) Upload(runID, relPath string, r io.Reader, maxSize int
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(abs), 0o750); err != nil {
 		return fmt.Errorf("mkdir parent: %w", err)
 	}
 	tmp := abs + ".part"
-	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o640)
 	if err != nil {
 		return fmt.Errorf("open tmp: %w", err)
 	}

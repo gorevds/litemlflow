@@ -808,6 +808,37 @@ func (h *Handler) GetEval(w http.ResponseWriter, r *http.Request) {
 // AUTH-OIDC: now also reports auth_method from the session cookie (when
 // present). We read the user from X-LiteMLflow-User set by authMiddleware,
 // keeping the native package free of a dependency on server's ctxKey types.
+// safeReturnTo validates an OIDC return_to query parameter against open
+// redirect. Reject anything that isn't a single-leading-slash absolute path,
+// and explicitly reject protocol-relative ("//evil.com/...") URLs that
+// browsers treat as cross-origin. Empty / unsafe values fall back to the UI
+// root. We also clamp the length to keep the redirect header small.
+func safeReturnTo(s string) string {
+	const fallback = "/ui/"
+	if s == "" {
+		return fallback
+	}
+	if len(s) > 2048 {
+		return fallback
+	}
+	// Must start with a single "/" (absolute path) — never "//" (host) or
+	// scheme-prefixed ("http:", "javascript:", etc.).
+	if !strings.HasPrefix(s, "/") {
+		return fallback
+	}
+	if strings.HasPrefix(s, "//") || strings.HasPrefix(s, "/\\") {
+		return fallback
+	}
+	// Reject control characters that could smuggle headers / break the
+	// Location header (\r, \n, NUL).
+	for _, r := range s {
+		if r == '\r' || r == '\n' || r == 0x00 {
+			return fallback
+		}
+	}
+	return s
+}
+
 func (h *Handler) Whoami(w http.ResponseWriter, r *http.Request) {
 	user := r.Header.Get("X-LiteMLflow-User")
 	if user == "" {
@@ -991,10 +1022,7 @@ func (h *Handler) OIDCCallback(w http.ResponseWriter, r *http.Request) {
 	auth.ClearOIDCStateCookie(w)
 	auth.SetSessionCookieAuto(w, r, sess.ID, time.UnixMilli(sess.ExpiresAt))
 
-	returnTo := pkceState.ReturnTo
-	if returnTo == "" || !strings.HasPrefix(returnTo, "/") {
-		returnTo = "/ui/"
-	}
+	returnTo := safeReturnTo(pkceState.ReturnTo)
 	http.Redirect(w, r, returnTo, http.StatusFound)
 }
 

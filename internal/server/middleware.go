@@ -171,9 +171,16 @@ func authMiddlewareWithSessions(cfg config.Config, sessions SessionLookup) func(
 			if sessions != nil {
 				if sessID, err := auth.GetSessionID(r); err == nil {
 					if sess, err := sessions.GetSession(r.Context(), sessID); err == nil {
-						// Touch last_seen asynchronously; ignore errors.
+						// Touch last_seen asynchronously. We deliberately
+						// don't piggy-back on r.Context(): the request
+						// may be returning right now, and we still want
+						// the touch to complete. A 5s ceiling prevents
+						// a wedged DB from leaking goroutines.
 						go func() {
-							_ = sessions.TouchSession(context.Background(), sessID, time.Now().UnixMilli())
+							//nolint:contextcheck // intentional detached ctx: outlive request, see comment above
+							ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+							defer cancel()
+							_ = sessions.TouchSession(ctx, sessID, time.Now().UnixMilli())
 						}()
 						ctx := context.WithValue(r.Context(), ctxKeyUser, sess.UserID)
 						ctx = context.WithValue(ctx, ctxKeySession, sess)

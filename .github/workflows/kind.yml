@@ -1,0 +1,87 @@
+name: Kind cluster smoke
+
+# Boots a local kind cluster, builds and loads the operator image, applies
+# the CRD, creates a LiteMLflow CR, and validates that /healthz comes up
+# inside the in-cluster service. Closes the v1.0 deferred item from the
+# rc1 changelog.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "operator/**"
+      - "Dockerfile"
+      - ".github/workflows/kind.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "operator/**"
+      - "Dockerfile"
+      - ".github/workflows/kind.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kind:
+    name: kind smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.3"
+          cache: true
+
+      - name: build server image
+        run: docker build --build-arg VERSION=ci-${{ github.sha }} -t litemlflow:ci -t ghcr.io/gorevds/litemlflow:ci .
+
+      - name: build operator image
+        run: docker build -f operator/Dockerfile -t litemlflow-operator:ci .
+
+      - name: spin up kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: lmf-kind
+          wait: 120s
+
+      - name: load images into kind
+        run: |
+          # The operator deploys ghcr.io/gorevds/litemlflow:<spec.version> by
+          # default. We tag the local build under that name so kind serves it
+          # without pulling.
+          kind load docker-image ghcr.io/gorevds/litemlflow:ci --name lmf-kind
+          kind load docker-image litemlflow-operator:ci --name lmf-kind
+
+      - name: apply CRD, RBAC, and operator
+        run: |
+          kubectl apply -f operator/config/crd/litemlflow.yaml
+          kubectl apply -f operator/config/rbac/
+          kubectl apply -f operator/config/manager/manager.yaml
+          # Patch the operator image to the locally loaded ci tag.
+          kubectl -n litemlflow-system set image deployment/litemlflow-operator manager=litemlflow-operator:ci
+          kubectl -n litemlflow-system rollout status deploy/litemlflow-operator --timeout=120s || (
+            kubectl -n litemlflow-system get pods
+            kubectl -n litemlflow-system logs -l app.kubernetes.io/name=litemlflow-operator --tail 200 || true
+            exit 1
+          )
+
+      - name: create LiteMLflow CR
+        run: |
+          kubectl apply -f operator/config/samples/litemlflow_v1alpha1_litemlflow.yaml
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=litemlflow --timeout=180s
+
+      - name: smoke /healthz inside the cluster
+        run: |
+          POD=$(kubectl get pod -l app.kubernetes.io/name=litemlflow -o jsonpath='{.items[0].metadata.name}')
+          kubectl exec "$POD" -- wget -q -O- http://127.0.0.1:5000/healthz | grep -q '"ok":true'
+          echo "kind smoke passed"
+
+      - name: dump diagnostics on failure
+        if: failure()
+        run: |
+          kubectl get all -A
+          kubectl describe pods -A | tail -100
+          kubectl logs -l app.kubernetes.io/name=litemlflow --tail 200 || true

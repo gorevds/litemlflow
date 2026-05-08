@@ -673,7 +673,7 @@ func (m *MLflowImporter) saveCheckpoint() error {
 		return err
 	}
 	tmp := m.checkpointPath + ".part"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
 	return os.Rename(tmp, m.checkpointPath)

@@ -1,0 +1,15 @@
+apiVersion: litemlflow.dev/v1alpha1
+kind: LiteMLflow
+metadata:
+  name: lmf-sample
+spec:
+  # Use the locally built image (CI loads it via `kind load docker-image`).
+  # Override `image` is not part of the schema yet; we set the version tag
+  # which the operator interpolates as `litemlflow:<version>`.
+  version: ci
+  replicas: 1
+  storage:
+    size: 1Gi
+  auth:
+    mode: none
+  artifactBackend: fs

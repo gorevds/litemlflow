@@ -2,6 +2,39 @@
 
 All notable changes to LiteMLflow are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/) starting at v1.0.
 
+## [v1.0.0] — 2026-05-08
+
+**Stable v1.0.** Closes the year-1 roadmap. Production-ready under the hero use cases (solo MLE / small team) documented in `docs/vision.md`.
+
+### Added — security & supply chain hardening
+
+- **Self-pen-test baseline:** govulncheck (stdlib + deps), gosec (with a CI-enforced accept-list of triaged false positives), and semgrep (security-audit + golang rulesets) now run on every push and weekly cron via `.github/workflows/security.yml`. Full audit doc at `docs/security-audit.md` lists every finding, fix, and accepted residual. The CI gate fails any PR that introduces a new HIGH gosec finding outside the documented accept-list.
+- **Mutation-testing CI gate.** `.github/workflows/mutation.yml` runs gremlins nightly with thresholds derived from the v1.0 baseline:
+  - `internal/auth` — **89% efficacy** (CI threshold 80%)
+  - `internal/store` — **75% efficacy** (CI threshold 70%)
+  - `internal/webhooks` — **53% efficacy** (CI threshold 50%)
+- **Kind cluster CI smoke** at `.github/workflows/kind.yml`: builds server + operator images, loads them into a kind cluster, applies the CRD + RBAC + manager, creates a `LiteMLflow` CR, and confirms `/healthz` answers from the in-cluster pod. Closes the kind-cluster deferred item from rc1.
+
+### Fixed — security audit pass
+
+- **govulncheck — bumped Go toolchain to 1.26.3 (in both modules) and `golang.org/x/net` to v0.53.0**, eliminating GO-2026-{4982, 4980, 4971, 4918} (XSS in `html/template`, NUL panic in `net.Dialer`, infinite loop in HTTP/2 transport). Re-scan: 0 vulnerabilities.
+- **Open-redirect via OIDC `return_to`** — new `safeReturnTo` rejects everything that isn't a single-leading-slash absolute path: blocks `//evil.com`, CRLF / NUL injection, length > 2 KiB. Covered by `TestSafeReturnTo`.
+- **Decompression-bomb defense on `litemlflow restore`** — wraps the gzip reader in `io.LimitReader` capped at 200 GiB by default; override via `LITEMLFLOW_RESTORE_MAX_GIB`.
+- **Goroutine-leak guard** on session-touch — the detached lifetime is intentional, but a 5-second timeout now caps it so a wedged DB cannot leak goroutines.
+- **File modes tightened** — directories `0o755 → 0o750`, artifact files `0o644 → 0o640`, internal checkpoints `0o644 → 0o600`. Tar restore mask widened to drop world-writable + setuid + setgid.
+
+### Stats — Y1 cumulative
+
+- 4 quarterly themes delivered (foundation → hardening → ergonomics → distribution + polish)
+- 8 release tags from v0.2 → v1.0.0 across the year
+- ~24 K LOC Go (main + operator), ~3 K LOC Python, ~3.5 K LOC docs
+- 11 Go packages × `-race` ✓; 35 Python tests ✓; 31 MLflow client compat ✓
+- v1.0 self-audit: 4 govulncheck CVEs fixed, 6 gosec HIGH/MEDIUM fixes, 1 open-redirect fix; 29 false positives accepted with per-finding justification
+
+### Live demo
+
+[lmf.gorev.space](https://lmf.gorev.space) runs v1.0.0 with seeded demo data (3 projects with dashboards, 8 prompts, 1 echo webhook with sample deliveries).
+
 ## [v1.0.0-rc4] — 2026-05-08
 
 Wave 8 polish and feature-completeness pass driven by direct user feedback against rc3.
