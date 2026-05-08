@@ -236,6 +236,10 @@ func (s *stubStore) GetMemberRole(_ context.Context, _, _ string) (string, error
 	return "", store.ErrNotFound
 }
 
+func (s *stubStore) ListProjects(_ context.Context, _ string) ([]store.ProjectSummary, error) {
+	return nil, nil
+}
+
 // --- fuzz setup ---
 
 func newTestHandler() *native.Handler {

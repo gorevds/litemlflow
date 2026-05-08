@@ -512,6 +512,9 @@ func (s *inMemStore) ListMembers(_ context.Context, _ string) ([]*model.Workspac
 func (s *inMemStore) GetMemberRole(_ context.Context, _, _ string) (string, error) {
 	return "", store.ErrNotFound
 }
+func (s *inMemStore) ListProjects(_ context.Context, _ string) ([]store.ProjectSummary, error) {
+	return nil, nil
+}
 
 // inMemArtifactStore records uploaded artifacts.
 type inMemArtifactStore struct {

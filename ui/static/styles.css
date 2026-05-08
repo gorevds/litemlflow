@@ -496,3 +496,62 @@ button.btn-ghost:hover { background: var(--bg-alt); }
   background: color-mix(in srgb, var(--accent) 10%, var(--bg-card));
   color: var(--accent);
 }
+
+/* ── Projects (experiments grouping) ────────────────────────────────────── */
+.proj-pill {
+  display: inline-block;
+  margin-left: 8px;
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 1px 7px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) 15%, var(--bg-card));
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  vertical-align: 2px;
+}
+.proj-heading {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin: 18px 0 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.proj-count {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--fg-muted);
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  padding: 1px 6px;
+  border-radius: 999px;
+}
+.proj-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  margin-left: 16px;
+}
+.proj-toggle button {
+  border: none;
+  border-radius: 0;
+  padding: 4px 10px;
+  background: var(--bg-card);
+  color: var(--fg-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+.proj-toggle button + button { border-left: 1px solid var(--border); }
+.proj-toggle button.active {
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg-card));
+  color: var(--accent);
+}
+.proj-toggle button:hover { background: var(--bg-alt); }

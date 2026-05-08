@@ -243,6 +243,37 @@ func (s *SQLiteStore) SetExperimentTag(ctx context.Context, id int64, key, value
 	return err
 }
 
+// ListProjects returns distinct values of the lmf.project tag plus the empty
+// "no project" bucket, with the count of active experiments in each. The
+// query is workspace-scoped; passing empty workspaceID falls back to "default".
+func (s *SQLiteStore) ListProjects(ctx context.Context, workspaceID string) ([]ProjectSummary, error) {
+	if workspaceID == "" {
+		workspaceID = "default"
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT COALESCE(t.value, '') AS project, COUNT(*) AS n
+		FROM experiments e
+		LEFT JOIN experiment_tags t
+		  ON t.experiment_id = e.id AND t.key = ?
+		WHERE e.workspace_id = ? AND e.lifecycle_stage = 'active'
+		GROUP BY project
+		ORDER BY (project = '') ASC, project ASC
+	`, ProjectTagKey, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ProjectSummary
+	for rows.Next() {
+		var p ProjectSummary
+		if err := rows.Scan(&p.Name, &p.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
 // SearchExperiments returns experiments matching opt. Supports a tiny subset
 // of MLflow filter syntax in v0.1: an empty filter, or `name = '...'` /
 // `name LIKE '...'`.

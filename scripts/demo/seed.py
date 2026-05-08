@@ -60,7 +60,8 @@ def seed(url: str) -> None:
 
     # Experiment 1: RAG quality sweep
     rag_eid = c.create_experiment(f"demo-rag-quality-{suffix}",
-                                  tags={"team": "search", "domain": "wikipedia"})
+                                  tags={"team": "search", "domain": "wikipedia",
+                                        "lmf.project": "RAG"})
 
     rag_runs: list[str] = []
     for i, (model, k, prompt_v) in enumerate([
@@ -113,7 +114,8 @@ def seed(url: str) -> None:
 
     # Experiment 2: intent classifier
     cls_eid = c.create_experiment(f"demo-intent-classifier-{suffix}",
-                                  tags={"team": "support", "task": "classification"})
+                                  tags={"team": "support", "task": "classification",
+                                        "lmf.project": "Classification"})
     cls_runs: list[str] = []
     for i, model in enumerate(["gpt-4o-mini", "claude-3-5-haiku-20241022", "gpt-4o"]):
         with c.start_run(cls_eid, name=f"intent-{model.split('-')[0]}") as run:
@@ -129,7 +131,8 @@ def seed(url: str) -> None:
 
     # Experiment 3: classic ML — sklearn-style hyperparam sweep, no LLM
     sk_eid = c.create_experiment(f"demo-sklearn-iris-{suffix}",
-                                 tags={"team": "ml", "domain": "tabular"})
+                                 tags={"team": "ml", "domain": "tabular",
+                                       "lmf.project": "Tabular ML"})
     for i, c_param in enumerate([0.01, 0.1, 1.0, 10.0]):
         with c.start_run(sk_eid, name=f"lr-C={c_param}") as run:
             run.log_param("model", "LogisticRegression")

@@ -198,6 +198,9 @@ func (nopStore) GetMemberRole(_ context.Context, _, _ string) (string, error) { 
 func (nopStore) GetExperimentByNameInWorkspace(_ context.Context, _, _ string) (*model.Experiment, error) {
 	panic("not impl")
 }
+func (nopStore) ListProjects(_ context.Context, _ string) ([]store.ProjectSummary, error) {
+	return nil, nil
+}
 
 // ---- in-memory gRPC server setup -------------------------------------------
 

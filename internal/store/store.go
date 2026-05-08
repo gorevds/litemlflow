@@ -38,6 +38,22 @@ type SearchResult[T any] struct {
 	NextPageToken string
 }
 
+// ProjectTagKey is the canonical experiment-tag key that groups experiments
+// into "projects" in the UI. It is namespaced (`lmf.` prefix) so it never
+// collides with user-supplied tag keys. The MLflow client sets it via the
+// standard `set_experiment_tag` endpoint, so no custom client is needed.
+const ProjectTagKey = "lmf.project"
+
+// ProjectSummary is one row in the projects-list response.
+type ProjectSummary struct {
+	// Name is the project name (the value of the lmf.project tag); empty
+	// string represents experiments with no project assigned.
+	Name string
+	// Count is the number of (active) experiments in this project, in the
+	// requested workspace.
+	Count int
+}
+
 // MetricHistoryOptions controls the get-history endpoint.
 // MaxResults=0 means return all points.
 type MetricHistoryOptions struct {
@@ -59,6 +75,11 @@ type Store interface {
 	SetExperimentLifecycle(ctx context.Context, id int64, stage string) error
 	SearchExperiments(ctx context.Context, opt SearchOptions) (SearchResult[*model.Experiment], error)
 	SetExperimentTag(ctx context.Context, id int64, key, value string) error
+	// ListProjects returns distinct values of the special tag `lmf.project` in
+	// the workspace, with the count of experiments under each. Empty string
+	// signals experiments without any project assigned. The UI uses this to
+	// render the experiments list grouped by project. See docs/spec/api-native.md.
+	ListProjects(ctx context.Context, workspaceID string) ([]ProjectSummary, error)
 
 	// Runs.
 	CreateRun(ctx context.Context, r *model.Run) error

@@ -518,7 +518,11 @@
     async renderExperiments() {
       const main = $("#app");
       try {
-        const data = await fetchJSON("/api/2.0/mlflow/experiments/search?max_results=1000");
+        const [data, projectsRes] = await Promise.all([
+          fetchJSON("/api/2.0/mlflow/experiments/search?max_results=1000"),
+          // Projects endpoint is best-effort — older servers won't have it.
+          fetchJSON("/api/v1/projects").catch(() => ({ projects: [] })),
+        ]);
         const exps = (data.experiments || []).filter(e => e.lifecycle_stage === "active");
         if (exps.length === 0) {
           main.innerHTML = `
@@ -532,26 +536,97 @@ mlflow.log_metric("loss", 0.42)</pre>
           return;
         }
 
-        const rows = exps.map((e, i) => `
-          <tr data-row-index="${i}" onclick="location.hash='#/experiments/${e.experiment_id}'">
-            <td class="mono">${e.experiment_id}</td>
-            <td><a href="#/experiments/${e.experiment_id}">${escapeHTML(e.name)}</a></td>
-            <td>${formatTime(e.creation_time)}</td>
-            <td>${formatTime(e.last_update_time)}</td>
-            <td>${(e.tags || []).map(t => `<span class="tag">${escapeHTML(t.key)}=${escapeHTML(t.value)}</span>`).join(" ")}</td>
-          </tr>`).join("");
+        // Pull lmf.project tag out of each experiment for grouping.
+        const PROJ_KEY = "lmf.project";
+        const projectOf = e => ((e.tags || []).find(t => t.key === PROJ_KEY) || {}).value || "";
+        const projects = projectsRes.projects || [];
+
+        // View mode is preserved in localStorage so the user's last choice survives reload.
+        const groupKey = "litemlflow.experiments.groupBy";
+        let groupBy = localStorage.getItem(groupKey) || (projects.length > 0 ? "project" : "flat");
+
+        const renderRows = (filterFn) => exps.filter(filterFn || (() => true)).map((e, i) => {
+          const proj = projectOf(e);
+          const otherTags = (e.tags || []).filter(t => t.key !== PROJ_KEY);
+          return `
+            <tr data-row-index="${i}" onclick="location.hash='#/experiments/${e.experiment_id}'">
+              <td class="mono">${e.experiment_id}</td>
+              <td><a href="#/experiments/${e.experiment_id}">${escapeHTML(e.name)}</a>${proj ? ` <span class="proj-pill" title="Project">${escapeHTML(proj)}</span>` : ""}</td>
+              <td>${formatTime(e.creation_time)}</td>
+              <td>${formatTime(e.last_update_time)}</td>
+              <td>${otherTags.map(t => `<span class="tag">${escapeHTML(t.key)}=${escapeHTML(t.value)}</span>`).join(" ")}</td>
+            </tr>`;
+        }).join("");
+
+        // Group sections (one <table> per project) when groupBy === 'project'.
+        const renderGrouped = () => {
+          // Build buckets from the live exps array (don't trust counts from the
+          // /projects endpoint — workspace selector can change between requests).
+          const buckets = new Map();
+          exps.forEach(e => {
+            const p = projectOf(e);
+            if (!buckets.has(p)) buckets.set(p, []);
+            buckets.get(p).push(e);
+          });
+          // Stable order: real projects first (alphabetical), then "no project" last.
+          const names = Array.from(buckets.keys()).sort((a, b) => {
+            if (a === "" && b !== "") return 1;
+            if (b === "" && a !== "") return -1;
+            return a.localeCompare(b);
+          });
+          return names.map(name => {
+            const list = buckets.get(name);
+            const heading = name === "" ? "No project" : name;
+            const rows = list.map((e, i) => {
+              const otherTags = (e.tags || []).filter(t => t.key !== PROJ_KEY);
+              return `
+                <tr data-row-index="${i}" onclick="location.hash='#/experiments/${e.experiment_id}'">
+                  <td class="mono">${e.experiment_id}</td>
+                  <td><a href="#/experiments/${e.experiment_id}">${escapeHTML(e.name)}</a></td>
+                  <td>${formatTime(e.creation_time)}</td>
+                  <td>${formatTime(e.last_update_time)}</td>
+                  <td>${otherTags.map(t => `<span class="tag">${escapeHTML(t.key)}=${escapeHTML(t.value)}</span>`).join(" ")}</td>
+                </tr>`;
+            }).join("");
+            return `
+              <h2 class="proj-heading">${escapeHTML(heading)} <span class="proj-count">${list.length}</span></h2>
+              <div class="card" style="padding:0; margin-bottom:18px;">
+                <table>
+                  <thead><tr><th style="width:60px">ID</th><th>Name</th><th>Created</th><th>Updated</th><th>Tags</th></tr></thead>
+                  <tbody>${rows}</tbody>
+                </table>
+              </div>`;
+          }).join("");
+        };
 
         main.innerHTML = `
           <div class="toolbar">
             <h1 style="margin:0">Experiments</h1>
-            <input type="search" id="exp-search" placeholder="Filter by name…" style="margin-left:auto" />
+            <div class="proj-toggle" role="tablist" aria-label="Group by">
+              <button data-mode="project" class="${groupBy === "project" ? "active" : ""}" title="Group by project">By project</button>
+              <button data-mode="flat" class="${groupBy === "flat" ? "active" : ""}" title="Flat list">Flat</button>
+            </div>
+            <input type="search" id="exp-search" placeholder="Filter by name…" />
           </div>
-          <div class="card" style="padding:0">
-            <table>
-              <thead><tr><th>ID</th><th>Name</th><th>Created</th><th>Updated</th><th>Tags</th></tr></thead>
-              <tbody id="exp-tbody">${rows}</tbody>
-            </table>
+          <div id="exp-list">
+            ${groupBy === "project" ? renderGrouped() : `
+              <div class="card" style="padding:0">
+                <table>
+                  <thead><tr><th>ID</th><th>Name</th><th>Created</th><th>Updated</th><th>Tags</th></tr></thead>
+                  <tbody id="exp-tbody">${renderRows()}</tbody>
+                </table>
+              </div>`}
           </div>`;
+
+        // Group toggle
+        $$(".proj-toggle button", main).forEach(btn => {
+          btn.addEventListener("click", () => {
+            const mode = btn.dataset.mode;
+            if (mode === groupBy) return;
+            localStorage.setItem(groupKey, mode);
+            App.renderExperiments();  // re-render
+          });
+        });
 
         // Live filter
         $("#exp-search").addEventListener("input", function () {
@@ -559,6 +634,14 @@ mlflow.log_metric("loss", 0.42)</pre>
           $$("tr[data-row-index]", main).forEach(tr => {
             const name = tr.querySelector("td:nth-child(2)").textContent.toLowerCase();
             tr.style.display = (!q || name.includes(q)) ? "" : "none";
+          });
+          // Also hide group headings whose siblings are all hidden.
+          $$(".proj-heading", main).forEach(h => {
+            const card = h.nextElementSibling;
+            if (!card) return;
+            const visible = $$("tr[data-row-index]", card).some(tr => tr.style.display !== "none");
+            h.style.display = visible ? "" : "none";
+            card.style.display = visible ? "" : "none";
           });
         });
       } catch (err) {

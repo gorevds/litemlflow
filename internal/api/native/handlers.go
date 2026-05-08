@@ -84,6 +84,42 @@ func (h *Handler) Mount(r chi.Router) {
 
 	// TENANCY: workspace endpoints
 	h.mountWorkspaceRoutes(r)
+
+	// PROJECTS: list distinct lmf.project tag values in the current workspace.
+	r.Get("/api/v1/projects", h.ListProjects)
+}
+
+// projectDTO is one row in the projects-list response.
+type projectDTO struct {
+	Name  string `json:"name"`
+	Count int    `json:"count"`
+}
+
+// ListProjects handles GET /api/v1/projects.
+//
+// Returns the set of distinct values of the experiment tag `lmf.project` in
+// the workspace resolved from the request (X-Workspace header or default).
+// The empty-string bucket counts experiments that have no project assigned.
+//
+// Why a tag and not a separate table: keeps the data model minimal, makes
+// every existing MLflow client able to set/clear projects via the standard
+// `set-experiment-tag` endpoint, and avoids a schema migration. The UI
+// presents the result as if it were first-class.
+func (h *Handler) ListProjects(w http.ResponseWriter, r *http.Request) {
+	ws := r.Header.Get("X-LiteMLflow-Workspace")
+	if ws == "" {
+		ws = "default"
+	}
+	projects, err := h.Store.ListProjects(r.Context(), ws)
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	out := make([]projectDTO, 0, len(projects))
+	for _, p := range projects {
+		out = append(out, projectDTO{Name: p.Name, Count: p.Count})
+	}
+	writeJSON(w, map[string]any{"projects": out, "tag_key": "lmf.project"})
 }
 
 // ---- health -----------------------------------------------------------------
