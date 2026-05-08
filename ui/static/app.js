@@ -202,8 +202,10 @@ mlflow.log_metric("loss", 0.42)</pre>
       const charts = [];
       for (const m of metrics) {
         const key = m.Key || m.key;
-        const hist = await fetchJSON(`/api/2.0/mlflow/metrics/get-history?run_id=${runID}&metric_key=${encodeURIComponent(key)}`);
-        charts.push(simpleChart(key, hist.metrics || []));
+        const hist = await fetchJSON(
+          `/api/2.0/mlflow/metrics/get-history?run_id=${runID}&metric_key=${encodeURIComponent(key)}&downsample=1000`
+        );
+        charts.push(simpleChart(key, hist.metrics || [], hist.downsampled_from));
       }
       return `<h2>Metric history</h2>${charts.join("")}`;
     },
@@ -293,15 +295,14 @@ GET  /api/v1/prompts/foo/versions</pre>
     return (ns / 1e9).toFixed(2) + "s";
   }
 
-  // simpleChart renders an SVG sparkline. Server-side downsampling is added
-  // in v0.2; for v0.1 we cap the points client-side.
-  function simpleChart(key, points) {
+  // simpleChart renders an SVG sparkline using server-side LTTB-downsampled
+  // data. When the server indicates downsampling occurred via downsampledFrom,
+  // a note is shown next to the chart title.
+  //
+  // downsampledFrom: the total raw point count returned in "downsampled_from"
+  // by the server, or undefined/null when no downsampling happened.
+  function simpleChart(key, points, downsampledFrom) {
     if (!points.length) return "";
-    if (points.length > 1000) {
-      // crude downsample
-      const stride = Math.ceil(points.length / 1000);
-      points = points.filter((_, i) => i % stride === 0);
-    }
     const W = 800, H = 200, pad = 30;
     const vals = points.map(p => p.value);
     const ts = points.map(p => p.timestamp);
@@ -314,9 +315,16 @@ GET  /api/v1/prompts/foo/versions</pre>
       return [x, y];
     });
     const d = xy.map(([x, y], i) => (i === 0 ? "M" : "L") + x.toFixed(1) + "," + y.toFixed(1)).join("");
+
+    // Build the downsampling annotation when the server signals it.
+    let dsNote = "";
+    if (downsampledFrom != null && downsampledFrom > points.length) {
+      dsNote = ` <span style="color:var(--fg-muted);font-size:0.85em">(showing ${points.length} of ${downsampledFrom} points, LTTB)</span>`;
+    }
+
     return `
       <div class="card" style="padding:8px 12px">
-        <strong>${escapeHTML(key)}</strong> <span style="color:var(--fg-muted)">(${points.length} points, min ${vmin.toPrecision(4)}, max ${vmax.toPrecision(4)})</span>
+        <strong>${escapeHTML(key)}</strong>${dsNote} <span style="color:var(--fg-muted)">(min ${vmin.toPrecision(4)}, max ${vmax.toPrecision(4)})</span>
         <div class="metric-chart">
           <svg width="100%" height="100%" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
             <path d="${d}" fill="none" stroke="var(--accent)" stroke-width="1.5" />

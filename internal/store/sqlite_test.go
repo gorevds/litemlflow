@@ -373,6 +373,81 @@ func TestConcurrentWrites(t *testing.T) {
 	}
 }
 
+func TestGetMetricHistoryDownsampled(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	ctx := context.Background()
+
+	expID, err := s.CreateExperiment(ctx, &model.Experiment{Name: "ds-test"})
+	if err != nil {
+		t.Fatalf("create experiment: %v", err)
+	}
+	r := &model.Run{ExperimentID: expID}
+	if err := s.CreateRun(ctx, r); err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+
+	const total = 5000
+	ms := make([]model.Metric, total)
+	for i := 0; i < total; i++ {
+		ms[i] = model.Metric{Key: "loss", Value: float64(i) * 0.001, Timestamp: int64(i + 1), Step: int64(i)}
+	}
+	if err := s.LogMetrics(ctx, r.ID, ms); err != nil {
+		t.Fatalf("log metrics: %v", err)
+	}
+
+	const target = 200
+	got, rawCount, err := s.GetMetricHistoryDownsampled(ctx, r.ID, "loss", target)
+	if err != nil {
+		t.Fatalf("downsample: %v", err)
+	}
+	if rawCount != total {
+		t.Errorf("want rawCount=%d, got %d", total, rawCount)
+	}
+	if len(got) != target {
+		t.Errorf("want %d downsampled points, got %d", target, len(got))
+	}
+	// Verify monotonically non-decreasing timestamps.
+	for i := 1; i < len(got); i++ {
+		if got[i].Timestamp < got[i-1].Timestamp {
+			t.Errorf("timestamps not monotonic at index %d: %d < %d", i, got[i].Timestamp, got[i-1].Timestamp)
+		}
+	}
+	// First and last preserved.
+	if got[0].Timestamp != ms[0].Timestamp {
+		t.Errorf("first point not preserved: want ts=%d got ts=%d", ms[0].Timestamp, got[0].Timestamp)
+	}
+	if got[len(got)-1].Timestamp != ms[total-1].Timestamp {
+		t.Errorf("last point not preserved: want ts=%d got ts=%d", ms[total-1].Timestamp, got[len(got)-1].Timestamp)
+	}
+}
+
+func TestGetMetricHistoryDownsampled_SmallSeries(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	ctx := context.Background()
+
+	expID, _ := s.CreateExperiment(ctx, &model.Experiment{Name: "ds-small"})
+	r := &model.Run{ExperimentID: expID}
+	_ = s.CreateRun(ctx, r)
+
+	// 50 points, target 200 → all 50 returned (identity).
+	for i := 0; i < 50; i++ {
+		_ = s.LogMetric(ctx, r.ID, model.Metric{Key: "acc", Value: float64(i), Timestamp: int64(i + 1), Step: int64(i)})
+	}
+
+	got, rawCount, err := s.GetMetricHistoryDownsampled(ctx, r.ID, "acc", 200)
+	if err != nil {
+		t.Fatalf("downsample: %v", err)
+	}
+	if rawCount != 50 {
+		t.Errorf("want rawCount=50, got %d", rawCount)
+	}
+	if len(got) != 50 {
+		t.Errorf("want all 50 points returned, got %d", len(got))
+	}
+}
+
 func TestMigrationIdempotent(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

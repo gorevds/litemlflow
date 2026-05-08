@@ -76,6 +76,10 @@ type Store interface {
 	SetTags(ctx context.Context, runID string, ts []model.KV) error
 	DeleteTag(ctx context.Context, runID, key string) error
 	GetMetricHistory(ctx context.Context, runID, key string, opt MetricHistoryOptions) ([]model.Metric, string, error)
+	// GetMetricHistoryDownsampled fetches the full metric history for one key
+	// and reduces it to at most target points using the LTTB algorithm.
+	// Returns (downsampled, totalRawCount, error).
+	GetMetricHistoryDownsampled(ctx context.Context, runID, key string, target int) ([]model.Metric, int64, error)
 	GetParams(ctx context.Context, runID string) ([]model.Param, error)
 	GetTags(ctx context.Context, runID string) ([]model.KV, error)
 	GetLatestMetrics(ctx context.Context, runID string) ([]model.Metric, error)
