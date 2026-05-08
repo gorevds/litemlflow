@@ -2,6 +2,42 @@
 
 All notable changes to LiteMLflow are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/) starting at v1.0.
 
+## [v1.0.0-rc1] — 2026-05-08
+
+The year-1 stabilization release. All Q1–Q4 roadmap streams delivered. See [docs/roadmap-y1.md](docs/roadmap-y1.md).
+
+### Added
+
+- **Multipart S3 upload** — large artifacts (default >100 MiB) are streamed in 100-MiB parts via S3's CreateMultipartUpload / UploadPart / CompleteMultipartUpload. Aborts cleanly on error. Threshold configurable via `--s3-multipart-threshold` / `LITEMLFLOW_S3_MULTIPART_THRESHOLD`.
+- **gRPC OTLP receiver** — `--otlp-grpc-addr 127.0.0.1:4317` enables the OTel SDK's standard gRPC export path alongside the existing HTTP/JSON. Hardened with `MaxRecvMsgSize=64MiB` and `MaxConcurrentStreams=1024` belt-and-suspenders against DoS. Same `Store.InsertSpans` path as HTTP OTLP. ADR `docs/adr/0002-grpc-otlp-deps.md` justifies the new `grpc` + `otlp` deps.
+- **Stability hardening** — Go native fuzz tests on the SQL filter parser (`FuzzParseRunPredicate`, `FuzzParseRunFilter`, `FuzzParseExperimentFilter`, `FuzzSplitOnAnd`), JWT validation (`FuzzVerifyIDToken`, `FuzzVerifyIDToken_SignatureCorruption`), OTLP ingest (`FuzzIngestOTLP`, `FuzzIngestTraces`). Chaos tests behind `chaos` build tag: `TestChaos_KillMidWrite` (kill DB mid-write), `TestChaos_FullDisk` (skipped without CAP_SYS_ADMIN), `TestChaos_CorruptWAL`, `TestChaos_MigrationCrashMidway`, `TestChaos_ConcurrentClose`. Mutation-testing scaffolding via `make mutation` (gremlins). New `make fuzz-short`, `make test-chaos`, `make mutation` targets. Threat model doc updated to reference the active fuzz coverage as a mitigation.
+- **Kubernetes operator** at `operator/` (separate Go module `github.com/litemlflow/litemlflow-operator`) — controller-runtime v0.18.4, CRD `litemlflow.dev/v1alpha1` `LiteMLflow`, reconciler manages StatefulSet+Service+optional basic-auth secret. 8 unit tests pass (envtest skip is documented when KUBEBUILDER_ASSETS is absent). Recommendation: extract to standalone `litemlflow-operator` repo eventually.
+- **Admin UI for workspace member management** — new routes `#/workspaces` and `#/workspaces/{id}/members` in `ui/static/app.js`. Add/remove members, change roles. Gated by 403 message when caller is not `admin`.
+
+### Fixed (independent review pass)
+
+- gRPC server hardening: `MaxRecvMsgSize=64MiB`, `MaxConcurrentStreams=1024` defense-in-depth against unauthenticated trace floods.
+
+### Stats (cumulative since v0.1)
+
+- Go LOC (main module): **~19,435** (+~3,300 vs v0.4)
+- Go LOC (operator module): **~1,113** (new)
+- Python LOC: **~2,674** (+~170 vs v0.4)
+- Markdown docs: **~2,980** (+~510 vs v0.4)
+- Go test files: 24 (incl. 3 fuzz, 1 chaos)
+- Python tests: 35 + 2 skipped
+- MLflow client compat: 31/31 still passing on live `https://lmf.gorev.space`
+- Tagged releases: v0.2.0-rc1, v0.3.0-rc1, v0.4.0-rc1, v1.0.0-rc1
+- Total commits since v0.1.1-deploy: 47
+
+### Known limitations carried into v1.0 stable
+
+- Operator + admin UI member management need real-cluster validation before declaring v1.0 stable.
+- Mutation-testing baseline is a placeholder — needs first CI run.
+- External pen test still pending.
+- Astro/Starlight docs site still pending.
+- Terraform provider still pending (separate Go module, similar structure to operator).
+
 ## [v0.4.0-rc1] — 2026-05-08
 
 The Q4 "Polish & distribution" release. See [docs/roadmap-y1.md](docs/roadmap-y1.md).
