@@ -129,6 +129,36 @@ curl "http://localhost:5000/api/2.0/mlflow/metrics/get-history?run_id=abc123&met
 
 The `?downsample` parameter is a LiteMLflow extension. The MLflow Python client does not send it; its `get_metric_history()` method uses the paginated path. The two paths are independent and do not interfere.
 
+## `import-mlflow` CLI migration tool
+
+LiteMLflow ships a server-side import command that copies an entire MLflow
+tracking server — experiments, runs, metrics, params, tags, and artifacts —
+directly into a LiteMLflow data directory without an intermediate HTTP layer:
+
+```bash
+litemlflow import-mlflow \
+  --from http://my-mlflow-server:5000 \
+  --data /var/lib/litemlflow/data
+```
+
+The import is **idempotent**: interrupted runs are resumed from a checkpoint
+stored in `<data>/.import-state.json`.  Run IDs are preserved verbatim so
+existing client code and links continue to work.
+
+Key design choices:
+
+- Uses only the MLflow REST API (no direct DB access to the source), so it
+  works against any MLflow deployment (SQLite, Postgres, Databricks).
+- The MLflow API subset called: `experiments/search` (paginated),
+  `runs/search` (paginated), `metrics/get-history` (paginated, full history),
+  `artifacts/list` (recursive), `mlflow-artifacts/artifacts/{run}/{path}` (GET).
+- No new module dependencies: only stdlib `net/http`, `encoding/json`, etc.
+- `--dry-run` mode prints a summary without writing anything.
+- `--include-deleted` mirrors deleted experiments and runs.
+
+See [docs/cookbook.md](../cookbook.md#12-migrate-from-mlflow-to-litemlflow)
+for full usage, flag reference, and troubleshooting.
+
 ## Deferred to v0.3
 
 (All v0.2 deliverables landed: model registry, log-inputs/datasets, set_experiment auto-create.)

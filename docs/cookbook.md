@@ -150,6 +150,139 @@ for r in runs:
     print(r.info.run_id, r.data.metrics.get("acc"))
 ```
 
+## 12. Migrate from MLflow to LiteMLflow
+
+Move all your existing MLflow experiments, runs, metrics, params, tags, and
+artifacts into LiteMLflow in a single command.  No Python script required; no
+LiteMLflow server needs to be running during the import.
+
+### Prerequisites
+
+- The source MLflow tracking server must be reachable (HTTP/HTTPS).
+- The target data directory must exist and be writable.
+- `litemlflow` binary must be v0.1 or newer (built with `make build`).
+
+### One-shot import
+
+```bash
+# Create (or reuse) a fresh data directory.
+mkdir -p /var/lib/litemlflow/data
+
+# Run the import — LiteMLflow MUST NOT be running on this data dir.
+litemlflow import-mlflow \
+  --from  http://my-mlflow-server:5000 \
+  --data  /var/lib/litemlflow/data
+
+# The importer prints a live progress summary, e.g.:
+#   [import] connecting to http://my-mlflow-server:5000 ... ok (mlflow 3.12.0)
+#   [import] enumerated 12 experiments, 247 runs
+#   [import] importing exp 1/12: "iris-classification" ... 23 runs ... done in 1.4s
+#   ...
+#   [import] complete: 12 experiments, 247 runs, 1248 metrics, 312 params, 89 tags, 14 artifacts in 18.3s
+```
+
+### Flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `--from URL` | (required) | URL of the source MLflow server |
+| `--data DIR` | (required) | LiteMLflow data directory to write into |
+| `--workspace WS` | `default` | Workspace to import into |
+| `--include-deleted` | off | Also import `lifecycle_stage=deleted` experiments and runs |
+| `--dry-run` | off | Enumerate without writing; useful for a pre-flight check |
+
+### Resuming an interrupted import
+
+The importer writes a checkpoint to `<data>/.import-state.json` after each
+successfully imported run.  If the process is killed mid-import, simply
+re-run the same command with the same `--data` directory.  Runs that have
+already been imported are skipped automatically.
+
+```bash
+# First attempt — interrupted at run 180/247.
+litemlflow import-mlflow --from http://my-mlflow-server:5000 --data ./data
+# ^C
+
+# Resume — automatically picks up from run 181.
+litemlflow import-mlflow --from http://my-mlflow-server:5000 --data ./data
+# [import] resuming: 180 runs already imported
+```
+
+### Dry-run preview
+
+```bash
+litemlflow import-mlflow \
+  --from http://my-mlflow-server:5000 \
+  --data ./data \
+  --dry-run
+```
+
+Nothing is written.  The summary line shows what *would* be imported.
+
+### Including deleted experiments
+
+By default only `lifecycle_stage=active` experiments and runs are imported.
+Pass `--include-deleted` to also copy soft-deleted entities:
+
+```bash
+litemlflow import-mlflow \
+  --from http://my-mlflow-server:5000 \
+  --data ./data \
+  --include-deleted
+```
+
+### Multi-workspace import
+
+Import into a specific workspace (creates the workspace if it doesn't exist yet):
+
+```bash
+litemlflow import-mlflow \
+  --from http://my-mlflow-server:5000 \
+  --data ./data \
+  --workspace team-nlp
+```
+
+### Start LiteMLflow after import
+
+Once the import is complete, start the server normally:
+
+```bash
+litemlflow up --data /var/lib/litemlflow/data
+```
+
+Point your MLflow Python client (or browser) at `http://localhost:5000`.
+All experiments, runs, metrics, and artifacts should be available immediately.
+
+### Name collision handling
+
+If an experiment with the same name already exists in the target workspace
+(e.g., from a previous partial import), the importer creates a new experiment
+named `<original>-imported-<timestamp>` rather than merging runs into an
+unrelated experiment.  You can clean up duplicates via the UI or API after
+verifying the import.
+
+### Run ID preservation
+
+MLflow run IDs are UUID4 hex strings (32 chars).  LiteMLflow stores run IDs
+in the same format and accepts caller-supplied IDs at `CreateRun`.  The
+importer passes the original MLflow run ID through, so:
+
+- `get_run(run_id)` returns the same run in LiteMLflow as in MLflow.
+- Existing links from notebooks/reports that reference run IDs continue to work.
+- On a re-import the run is skipped (idempotent) because the checkpoint
+  records its ID.
+
+### Artifact handling
+
+Artifacts are downloaded from the MLflow source (via
+`GET /api/2.0/mlflow-artifacts/artifacts/{run_id}/{path}`) and uploaded to
+the LiteMLflow filesystem artifact store at `<data>/artifacts/<run_id>/<path>`.
+Nested directories are resolved recursively.
+
+If an artifact download fails, a warning is printed and the import continues;
+artifacts can be re-imported on the next invocation (checkpoint tracks only
+completed runs, so a run whose artifact failed will be retried in full).
+
 ## 7. Backup and migrate to a new server
 
 On the source:
