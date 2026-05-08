@@ -1,7 +1,7 @@
 terraform {
   required_providers {
     litemlflow = {
-      source  = "litemlflow/litemlflow"
+      source  = "gorevds/litemlflow"
       version = "~> 0.1"
     }
   }

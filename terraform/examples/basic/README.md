@@ -29,7 +29,7 @@ Add a `~/.terraformrc` (or `%APPDATA%/terraform.rc` on Windows):
 ```hcl
 provider_installation {
   dev_overrides {
-    "litemlflow/litemlflow" = "/path/to/repo/bin"
+    "gorevds/litemlflow" = "/path/to/repo/bin"
   }
   direct {}
 }

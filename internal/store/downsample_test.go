@@ -4,8 +4,8 @@ import (
 	"math/rand"
 	"testing"
 
-	"github.com/litemlflow/litemlflow/internal/model"
-	"github.com/litemlflow/litemlflow/internal/store"
+	"github.com/gorevds/litemlflow/internal/model"
+	"github.com/gorevds/litemlflow/internal/store"
 )
 
 // makeMetrics builds a slice of model.Metric with sequential timestamps and

@@ -1,4 +1,4 @@
-module github.com/litemlflow/terraform-provider-litemlflow
+module github.com/gorevds/litemlflow/terraform
 
 go 1.26.2
 

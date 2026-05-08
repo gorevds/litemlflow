@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/litemlflow/litemlflow/internal/config"
-	"github.com/litemlflow/litemlflow/internal/server"
+	"github.com/gorevds/litemlflow/internal/config"
+	"github.com/gorevds/litemlflow/internal/server"
 )
 
 // newTestServer brings up a fresh server backed by an httptest.Server.

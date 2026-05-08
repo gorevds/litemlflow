@@ -10,7 +10,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/litemlflow/litemlflow/internal/model"
+	"github.com/gorevds/litemlflow/internal/model"
 )
 
 // Sentinel errors returned by Store implementations. Higher layers translate

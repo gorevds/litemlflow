@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/litemlflow/litemlflow/internal/config"
+	"github.com/gorevds/litemlflow/internal/config"
 )
 
 // TestMetricsEndpointBasic hits /metrics twice and verifies:

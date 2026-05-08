@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/litemlflow/litemlflow/internal/model"
+	"github.com/gorevds/litemlflow/internal/model"
 )
 
 // CreateSession inserts a new session row. The session ID must be pre-set.

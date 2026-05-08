@@ -5,9 +5,9 @@ PYTHON     ?= python3
 BIN_DIR    := bin
 BINARY     := $(BIN_DIR)/litemlflow
 PKG        := ./...
-LDFLAGS    := -X github.com/litemlflow/litemlflow/pkg/version.Version=$(shell git describe --tags --always --dirty 2>/dev/null || echo dev) \
-              -X github.com/litemlflow/litemlflow/pkg/version.Commit=$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown) \
-              -X github.com/litemlflow/litemlflow/pkg/version.Date=$(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+LDFLAGS    := -X github.com/gorevds/litemlflow/pkg/version.Version=$(shell git describe --tags --always --dirty 2>/dev/null || echo dev) \
+              -X github.com/gorevds/litemlflow/pkg/version.Commit=$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown) \
+              -X github.com/gorevds/litemlflow/pkg/version.Date=$(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
 .PHONY: help build run dev test test-go test-py test-integration lint fmt vet clean docker compat-test py-install py-build dist-helm-lint dist-helm-template dist-deb dist-rpm fuzz-short test-chaos mutation operator-build operator-test terraform-build terraform-test
 

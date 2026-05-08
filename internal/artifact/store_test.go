@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/litemlflow/litemlflow/internal/artifact"
+	"github.com/gorevds/litemlflow/internal/artifact"
 )
 
 func newStore(t *testing.T) *artifact.FilesystemStore {

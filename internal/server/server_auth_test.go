@@ -11,8 +11,8 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/litemlflow/litemlflow/internal/auth"
-	"github.com/litemlflow/litemlflow/internal/config"
+	"github.com/gorevds/litemlflow/internal/auth"
+	"github.com/gorevds/litemlflow/internal/config"
 )
 
 // hashPass returns the hex SHA-256 of a password (matches verifyBasic in middleware).

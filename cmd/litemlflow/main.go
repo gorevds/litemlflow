@@ -28,13 +28,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/litemlflow/litemlflow/internal/artifact"
-	"github.com/litemlflow/litemlflow/internal/config"
-	"github.com/litemlflow/litemlflow/internal/migrator"
-	"github.com/litemlflow/litemlflow/internal/migrations"
-	"github.com/litemlflow/litemlflow/internal/server"
-	"github.com/litemlflow/litemlflow/internal/store"
-	"github.com/litemlflow/litemlflow/pkg/version"
+	"github.com/gorevds/litemlflow/internal/artifact"
+	"github.com/gorevds/litemlflow/internal/config"
+	"github.com/gorevds/litemlflow/internal/migrator"
+	"github.com/gorevds/litemlflow/internal/migrations"
+	"github.com/gorevds/litemlflow/internal/server"
+	"github.com/gorevds/litemlflow/internal/store"
+	"github.com/gorevds/litemlflow/pkg/version"
 )
 
 func main() {

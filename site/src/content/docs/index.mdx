@@ -15,7 +15,7 @@ hero:
       link: /architecture/
       icon: open-book
     - text: GitHub
-      link: https://github.com/litemlflow/litemlflow
+      link: https://github.com/gorevds/litemlflow
       icon: github
       variant: minimal
 ---
@@ -72,7 +72,7 @@ import { Card, CardGrid, Tabs, TabItem } from '@astrojs/starlight/components';
   <TabItem label="Docker">
     ```bash
     docker run -p 5000:5000 -v $(pwd)/data:/data \
-      ghcr.io/litemlflow/litemlflow:latest up
+      ghcr.io/gorevds/litemlflow:latest up
     ```
   </TabItem>
   <TabItem label="Helm">
@@ -83,7 +83,7 @@ import { Card, CardGrid, Tabs, TabItem } from '@astrojs/starlight/components';
   </TabItem>
   <TabItem label="Source">
     ```bash
-    git clone https://github.com/litemlflow/litemlflow
+    git clone https://github.com/gorevds/litemlflow
     cd litemlflow && make build
     ./bin/litemlflow up --data ./data
     ```

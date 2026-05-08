@@ -3,7 +3,7 @@ package mlflow
 import (
 	"strconv"
 
-	"github.com/litemlflow/litemlflow/internal/model"
+	"github.com/gorevds/litemlflow/internal/model"
 )
 
 // ---- Registered Model DTOs --------------------------------------------------

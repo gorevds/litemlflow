@@ -20,8 +20,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/litemlflow/litemlflow/internal/model"
-	"github.com/litemlflow/litemlflow/internal/store"
+	"github.com/gorevds/litemlflow/internal/model"
+	"github.com/gorevds/litemlflow/internal/store"
 )
 
 // traceServiceServer implements TraceServiceServer.

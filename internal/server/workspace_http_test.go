@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/litemlflow/litemlflow/internal/config"
+	"github.com/gorevds/litemlflow/internal/config"
 )
 
 // newWS is a helper that creates a fresh test server for workspace tests

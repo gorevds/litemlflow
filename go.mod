@@ -1,4 +1,4 @@
-module github.com/litemlflow/litemlflow
+module github.com/gorevds/litemlflow
 
 go 1.25.0
 

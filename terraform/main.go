@@ -8,7 +8,7 @@ import (
 	"log"
 
 	"github.com/hashicorp/terraform-plugin-framework/providerserver"
-	"github.com/litemlflow/terraform-provider-litemlflow/internal/provider"
+	"github.com/gorevds/litemlflow/terraform/internal/provider"
 )
 
 // version is overridden at link time via -ldflags when releasing.
@@ -20,7 +20,7 @@ func main() {
 	flag.Parse()
 
 	opts := providerserver.ServeOpts{
-		Address: "registry.terraform.io/litemlflow/litemlflow",
+		Address: "registry.terraform.io/gorevds/litemlflow",
 		Debug:   debug,
 	}
 

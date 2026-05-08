@@ -909,7 +909,7 @@ make terraform-build
 cat >> ~/.terraformrc <<'EOF'
 provider_installation {
   dev_overrides {
-    "litemlflow/litemlflow" = "/path/to/repo/bin"
+    "gorevds/litemlflow" = "/path/to/repo/bin"
   }
   direct {}
 }
@@ -922,7 +922,7 @@ EOF
 terraform {
   required_providers {
     litemlflow = {
-      source  = "litemlflow/litemlflow"
+      source  = "gorevds/litemlflow"
       version = "~> 0.1"
     }
   }

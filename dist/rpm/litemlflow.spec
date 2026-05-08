@@ -4,7 +4,7 @@ Release:        1.rc1%{?dist}
 Summary:        Single-binary experiment tracker, MLflow-compatible, with LLM trace support
 License:        ASL 2.0
 URL:            https://litemlflow.dev
-Source0:        https://github.com/litemlflow/litemlflow/releases/download/v%{version}-rc1/litemlflow-v%{version}-rc1-linux-x86_64
+Source0:        https://github.com/gorevds/litemlflow/releases/download/v%{version}-rc1/litemlflow-v%{version}-rc1-linux-x86_64
 Source1:        litemlflow.service
 
 BuildArch:      x86_64

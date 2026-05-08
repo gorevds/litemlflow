@@ -11,9 +11,9 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/litemlflow/litemlflow/internal/artifact"
-	"github.com/litemlflow/litemlflow/internal/model"
-	"github.com/litemlflow/litemlflow/internal/store"
+	"github.com/gorevds/litemlflow/internal/artifact"
+	"github.com/gorevds/litemlflow/internal/model"
+	"github.com/gorevds/litemlflow/internal/store"
 )
 
 // Handler bundles dependencies for the MLflow REST API.

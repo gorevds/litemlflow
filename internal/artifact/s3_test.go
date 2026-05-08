@@ -14,7 +14,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/litemlflow/litemlflow/internal/artifact"
+	"github.com/gorevds/litemlflow/internal/artifact"
 )
 
 // ---- minimal in-process S3 mock --------------------------------------------

@@ -18,12 +18,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	litemlflowv1alpha1 "github.com/litemlflow/litemlflow-operator/api/v1alpha1"
+	litemlflowv1alpha1 "github.com/gorevds/litemlflow/operator/api/v1alpha1"
 )
 
 const (
 	// imageRepo is the default container image repository for litemlflow.
-	imageRepo = "ghcr.io/litemlflow/litemlflow"
+	imageRepo = "ghcr.io/gorevds/litemlflow"
 	// containerPort is the port the litemlflow container listens on.
 	containerPort = 5000
 	// dataDir is the data directory path inside the container.

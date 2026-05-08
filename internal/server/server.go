@@ -13,15 +13,15 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/litemlflow/litemlflow/internal/api/mlflow"
-	"github.com/litemlflow/litemlflow/internal/api/native"
-	"github.com/litemlflow/litemlflow/internal/artifact"
-	"github.com/litemlflow/litemlflow/internal/auth"
-	"github.com/litemlflow/litemlflow/internal/config"
-	"github.com/litemlflow/litemlflow/internal/grpcotlp"
-	"github.com/litemlflow/litemlflow/internal/metrics"
-	"github.com/litemlflow/litemlflow/internal/store"
-	"github.com/litemlflow/litemlflow/ui"
+	"github.com/gorevds/litemlflow/internal/api/mlflow"
+	"github.com/gorevds/litemlflow/internal/api/native"
+	"github.com/gorevds/litemlflow/internal/artifact"
+	"github.com/gorevds/litemlflow/internal/auth"
+	"github.com/gorevds/litemlflow/internal/config"
+	"github.com/gorevds/litemlflow/internal/grpcotlp"
+	"github.com/gorevds/litemlflow/internal/metrics"
+	"github.com/gorevds/litemlflow/internal/store"
+	"github.com/gorevds/litemlflow/ui"
 )
 
 // Server bundles the HTTP server and its dependencies.

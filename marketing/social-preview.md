@@ -26,7 +26,7 @@
 │  Your experiments, in one file.     Single binary. Zero databases. Apache 2.0.  │
 │  (subtext, gray #8b949e, ~24px)                                                 │
 │                                                                                 │
-│  github.com/litemlflow/litemlflow                    (bottom right, muted)      │
+│  github.com/gorevds/litemlflow                    (bottom right, muted)      │
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
 

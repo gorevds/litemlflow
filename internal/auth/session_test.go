@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/litemlflow/litemlflow/internal/auth"
+	"github.com/gorevds/litemlflow/internal/auth"
 )
 
 // TestNewSessionID checks length and uniqueness.

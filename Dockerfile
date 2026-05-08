@@ -19,9 +19,9 @@ ARG DATE=unknown
 RUN CGO_ENABLED=0 GOOS=linux go build \
     -trimpath \
     -ldflags "-s -w \
-      -X github.com/litemlflow/litemlflow/pkg/version.Version=${VERSION} \
-      -X github.com/litemlflow/litemlflow/pkg/version.Commit=${COMMIT} \
-      -X github.com/litemlflow/litemlflow/pkg/version.Date=${DATE}" \
+      -X github.com/gorevds/litemlflow/pkg/version.Version=${VERSION} \
+      -X github.com/gorevds/litemlflow/pkg/version.Commit=${COMMIT} \
+      -X github.com/gorevds/litemlflow/pkg/version.Date=${DATE}" \
     -o /out/litemlflow \
     ./cmd/litemlflow
 

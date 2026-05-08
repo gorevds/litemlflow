@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/litemlflow/litemlflow/internal/migrations"
+	"github.com/gorevds/litemlflow/internal/migrations"
 
 	_ "modernc.org/sqlite"
 )

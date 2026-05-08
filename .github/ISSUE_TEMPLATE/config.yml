@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: GitHub Discussions — ideas, questions, show & tell
-    url: https://github.com/litemlflow/litemlflow/discussions
+    url: https://github.com/gorevds/litemlflow/discussions
     about: Use Discussions for questions, feature ideas, and sharing how you use LiteMLflow. Issues are for confirmed bugs and accepted feature work.
   - name: Security vulnerability
-    url: https://github.com/litemlflow/litemlflow/blob/main/SECURITY.md
+    url: https://github.com/gorevds/litemlflow/blob/main/SECURITY.md
     about: Do NOT open a public issue for security vulnerabilities. See SECURITY.md for the private disclosure process.

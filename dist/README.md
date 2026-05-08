@@ -25,7 +25,7 @@ dist/
 **Steps:**
 
 1. Download the four release binaries and their SHA256 hashes from
-   `https://github.com/litemlflow/litemlflow/releases/tag/vVERSION`.
+   `https://github.com/gorevds/litemlflow/releases/tag/vVERSION`.
 2. Replace the four `PLACEHOLDER_*` values in
    `dist/homebrew/Formula/litemlflow.rb` with the real hashes.
 3. Update `version` to match.

@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/litemlflow/litemlflow/internal/metrics"
+	"github.com/gorevds/litemlflow/internal/metrics"
 )
 
 // ---- Counter ---------------------------------------------------------------

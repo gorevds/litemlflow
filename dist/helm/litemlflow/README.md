@@ -58,7 +58,7 @@ helm install lmf dist/helm/litemlflow/ \
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `image.repository` | `litemlflow/litemlflow` | Container image repository |
+| `image.repository` | `gorevds/litemlflow` | Container image repository |
 | `image.tag` | `v0.4.0-rc1` | Image tag (defaults to `appVersion`) |
 | `config.authMode` | `none` | Auth mode: `none` or `basic` |
 | `auth.user` | `""` | Basic auth username |

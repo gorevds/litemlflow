@@ -1,6 +1,6 @@
 # litemlflow (Python SDK)
 
-The native Python client for [LiteMLflow](https://github.com/litemlflow/litemlflow).
+The native Python client for [LiteMLflow](https://github.com/gorevds/litemlflow).
 
 ## Install
 

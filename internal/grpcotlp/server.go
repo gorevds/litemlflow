@@ -16,7 +16,7 @@ import (
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	"google.golang.org/grpc"
 
-	"github.com/litemlflow/litemlflow/internal/store"
+	"github.com/gorevds/litemlflow/internal/store"
 )
 
 // Server wraps a gRPC server that listens for OTLP trace exports.

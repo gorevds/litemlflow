@@ -28,7 +28,7 @@ The `Signed-off-by` line indicates you have the right to submit the contribution
 ## Development setup
 
 ```bash
-git clone https://github.com/litemlflow/litemlflow.git
+git clone https://github.com/gorevds/litemlflow.git
 cd litemlflow
 make dev          # runs server with auto-reload
 make test         # runs all tests

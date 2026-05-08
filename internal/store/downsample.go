@@ -12,7 +12,7 @@ package store
 import (
 	"math"
 
-	"github.com/litemlflow/litemlflow/internal/model"
+	"github.com/gorevds/litemlflow/internal/model"
 )
 
 // DownsampleLTTB reduces points to at most target representatives using the

@@ -208,7 +208,7 @@ server statistics).
 
 ## Kubernetes Operator
 
-A separate Go module (`operator/`, module path `github.com/litemlflow/litemlflow-operator`)
+A separate Go module (`operator/`, module path `github.com/gorevds/litemlflow-operator`)
 provides a Kubernetes operator built on `sigs.k8s.io/controller-runtime`. It is
 **not** a dependency of the main LiteMLflow server module — keeping `controller-runtime`
 and its transitive dependencies (Prometheus client, RBAC informers, leader-election)

@@ -12,11 +12,11 @@ export default defineConfig({
       },
       favicon: '/favicon.svg',
       social: {
-        github: 'https://github.com/litemlflow/litemlflow',
+        github: 'https://github.com/gorevds/litemlflow',
       },
       customCss: ['./src/styles/custom.css'],
       editLink: {
-        baseUrl: 'https://github.com/litemlflow/litemlflow/edit/main/docs/',
+        baseUrl: 'https://github.com/gorevds/litemlflow/edit/main/docs/',
       },
       lastUpdated: true,
       pagination: true,

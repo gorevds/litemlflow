@@ -14,7 +14,7 @@ grade: stable
 parts:
   litemlflow:
     plugin: dump
-    source: https://github.com/litemlflow/litemlflow/releases/download/v0.4.0-rc1/litemlflow-v0.4.0-rc1-linux-amd64
+    source: https://github.com/gorevds/litemlflow/releases/download/v0.4.0-rc1/litemlflow-v0.4.0-rc1-linux-amd64
     source-type: file
     organize:
       'litemlflow-*': bin/litemlflow

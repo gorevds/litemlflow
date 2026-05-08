@@ -8,7 +8,7 @@ package mlflow
 import (
 	"strconv"
 
-	"github.com/litemlflow/litemlflow/internal/model"
+	"github.com/gorevds/litemlflow/internal/model"
 )
 
 // experimentDTO mirrors mlflow.protos.service_pb2.Experiment.

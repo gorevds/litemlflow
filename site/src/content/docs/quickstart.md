@@ -18,7 +18,7 @@ helm install lmf oci://ghcr.io/litemlflow/charts/litemlflow --version 0.1.0   # 
 Build from source (requires Go 1.22+):
 
 ```bash
-git clone https://github.com/litemlflow/litemlflow
+git clone https://github.com/gorevds/litemlflow
 cd litemlflow
 make build
 ```

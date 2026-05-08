@@ -98,10 +98,10 @@ Total ~9 FTE for the full year. Initially much smaller; the org grows toward thi
 
 | Stream | Deliverable | Owner | Acceptance |
 |---|---|---|---|
-| Distro | Homebrew tap (`brew install litemlflow/litemlflow/litemlflow`) | Release | Installs on macOS arm64 + amd64 |
+| Distro | Homebrew tap (`brew install gorevds/gorevds/litemlflow`) | Release | Installs on macOS arm64 + amd64 |
 | Distro | Debian + RPM packages with systemd unit | Release | apt/dnf install works on Ubuntu 22.04, Fedora 40 |
 | Distro | Snap package | Release | snap install works |
-| Distro | Helm chart | Release | `helm install lmf litemlflow/litemlflow` deploys to k3s |
+| Distro | Helm chart | Release | `helm install lmf gorevds/litemlflow` deploys to k3s |
 | Distro | Kubernetes operator (CRD: `LiteMLflow`) | Release | Operator manages instance lifecycle |
 | Distro | Terraform provider (resources: experiment, run, prompt) | Release | TF can spin up an instance and create initial experiments |
 | Docs | Astro/Starlight docs site at https://docs.litemlflow.dev | Docs | Sub-1s page loads, search, dark mode |

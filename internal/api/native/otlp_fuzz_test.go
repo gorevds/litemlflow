@@ -27,9 +27,9 @@ import (
 	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/litemlflow/litemlflow/internal/api/native"
-	"github.com/litemlflow/litemlflow/internal/model"
-	"github.com/litemlflow/litemlflow/internal/store"
+	"github.com/gorevds/litemlflow/internal/api/native"
+	"github.com/gorevds/litemlflow/internal/model"
+	"github.com/gorevds/litemlflow/internal/store"
 )
 
 // --- minimal in-memory store stub ---

@@ -6,7 +6,7 @@ version: 0.1.0
 appVersion: "0.4.0-rc1"
 home: https://litemlflow.dev
 sources:
-  - https://github.com/litemlflow/litemlflow
+  - https://github.com/gorevds/litemlflow
 maintainers:
   - name: LiteMLflow Maintainers
     email: maintainers@litemlflow.dev

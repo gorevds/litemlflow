@@ -3,9 +3,9 @@ message: "If you use LiteMLflow in academic work, please cite it as below."
 title: "LiteMLflow: Single-binary MLflow-compatible experiment tracker"
 version: 1.0.0
 date-released: "2026-05-08"
-url: "https://github.com/litemlflow/litemlflow"
+url: "https://github.com/gorevds/litemlflow"
 license: Apache-2.0
-repository-code: "https://github.com/litemlflow/litemlflow"
+repository-code: "https://github.com/gorevds/litemlflow"
 abstract: >
   LiteMLflow is a lightweight, self-hosted experiment tracker for machine learning
   and LLM workflows. It is compatible with the MLflow REST API (~80% of the
@@ -35,5 +35,5 @@ preferred-citation:
       given-names: Oscar
   version: 1.0.0
   date-released: "2026-05-08"
-  url: "https://github.com/litemlflow/litemlflow"
+  url: "https://github.com/gorevds/litemlflow"
   license: Apache-2.0

@@ -8,7 +8,7 @@ body:
         Before opening a feature request, check:
         - [Roadmap Y1](../docs/roadmap-y1.md) — delivered features
         - [Roadmap Y2](../docs/roadmap-y2.md) — planned features
-        - [GitHub Discussions](https://github.com/litemlflow/litemlflow/discussions) — community ideas
+        - [GitHub Discussions](https://github.com/gorevds/litemlflow/discussions) — community ideas
 
   - type: textarea
     id: problem

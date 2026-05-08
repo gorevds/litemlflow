@@ -14,8 +14,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	litemlflowv1alpha1 "github.com/litemlflow/litemlflow-operator/api/v1alpha1"
-	"github.com/litemlflow/litemlflow-operator/controllers"
+	litemlflowv1alpha1 "github.com/gorevds/litemlflow/operator/api/v1alpha1"
+	"github.com/gorevds/litemlflow/operator/controllers"
 )
 
 var (

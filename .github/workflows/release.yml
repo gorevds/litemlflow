@@ -29,9 +29,9 @@ jobs:
                 go build \
                   -trimpath \
                   -ldflags "-s -w \
-                    -X github.com/litemlflow/litemlflow/pkg/version.Version=${GITHUB_REF_NAME} \
-                    -X github.com/litemlflow/litemlflow/pkg/version.Commit=$(git rev-parse --short HEAD) \
-                    -X github.com/litemlflow/litemlflow/pkg/version.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                    -X github.com/gorevds/litemlflow/pkg/version.Version=${GITHUB_REF_NAME} \
+                    -X github.com/gorevds/litemlflow/pkg/version.Commit=$(git rev-parse --short HEAD) \
+                    -X github.com/gorevds/litemlflow/pkg/version.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
                   -o dist/litemlflow-${GITHUB_REF_NAME}-$OS-$ARCH \
                   ./cmd/litemlflow
             done

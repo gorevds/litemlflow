@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/litemlflow/litemlflow/pkg/version"
+	"github.com/gorevds/litemlflow/pkg/version"
 )
 
 // Standard holds the pre-defined application metric set for LiteMLflow.

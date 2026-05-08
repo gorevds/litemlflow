@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/litemlflow/litemlflow/internal/model"
-	"github.com/litemlflow/litemlflow/internal/store"
+	"github.com/gorevds/litemlflow/internal/model"
+	"github.com/gorevds/litemlflow/internal/store"
 )
 
 // newRegisteredModel is a test helper that creates a registered model and fails

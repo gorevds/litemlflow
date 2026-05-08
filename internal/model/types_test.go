@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/litemlflow/litemlflow/internal/model"
+	"github.com/gorevds/litemlflow/internal/model"
 )
 
 func TestValidName(t *testing.T) {

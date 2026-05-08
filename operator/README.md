@@ -4,7 +4,7 @@ A Kubernetes operator that manages `LiteMLflow` custom resources. It reconciles
 each CR into a StatefulSet, two Services (headless + ClusterIP), and a
 PersistentVolumeClaim.
 
-The operator lives in a **separate Go module** (`github.com/litemlflow/litemlflow-operator`)
+The operator lives in a **separate Go module** (`github.com/gorevds/litemlflow-operator`)
 so that `controller-runtime` and its transitive dependencies are never added to
 the main LiteMLflow server module.
 

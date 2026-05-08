@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/litemlflow/litemlflow/internal/migrations"
-	"github.com/litemlflow/litemlflow/internal/model"
+	"github.com/gorevds/litemlflow/internal/migrations"
+	"github.com/gorevds/litemlflow/internal/model"
 
 	_ "modernc.org/sqlite"
 )

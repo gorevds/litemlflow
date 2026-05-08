@@ -139,7 +139,7 @@ litemlflow_metrics_logged_total 21
 **Left pane stays on terminal. Text overlay:**
 
 ```
-github.com/litemlflow/litemlflow
+github.com/gorevds/litemlflow
 brew install litemlflow/tap/litemlflow
 Apache 2.0
 ```

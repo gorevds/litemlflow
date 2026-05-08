@@ -1,7 +1,7 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: litemlflow
 Upstream-Contact: maintainers@litemlflow.dev
-Source: https://github.com/litemlflow/litemlflow
+Source: https://github.com/gorevds/litemlflow
 
 Files: *
 Copyright: 2024-2026 LiteMLflow Contributors

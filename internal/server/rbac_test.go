@@ -12,7 +12,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/litemlflow/litemlflow/internal/config"
+	"github.com/gorevds/litemlflow/internal/config"
 )
 
 // rbacHashPass returns hex SHA-256 of a password, matching verifyBasic.

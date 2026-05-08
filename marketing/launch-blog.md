@@ -69,7 +69,7 @@ The cold-start gap is structural: MLflow starts a CPython process, initializes S
 
 I want to be honest about where MLflow is competitive: raw sequential metric-history scans on large series. MLflow's SQLite column scan returns 50 000 raw metric points in 2.6 ms; LiteMLflow takes 124 ms. MLflow's B-tree index layout is better tuned for sequential reads of this shape. We handle this in practice by returning LTTB-downsampled series (500 representative points instead of 50 000) which is the right trade-off for chart rendering — but the raw number is slower.
 
-The full benchmark report with raw JSON is in [docs/bench-v04.md](https://github.com/litemlflow/litemlflow/blob/main/docs/bench-v04.md).
+The full benchmark report with raw JSON is in [docs/bench-v04.md](https://github.com/gorevds/litemlflow/blob/main/docs/bench-v04.md).
 
 ---
 
@@ -130,7 +130,7 @@ brew install litemlflow/tap/litemlflow
 litemlflow up --data ./data
 ```
 
-GitHub: [github.com/litemlflow/litemlflow](https://github.com/litemlflow/litemlflow)  
+GitHub: [github.com/gorevds/litemlflow](https://github.com/gorevds/litemlflow)  
 Docs: [docs.litemlflow.dev](https://docs.litemlflow.dev) *(live after launch)*  
 Live demo: [lmf.gorev.space](https://lmf.gorev.space)
 

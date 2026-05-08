@@ -34,7 +34,7 @@ Audience takeaway: a pattern for building compatible-but-better replacements for
 
 ### Bio
 
-Engineer building LiteMLflow (github.com/litemlflow/litemlflow). Previously worked on ML platform tooling at [company TBD]. Apache 2.0 all the way down.
+Engineer building LiteMLflow (github.com/gorevds/litemlflow). Previously worked on ML platform tooling at [company TBD]. Apache 2.0 all the way down.
 
 ---
 
@@ -98,4 +98,4 @@ Audience takeaway: when and why to build a single-binary infrastructure tool, an
 
 ### Bio
 
-Engineer building LiteMLflow (github.com/litemlflow/litemlflow). Apache 2.0. Talk to me at the hallway track.
+Engineer building LiteMLflow (github.com/gorevds/litemlflow). Apache 2.0. Talk to me at the hallway track.

@@ -1,6 +1,6 @@
 # terraform-provider-litemlflow
 
-Terraform provider for [LiteMLflow](https://github.com/litemlflow/litemlflow).
+Terraform provider for [LiteMLflow](https://github.com/gorevds/litemlflow).
 
 Manages experiments, prompts, registered models, and workspaces as
 infrastructure-as-code using the [HashiCorp Plugin Framework](https://developer.hashicorp.com/terraform/plugin/framework).
@@ -19,7 +19,7 @@ infrastructure-as-code using the [HashiCorp Plugin Framework](https://developer.
 terraform {
   required_providers {
     litemlflow = {
-      source  = "litemlflow/litemlflow"
+      source  = "gorevds/litemlflow"
       version = "~> 0.1"
     }
   }
@@ -36,7 +36,7 @@ make terraform-build
 # Tell Terraform to use the local binary.
 # Add to ~/.terraformrc:
 #   provider_installation {
-#     dev_overrides { "litemlflow/litemlflow" = "/path/to/repo/bin" }
+#     dev_overrides { "gorevds/litemlflow" = "/path/to/repo/bin" }
 #     direct {}
 #   }
 ```

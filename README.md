@@ -1,10 +1,10 @@
 # LiteMLflow
 
-[![CI](https://img.shields.io/github/actions/workflow/status/litemlflow/litemlflow/ci.yml?branch=main&logo=github&label=CI)](https://github.com/litemlflow/litemlflow/actions)
-[![Coverage](https://img.shields.io/badge/coverage-TBD-lightgrey?logo=go)](https://github.com/litemlflow/litemlflow/actions)
-[![Go Report Card](https://goreportcard.com/badge/github.com/litemlflow/litemlflow)](https://goreportcard.com/report/github.com/litemlflow/litemlflow)
+[![CI](https://img.shields.io/github/actions/workflow/status/gorevds/litemlflow/ci.yml?branch=main&logo=github&label=CI)](https://github.com/gorevds/litemlflow/actions)
+[![Coverage](https://img.shields.io/badge/coverage-TBD-lightgrey?logo=go)](https://github.com/gorevds/litemlflow/actions)
+[![Go Report Card](https://goreportcard.com/badge/github.com/gorevds/litemlflow)](https://goreportcard.com/report/github.com/gorevds/litemlflow)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Release](https://img.shields.io/github/v/release/litemlflow/litemlflow?include_prereleases)](https://github.com/litemlflow/litemlflow/releases)
+[![Release](https://img.shields.io/github/v/release/gorevds/litemlflow?include_prereleases)](https://github.com/gorevds/litemlflow/releases)
 [![All Contributors](https://img.shields.io/badge/all_contributors-1-orange.svg)](#acknowledgements)
 
 > **Your experiments, in one file.**
@@ -31,13 +31,13 @@
 brew install litemlflow/tap/litemlflow
 
 # Docker
-docker run -p 5000:5000 -v $(pwd)/data:/data ghcr.io/litemlflow/litemlflow:latest up
+docker run -p 5000:5000 -v $(pwd)/data:/data ghcr.io/gorevds/litemlflow:latest up
 
 # Kubernetes (Helm)
 helm install lmf oci://ghcr.io/litemlflow/charts/litemlflow --version 0.1.0
 
 # Build from source (Go 1.22+)
-git clone https://github.com/litemlflow/litemlflow && cd litemlflow && make build
+git clone https://github.com/gorevds/litemlflow && cd litemlflow && make build
 ```
 
 ---
@@ -166,7 +166,7 @@ make fuzz-short     # fuzz targets (parsers, JWT, OTLP)
 
 ## Star history
 
-[![Star History Chart](https://api.star-history.com/svg?repos=litemlflow/litemlflow&type=Date)](https://star-history.com/#litemlflow/litemlflow&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=gorevds/litemlflow&type=Date)](https://star-history.com/#gorevds/litemlflow&Date)
 
 ---
 
@@ -219,6 +219,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). DCO sign-off required (`git commit -s`);
 
 Apache 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
-[![All Contributors](https://img.shields.io/badge/all_contributors-1-orange.svg)](https://github.com/litemlflow/litemlflow/graphs/contributors)
+[![All Contributors](https://img.shields.io/badge/all_contributors-1-orange.svg)](https://github.com/gorevds/litemlflow/graphs/contributors)
 
 LiteMLflow is independent of and not affiliated with Databricks, Inc. References to "MLflow" describe API compatibility only.

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/litemlflow/litemlflow/internal/model"
+	"github.com/gorevds/litemlflow/internal/model"
 )
 
 // ---- Registered Models -------------------------------------------------------

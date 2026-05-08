@@ -7,7 +7,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	litemlflowv1alpha1 "github.com/litemlflow/litemlflow-operator/api/v1alpha1"
+	litemlflowv1alpha1 "github.com/gorevds/litemlflow/operator/api/v1alpha1"
 )
 
 // TestDesiredStatefulSet_Basic validates the statefulset builder without an API server.
@@ -35,7 +35,7 @@ func TestDesiredStatefulSet_Basic(t *testing.T) {
 	if c.Name != "litemlflow" {
 		t.Errorf("container name: got %q, want %q", c.Name, "litemlflow")
 	}
-	wantImage := "ghcr.io/litemlflow/litemlflow:v1.0.0-rc1"
+	wantImage := "ghcr.io/gorevds/litemlflow:v1.0.0-rc1"
 	if c.Image != wantImage {
 		t.Errorf("container image: got %q, want %q", c.Image, wantImage)
 	}

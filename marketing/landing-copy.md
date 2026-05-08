@@ -21,7 +21,7 @@ No Postgres. No S3. No reverse proxy. Just `litemlflow up`.
 
 ### Secondary CTA
 
-**View on GitHub** → github.com/litemlflow/litemlflow
+**View on GitHub** → github.com/gorevds/litemlflow
 
 ### Social proof (below CTAs)
 
@@ -93,7 +93,7 @@ Start in 30 seconds. Migrate in 10 minutes. Back up in one command.
 
 - **Get started** → /quickstart/  
 - **Read the docs** → /architecture/  
-- **Star on GitHub** → github.com/litemlflow/litemlflow  
+- **Star on GitHub** → github.com/gorevds/litemlflow  
 
 ---
 

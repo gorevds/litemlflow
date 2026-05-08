@@ -1,6 +1,6 @@
 [Unit]
 Description=LiteMLflow experiment tracker (lmf.gorev.space)
-Documentation=https://github.com/litemlflow/litemlflow
+Documentation=https://github.com/gorevds/litemlflow
 After=network-online.target
 Wants=network-online.target
 

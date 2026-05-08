@@ -1,4 +1,4 @@
-module github.com/litemlflow/litemlflow-operator
+module github.com/gorevds/litemlflow/operator
 
 go 1.22.0
 
