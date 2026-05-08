@@ -1158,29 +1158,34 @@ mlflow.log_metric("loss", 0.42)</pre>
         ];
         let cols = ColumnPicker.load(expID, extraCols);
 
+        // T2.10: cells render WITHOUT inline `onclick=` attributes. Click
+        // handling is delegated to a single listener on #exp-tbody (wired
+        // below), which navigates when the click landed on a non-button,
+        // non-input cell of a row that carries data-run-id. This drops
+        // ~200 strings per render (200 runs × 6+ cols) and removes the
+        // string-interpolated event-handler smell.
         const buildRows = () => sortRuns(runs).map((r, i) => {
           const info = r.info, data = r.data;
           const cells = cols.filter(c => c.enabled).map(c => {
-            const href = `#/experiments/${expID}/runs/${info.run_id}`;
             let cell = "";
             switch (c.id) {
-              case "id":      cell = `<td class="mono" onclick="location.hash='${href}'">${info.run_id.slice(0, 8)}</td>`; break;
-              case "name":    cell = `<td onclick="location.hash='${href}'">${escapeHTML(info.run_name || "—")}</td>`; break;
-              case "status":  cell = `<td onclick="location.hash='${href}'"><span class="status-pill status-${info.status}">${info.status}</span></td>`; break;
-              case "started": cell = `<td onclick="location.hash='${href}'">${formatTime(info.start_time)}</td>`; break;
-              case "duration":cell = `<td onclick="location.hash='${href}'">${info.end_time ? formatDuration(info.end_time - info.start_time) : "—"}</td>`; break;
-              case "end_time":cell = `<td onclick="location.hash='${href}'">${info.end_time ? formatTime(info.end_time) : "—"}</td>`; break;
+              case "id":      cell = `<td class="mono">${info.run_id.slice(0, 8)}</td>`; break;
+              case "name":    cell = `<td>${escapeHTML(info.run_name || "—")}</td>`; break;
+              case "status":  cell = `<td><span class="status-pill status-${info.status}">${info.status}</span></td>`; break;
+              case "started": cell = `<td>${formatTime(info.start_time)}</td>`; break;
+              case "duration":cell = `<td>${info.end_time ? formatDuration(info.end_time - info.start_time) : "—"}</td>`; break;
+              case "end_time":cell = `<td>${info.end_time ? formatTime(info.end_time) : "—"}</td>`; break;
               default: {
                 if (c.id.startsWith("param.")) {
                   const key = c.id.slice(6);
                   const found = (data.params || []).find(p => p.key === key);
-                  cell = `<td class="mono" onclick="location.hash='${href}'">${escapeHTML(found ? found.value : "—")}</td>`;
+                  cell = `<td class="mono">${escapeHTML(found ? found.value : "—")}</td>`;
                 } else if (c.id.startsWith("metric.")) {
                   const key = c.id.slice(7);
                   const found = (data.metrics || []).find(m => m.key === key);
-                  cell = `<td class="numeric" onclick="location.hash='${href}'">${found ? found.value.toPrecision(4) : "—"}</td>`;
+                  cell = `<td class="numeric">${found ? found.value.toPrecision(4) : "—"}</td>`;
                 } else {
-                  cell = `<td onclick="location.hash='${href}'">&mdash;</td>`;
+                  cell = `<td>&mdash;</td>`;
                 }
               }
             }
@@ -1195,7 +1200,7 @@ mlflow.log_metric("loss", 0.42)</pre>
                 `>${starMark}${escapeHTML(info.run_name || "—")}</td>`
               )
             : cells;
-          return `<tr data-row-index="${i}" data-run-id="${info.run_id}">
+          return `<tr data-row-index="${i}" data-run-id="${info.run_id}" data-href="#/experiments/${expID}/runs/${info.run_id}">
             <td class="bulk-col"><input type="checkbox" class="bulk-cb" data-run-id="${info.run_id}" ${checked} /></td>
             ${cellsWithStar}
           </tr>`;
@@ -1213,6 +1218,22 @@ mlflow.log_metric("loss", 0.42)</pre>
           const thead = $("#exp-thead-cols");
           if (tbody) tbody.innerHTML = buildRows() || `<tr><td colspan="${colCount()}" class="empty">No runs yet.</td></tr>`;
           if (thead) thead.innerHTML = buildHeader();
+          // T2.10: install a single delegated click handler that navigates
+          // when the click lands on a non-button, non-input cell of a row
+          // that carries data-href. Replaces ~200 inline `onclick=` strings
+          // (200 runs × 6+ cols) per render.
+          if (tbody && !tbody._lmfRowClickWired) {
+            tbody.addEventListener("click", (ev) => {
+              const t = ev.target;
+              // Skip clicks that originated on interactive children — let
+              // the native handlers fire (checkbox, links, action buttons).
+              if (t.closest("button, a, input")) return;
+              const row = t.closest("[data-href]");
+              if (!row) return;
+              location.hash = row.dataset.href;
+            });
+            tbody._lmfRowClickWired = true;
+          }
         };
 
         // View mode: "list" (default) or "timeline". Persisted per experiment.

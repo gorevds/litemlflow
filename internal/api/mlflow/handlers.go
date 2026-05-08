@@ -553,6 +553,14 @@ func (h *Handler) SearchRuns(w http.ResponseWriter, r *http.Request) {
 		PageToken:      req.PageToken,
 	})
 	if err != nil {
+		// Filter parse failures are client errors, not 500s. Caught by
+		// TestMlflowSearchRuns_BadFilter.
+		if strings.Contains(err.Error(), "unable to parse predicate") ||
+			strings.Contains(err.Error(), "invalid order by") ||
+			strings.Contains(err.Error(), "invalid filter") {
+			writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", err.Error())
+			return
+		}
 		writeStoreErr(w, err)
 		return
 	}

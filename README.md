@@ -27,8 +27,11 @@
 ## Quick install
 
 ```bash
-# macOS / Linux (Homebrew)
-brew install litemlflow/tap/litemlflow
+# Raw binary (Linux / macOS amd64+arm64) — recommended
+curl -fsSL -o /usr/local/bin/litemlflow \
+  https://github.com/gorevds/litemlflow/releases/latest/download/litemlflow-linux-amd64
+chmod +x /usr/local/bin/litemlflow
+litemlflow up --data ~/lmf
 
 # Docker
 docker run -p 5000:5000 -v $(pwd)/data:/data ghcr.io/gorevds/litemlflow:latest up
@@ -36,9 +39,12 @@ docker run -p 5000:5000 -v $(pwd)/data:/data ghcr.io/gorevds/litemlflow:latest u
 # Kubernetes (Helm)
 helm install lmf oci://ghcr.io/litemlflow/charts/litemlflow --version 0.1.0
 
-# Build from source (Go 1.22+)
+# Build from source (Go 1.26+)
 git clone https://github.com/gorevds/litemlflow && cd litemlflow && make build
 ```
+
+> Snap, Homebrew, Debian, RPM, and the Terraform provider were sunset in v1.2.
+> See `dist/_sunset/README.md` for the rationale and supported channels.
 
 ---
 
@@ -90,7 +96,7 @@ Open http://localhost:5000 — you're done. No Postgres. No S3. No reverse proxy
 - **Storage backends** — filesystem (default, zero config) and S3-compatible (MinIO/AWS, pure-Go SigV4, multipart)
 - **Observability** — Prometheus `/metrics` endpoint (12 metric families), server-side LTTB downsampling
 - **CLI** — `up`, `migrate`, `rollback`, `backup`, `restore`, `import-mlflow`, `version`
-- **Distribution** — Docker, Homebrew, Debian, RPM, Snap, Helm chart, Kubernetes operator
+- **Distribution** — Docker image, Helm chart, Kubernetes operator, raw binary (Snap / Homebrew / Debian / RPM / Terraform sunset in v1.2 — see `dist/_sunset/`)
 - **Python SDK** — `litemlflow[langchain]` (auto-instrument LangChain), `litemlflow[llamaindex]` (auto-instrument LlamaIndex)
 - **Tested against real MLflow Python client 3.x** — 31/31 compat checks pass live at https://lmf.gorev.space
 
@@ -130,7 +136,7 @@ internal/
   migrations/        Embedded SQL migrations + runner
 python/litemlflow/   Python SDK + LangChain + LlamaIndex handlers
 operator/            Kubernetes operator (separate Go module)
-dist/                Homebrew formula, Debian, RPM, Snap, Helm chart
+dist/                Helm chart (active); _sunset/ holds Snap/Brew/RPM/Deb/Terraform (unmaintained, see README inside)
 docs/                Human-facing documentation
 tests/integration/   End-to-end tests (real MLflow client + bench harness)
 ```

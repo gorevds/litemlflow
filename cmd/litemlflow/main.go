@@ -170,6 +170,17 @@ func runUp(args []string) error {
 		return err
 	}
 	logger := newLogger(cfg.DevMode)
+	// Deprecation warning for auth=basic. The mode stays functional in v1.x
+	// (this release is v1.2-rc) but is scheduled for removal at v2.0 in
+	// favour of OIDC + a one-shot bootstrap-admin cookie. Loud-by-design.
+	if cfg.Auth == "basic" {
+		logger.Warn(
+			"DEPRECATED: --auth=basic will be removed in v2.0. "+
+				"Migrate to --auth=oidc (recommended) or stay on --auth=none for solo deploys. "+
+				"See docs/security-audit.md#deprecated-basic-auth.",
+			slog.String("scheduled_removal", "v2.0"),
+		)
+	}
 	srv, err := server.New(context.Background(), cfg, logger)
 	if err != nil {
 		return err

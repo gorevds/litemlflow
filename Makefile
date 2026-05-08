@@ -9,7 +9,7 @@ LDFLAGS    := -X github.com/gorevds/litemlflow/pkg/version.Version=$(shell git d
               -X github.com/gorevds/litemlflow/pkg/version.Commit=$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown) \
               -X github.com/gorevds/litemlflow/pkg/version.Date=$(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
-.PHONY: help build run dev test test-go test-py test-integration lint fmt vet clean docker compat-test py-install py-build dist-helm-lint dist-helm-template dist-deb dist-rpm fuzz-short test-chaos mutation operator-build operator-test terraform-build terraform-test
+.PHONY: help build run dev test test-go test-py test-integration lint fmt vet clean docker compat-test py-install py-build dist-helm-lint dist-helm-template fuzz-short test-chaos mutation operator-build operator-test
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -73,15 +73,6 @@ dist-helm-template: ## Dry-run render Helm chart to /tmp/render.yaml
 	helm template lmf dist/helm/litemlflow/ > /tmp/render.yaml
 	@echo "Rendered to /tmp/render.yaml"
 
-dist-deb: build ## Build a .deb package from the local binary (requires dpkg-buildpackage)
-	@echo "Copying binary $(DIST_BINARY) -> litemlflow (for dpkg-buildpackage)"
-	@cp "$(DIST_BINARY)" litemlflow
-	@cp -r dist/debian debian
-	@dpkg-buildpackage -b -us -uc
-	@rm -f litemlflow
-	@rm -rf debian
-	@echo "Done — .deb is in the parent directory."
-
 fuzz-short: ## Run each fuzz target for 20s (CI smoke run — seed corpus + brief fuzzing)
 	$(GO) test -fuzz='^FuzzParseRunPredicate$$'     -fuzztime=20s ./internal/store/
 	$(GO) test -fuzz='^FuzzParseRunFilter$$'        -fuzztime=20s ./internal/store/
@@ -91,14 +82,17 @@ fuzz-short: ## Run each fuzz target for 20s (CI smoke run — seed corpus + brie
 	$(GO) test -fuzz='^FuzzVerifyIDToken_SignatureCorruption$$' -fuzztime=20s ./internal/auth/
 	$(GO) test -fuzz='^FuzzIngestOTLP$$'            -fuzztime=20s ./internal/api/native/
 	$(GO) test -fuzz='^FuzzIngestTraces$$'          -fuzztime=20s ./internal/api/native/
+	$(GO) test -fuzz='^FuzzUploadMeta$$'            -fuzztime=20s ./internal/api/native/
 
 test-chaos: ## Run chaos tests (requires Linux; some scenarios need CAP_SYS_ADMIN)
 	$(GO) test -v -count=1 -tags=chaos -timeout=5m ./internal/store/ -run TestChaos
 
-mutation: ## Run gremlins mutation testing on internal/store and internal/auth (70% threshold)
+mutation: ## Run gremlins mutation testing (gates: auth 80%, store 70%, webhooks 65%, datasets 60%)
 	@command -v gremlins >/dev/null 2>&1 || (echo "gremlins not found; run: go install github.com/go-gremlins/gremlins/cmd/gremlins@latest"; exit 1)
-	gremlins unleash --threshold-efficacy 70 ./internal/store/...
-	gremlins unleash --threshold-efficacy 70 ./internal/auth/...
+	gremlins unleash --threshold-efficacy 80 ./internal/auth/
+	gremlins unleash --threshold-efficacy 70 ./internal/store/
+	gremlins unleash --threshold-efficacy 65 ./internal/webhooks/
+	gremlins unleash --threshold-efficacy 60 ./internal/datasets/
 
 operator-build: ## Build the LiteMLflow operator binary (→ bin/litemlflow-operator)
 	@mkdir -p $(BIN_DIR)
@@ -107,17 +101,5 @@ operator-build: ## Build the LiteMLflow operator binary (→ bin/litemlflow-oper
 operator-test: ## Run operator unit tests (pure, no cluster required)
 	cd operator && $(GO) test ./...
 
-terraform-build: ## Build the Terraform provider binary (→ bin/terraform-provider-litemlflow)
-	@mkdir -p $(BIN_DIR)
-	cd terraform && $(GO) build -o ../$(BIN_DIR)/terraform-provider-litemlflow ./
-
-terraform-test: ## Run Terraform provider unit tests (pure, no live server or Terraform binary required)
-	cd terraform && $(GO) test ./...
-
-dist-rpm: build ## Build an .rpm package from the local binary (requires rpmbuild)
-	@mkdir -p ~/rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
-	@cp "$(DIST_BINARY)" ~/rpmbuild/SOURCES/litemlflow-$(DIST_VERSION)-linux-x86_64
-	@cp dist/rpm/litemlflow.service ~/rpmbuild/SOURCES/litemlflow.service
-	@cp dist/rpm/litemlflow.spec ~/rpmbuild/SPECS/litemlflow.spec
-	@rpmbuild -bb ~/rpmbuild/SPECS/litemlflow.spec
-	@echo "Done — .rpm is in ~/rpmbuild/RPMS/"
+# Sunset distribution targets (dist-deb, dist-rpm, terraform-build, terraform-test)
+# moved to dist/_sunset/ in v1.2 — see dist/_sunset/README.md.

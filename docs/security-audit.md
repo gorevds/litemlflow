@@ -182,6 +182,36 @@ The accept-list gate (`.github/scripts/check_gosec.py`) parses this document and
 
 ---
 
+## Deprecated: basic auth
+
+`--auth=basic` is **deprecated as of v1.2** and will be removed in v2.0.
+
+Reasons:
+- The password hash is plain SHA-256 with no salt or KDF — weak by 2026
+  standards for a public-facing tracker. bcrypt or argon2 would be expected.
+- It is exercised by exactly two unit tests; the OIDC + session path is the
+  one we lean on for security review.
+- The cookie + session machinery built for OIDC subsumes basic auth's needs;
+  a one-shot "bootstrap admin" flow on a fresh deploy gives you the same
+  zero-IdP experience without the weak hash.
+
+Migration paths:
+
+1. **Solo MLE** without an IdP → switch to `--auth=none` and put the server
+   behind a reverse proxy you trust (nginx with HTTP basic, Caddy with auth,
+   tailscale, …). Most solo users do this anyway.
+2. **Small team** → switch to `--auth=oidc` against any OIDC IdP (Keycloak,
+   Authentik, GitHub-via-Dex, …). The first user who logs in is bootstrapped
+   as `admin` of the `default` workspace.
+
+A boot-time deprecation warning is emitted when `--auth=basic` is in use:
+
+```
+WARN  DEPRECATED: --auth=basic will be removed in v2.0. Migrate to ...
+```
+
+The flag continues to work in all v1.x releases.
+
 ## Sign-off
 
 This audit covers the v1.0 source tree as of tag `v1.0.0`. Next audit is at the next minor release (v1.1) or when a maintainer requests it via `make security`.

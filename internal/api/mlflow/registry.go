@@ -3,6 +3,7 @@ package mlflow
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -602,6 +603,14 @@ func (h *Handler) TransitionModelStage(w http.ResponseWriter, r *http.Request) {
 	}
 	mv, err := h.Store.TransitionModelStage(r.Context(), req.Name, ver, req.Stage, req.ArchiveExistingVersions)
 	if err != nil {
+		// "invalid stage" is a client-side validation error, not a store
+		// failure; surface it as 400 INVALID_PARAMETER_VALUE rather than
+		// the catch-all 500 INTERNAL_ERROR. Caught by
+		// TestMlflowTransitionModelVersion_BadStage.
+		if strings.Contains(err.Error(), "invalid stage") {
+			writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", err.Error())
+			return
+		}
 		writeStoreErr(w, err)
 		return
 	}

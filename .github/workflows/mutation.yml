@@ -33,3 +33,5 @@ jobs:
         run: gremlins unleash --threshold-efficacy 70 ./internal/store/
       - name: mutation — webhooks
         run: gremlins unleash --threshold-efficacy 65 ./internal/webhooks/
+      - name: mutation — datasets (CAS)
+        run: gremlins unleash --threshold-efficacy 60 ./internal/datasets/
