@@ -568,15 +568,26 @@
   // ─── Workspace selector ───────────────────────────────────────────────────────
   const WorkspaceSelector = {
     async init() {
-      let workspaces = [{ id: "default", name: "default" }];
+      let workspaces = [];
       try {
         const data = await fetchJSON("/api/v1/workspaces");
-        if (Array.isArray(data.workspaces) && data.workspaces.length) {
-          workspaces = data.workspaces;
-        }
+        if (Array.isArray(data.workspaces)) workspaces = data.workspaces;
       } catch { /* endpoint may not exist yet; graceful fallback */ }
 
+      // Single-tenant case: only the default workspace exists. Hide the
+      // selector entirely — it adds no information and looks like noise.
       const cur = Workspace.get();
+      const isSingleDefault = workspaces.length <= 1 &&
+        (workspaces.length === 0 || workspaces[0].id === "default") &&
+        cur === "default";
+      if (isSingleDefault) return;
+
+      // Make sure the current workspace is represented even if it isn't in
+      // the list (e.g., user typed a stale ID into localStorage).
+      if (!workspaces.find(ws => ws.id === cur)) {
+        workspaces = [{ id: cur, name: cur }, ...workspaces];
+      }
+
       const select = document.createElement("select");
       select.id = "workspace-select";
       select.className = "workspace-select";
@@ -585,18 +596,9 @@
         `<option value="${escapeHTML(ws.id)}"${ws.id === cur ? " selected" : ""}>${escapeHTML(ws.name || ws.id)}</option>`
       ).join("");
 
-      // Fallback: make sure current workspace is represented
-      if (!workspaces.find(ws => ws.id === cur)) {
-        const opt = document.createElement("option");
-        opt.value = cur;
-        opt.textContent = cur;
-        opt.selected = true;
-        select.prepend(opt);
-      }
-
       select.addEventListener("change", () => {
         Workspace.set(select.value);
-        App.route(); // re-render with new workspace context
+        App.route();
       });
 
       $(".actions").prepend(select);
@@ -616,6 +618,33 @@
         const next = cur === "dark" ? "light" : "dark";
         document.documentElement.setAttribute("data-theme", next);
         localStorage.setItem("litemlflow.theme", next);
+      });
+
+      // Header search button — opens the command palette (also bound to ⌘K).
+      const paletteTrigger = $("#palette-trigger");
+      if (paletteTrigger) {
+        paletteTrigger.addEventListener("click", () => CommandPalette.open());
+      }
+      // Footer "Shortcuts (?)" link — opens the keyboard help modal.
+      const footerShortcuts = $("#footer-shortcuts");
+      if (footerShortcuts) {
+        footerShortcuts.addEventListener("click", (e) => {
+          e.preventDefault();
+          ShortcutHelp.toggle();
+        });
+      }
+
+      // Global Escape: close any open modal-backdrop. Modal helpers use
+      // the same .modal-backdrop class, so one listener serves all of them.
+      document.addEventListener("keydown", (e) => {
+        if (e.key !== "Escape") return;
+        const backdrops = document.querySelectorAll(".modal-backdrop");
+        if (backdrops.length) {
+          // Close the topmost (last-added) so a nested confirm doesn't
+          // wipe the parent.
+          backdrops[backdrops.length - 1].remove();
+          e.stopPropagation();
+        }
       });
 
       // Version pill
@@ -1138,20 +1167,35 @@ mlflow.log_metric("loss", 0.42)</pre>
               });
             });
           };
+          // Track the outside-click listener so we can detach it on
+          // navigation/re-render. Without this each renderExperiment call
+          // accumulates a new listener.
+          let outsideListener = null;
+          const detachOutside = () => {
+            if (outsideListener) {
+              document.removeEventListener("click", outsideListener);
+              outsideListener = null;
+            }
+          };
           colsBtn.addEventListener("click", (ev) => {
             ev.stopPropagation();
             if (colsDrop.style.display === "none") {
               renderDropdown();
               colsDrop.style.display = "block";
+              outsideListener = (e) => {
+                if (!colsDrop.contains(e.target) && e.target !== colsBtn) {
+                  colsDrop.style.display = "none";
+                  detachOutside();
+                }
+              };
+              document.addEventListener("click", outsideListener);
             } else {
               colsDrop.style.display = "none";
+              detachOutside();
             }
           });
-          document.addEventListener("click", function hideOnOutside(ev) {
-            if (!colsDrop.contains(ev.target) && ev.target !== colsBtn) {
-              colsDrop.style.display = "none";
-            }
-          }, { once: false });
+          // Detach when leaving this view via hashchange.
+          window.addEventListener("hashchange", detachOutside, { once: true });
         }
 
         // Checkbox wiring

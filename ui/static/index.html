@@ -8,20 +8,60 @@
 </head>
 <body>
   <header class="app-header">
-    <div class="brand">
-      <span class="brand-mark">●</span>
+    <a href="#/experiments" class="brand" title="Home — experiments">
+      <svg class="brand-logo" viewBox="0 0 32 32" width="22" height="22" aria-hidden="true">
+        <!-- Stylized metric line: rising trace with a marker dot, on a baseline.
+             The triangle of points is the "lite" wordmark of the project. -->
+        <path d="M3 26 L11 18 L18 22 L29 6"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.4"
+              stroke-linecap="round"
+              stroke-linejoin="round" />
+        <circle cx="29" cy="6" r="3" fill="currentColor" />
+        <line x1="3" y1="29" x2="29" y2="29"
+              stroke="currentColor"
+              stroke-width="1.4"
+              stroke-linecap="round"
+              opacity="0.4" />
+      </svg>
       <span class="brand-name">LiteMLflow</span>
       <span class="brand-version" id="version">dev</span>
-    </div>
+    </a>
     <nav>
       <a href="#/experiments">Experiments</a>
       <a href="#/dashboards">Dashboards</a>
       <a href="#/prompts">Prompts</a>
       <a href="#/webhooks">Webhooks</a>
-      <a href="#/about">About</a>
     </nav>
     <div class="actions">
-      <button id="theme-toggle" title="Toggle theme">◐</button>
+      <button id="palette-trigger" class="btn-ghost" title="Search (⌘K)" aria-label="Open command palette">
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.5" />
+          <line x1="10.5" y1="10.5" x2="14" y2="14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+        </svg>
+        <span class="palette-hint">Search</span>
+        <kbd class="palette-kbd">⌘K</kbd>
+      </button>
+      <button id="theme-toggle" title="Toggle theme" aria-label="Toggle dark/light theme">
+        <svg class="theme-icon theme-icon-sun" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <circle cx="8" cy="8" r="3.2" fill="none" stroke="currentColor" stroke-width="1.5" />
+          <g stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+            <line x1="8" y1="1" x2="8" y2="3" />
+            <line x1="8" y1="13" x2="8" y2="15" />
+            <line x1="1" y1="8" x2="3" y2="8" />
+            <line x1="13" y1="8" x2="15" y2="8" />
+            <line x1="3" y1="3" x2="4.5" y2="4.5" />
+            <line x1="11.5" y1="11.5" x2="13" y2="13" />
+            <line x1="3" y1="13" x2="4.5" y2="11.5" />
+            <line x1="11.5" y1="4.5" x2="13" y2="3" />
+          </g>
+        </svg>
+        <svg class="theme-icon theme-icon-moon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <path d="M11.5 9.5 A5 5 0 0 1 6.5 4.5 A5 5 0 0 1 7.6 1.5 A6.5 6.5 0 1 0 14.5 8.4 A5 5 0 0 1 11.5 9.5 Z"
+                fill="currentColor" />
+        </svg>
+      </button>
     </div>
   </header>
 
@@ -31,6 +71,12 @@
 
   <footer class="app-footer">
     <span>LiteMLflow · single-binary experiment tracker</span>
+    <span class="footer-sep">·</span>
+    <a href="https://github.com/gorevds/litemlflow" target="_blank" rel="noopener noreferrer">GitHub</a>
+    <span class="footer-sep">·</span>
+    <a href="https://github.com/gorevds/litemlflow/blob/master/docs/quickstart.md" target="_blank" rel="noopener noreferrer">Docs</a>
+    <span class="footer-sep">·</span>
+    <a href="#" id="footer-shortcuts">Shortcuts (?)</a>
   </footer>
 
   <script src="/ui/app.js" defer></script>

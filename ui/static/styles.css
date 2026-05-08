@@ -68,10 +68,22 @@ body[data-embed="1"] .app-footer {
   align-items: center;
   gap: 8px;
   font-weight: 600;
+  color: var(--fg);
+  text-decoration: none;
+  padding: 4px 6px;
+  margin-left: -6px;
+  border-radius: 8px;
 }
-.brand-mark {
+.brand:hover {
+  background: var(--bg-card);
+  text-decoration: none;
+}
+.brand-logo {
   color: var(--accent);
-  font-size: 18px;
+  display: block;
+}
+.brand-name {
+  letter-spacing: -0.01em;
 }
 .brand-version {
   font-family: var(--mono);
@@ -81,6 +93,37 @@ body[data-embed="1"] .app-footer {
   border: 1px solid var(--border);
   padding: 1px 6px;
   border-radius: 999px;
+}
+
+/* Theme toggle: show sun in dark mode, moon in light. */
+[data-theme="dark"] .theme-icon-moon { display: none; }
+[data-theme="light"] .theme-icon-sun,
+:root:not([data-theme="dark"]) .theme-icon-sun { display: none; }
+
+/* Search button in header */
+#palette-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px 4px 8px;
+  color: var(--fg-muted);
+}
+#palette-trigger:hover { color: var(--fg); background: var(--bg-card); }
+.palette-hint {
+  font-size: 12px;
+}
+.palette-kbd {
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg-muted);
+}
+@media (max-width: 720px) {
+  .palette-hint, .palette-kbd { display: none; }
+  .brand-version { display: none; }
 }
 .app-header nav {
   display: flex;
@@ -131,6 +174,9 @@ body[data-embed="1"] .app-footer {
   font-size: 12px;
   border-top: 1px solid var(--border);
 }
+.app-footer a { color: var(--fg-muted); text-decoration: none; }
+.app-footer a:hover { color: var(--accent); text-decoration: underline; }
+.footer-sep { padding: 0 6px; opacity: 0.5; }
 
 /* ── Typography ─────────────────────────────────────────────────────────────── */
 h1 {
@@ -177,12 +223,20 @@ th {
   color: var(--fg-muted);
   background: var(--bg-alt);
   position: sticky;
-  top: 50px;
+  /* Pinned via CSS variable so a header-height change doesn't break the
+     stick-point. Set in :root + recomputed at runtime if header reflows. */
+  top: var(--header-h, 50px);
   z-index: 1;
 }
 tr:hover {
   background: var(--bg-alt);
 }
+/* Hover stays subtle on tables that aren't whole-row clickable. */
+tr:not([data-run-id]):not([data-exp-id]):not([data-prompt-name]):not([data-row-index]) {
+  /* let the hover background apply, but don't lie about clickability */
+  cursor: default;
+}
+tr[data-run-id], tr[data-exp-id], tr[data-prompt-name] { cursor: pointer; }
 tr[data-selected] {
   background: color-mix(in srgb, var(--accent) 12%, var(--bg-card));
   outline: 1px solid var(--accent);
@@ -216,6 +270,13 @@ a:hover { text-decoration: underline; }
 .status-KILLED    { background: rgba(136, 136, 136, 0.15); color: var(--killed); }
 .status-SCHEDULED { background: rgba(176, 123, 28, 0.15); color: var(--warning); }
 
+/* Brighten status colours in dark mode for readability — the muted
+   palette designed for white-on-light bg becomes hard to scan on dark. */
+[data-theme="dark"] .status-FINISHED { color: #4ade80; }
+[data-theme="dark"] .status-FAILED { color: #f87171; }
+[data-theme="dark"] .status-SCHEDULED { color: #facc15; }
+[data-theme="dark"] .status-KILLED { color: #d4d4d8; }
+
 .kind-pill {
   font-family: var(--mono);
   font-size: 10px;
@@ -231,17 +292,43 @@ a:hover { text-decoration: underline; }
   display: flex;
   gap: 8px;
   align-items: center;
+  flex-wrap: wrap;
   margin-bottom: 12px;
 }
 input[type=search],
-input[type=text] {
+input[type=text],
+input[type=url],
+input[type=password],
+input[type=number],
+textarea,
+select {
   background: var(--bg-card);
   border: 1px solid var(--border);
   color: var(--fg);
   border-radius: 6px;
   padding: 6px 10px;
   font: inherit;
-  min-width: 200px;
+}
+input[type=search],
+input[type=text] { min-width: 200px; }
+
+/* Unified focus ring: kill the doubled "border + browser default outline"
+   look in dark mode. The accent-tinted shadow is theme-aware via rgba. */
+input:focus,
+textarea:focus,
+select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+input:focus-visible,
+button:focus-visible,
+a:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 28%, transparent);
+}
+button:focus-visible {
+  border-color: var(--accent);
 }
 button {
   background: var(--bg-card);
@@ -265,7 +352,28 @@ button.btn-ghost:hover { background: var(--bg-alt); }
   text-align: center;
   color: var(--fg-muted);
 }
-.loading { padding: 40px; text-align: center; color: var(--fg-muted); }
+.loading {
+  padding: 40px;
+  text-align: center;
+  color: var(--fg-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+.loading::before {
+  content: "";
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: lmf-spin 0.7s linear infinite;
+  display: inline-block;
+}
+@keyframes lmf-spin {
+  to { transform: rotate(360deg); }
+}
 
 /* ── Charts ─────────────────────────────────────────────────────────────────── */
 .metric-chart {
@@ -965,7 +1073,14 @@ button.btn-ghost:hover { background: var(--bg-alt); }
   display: none;
   gap: 4px;
 }
-.widget:hover .widget-actions { display: flex; }
+/* In edit mode the action row is rendered with display:flex inline.
+   We keep the hover-fade for non-edit-mode cases (read-only widgets). */
+.widget:hover .widget-actions,
+.widget:focus-within .widget-actions { display: flex; }
+/* Wider tap targets on touch devices: keep actions visible always. */
+@media (hover: none) {
+  .widget-actions { display: flex; }
+}
 .widget-big-num {
   font-size: 32px;
   font-weight: 600;
