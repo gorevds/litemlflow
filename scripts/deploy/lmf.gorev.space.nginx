@@ -1,0 +1,65 @@
+# /etc/nginx/sites-available/lmf.gorev.space
+#
+# Reverse proxy for LiteMLflow at https://lmf.gorev.space.
+# Paired with: systemctl enable --now lmf
+#
+# certbot will edit this file in-place to add SSL listen + cert paths.
+# After certbot runs, the HTTP block here keeps a 301 → HTTPS.
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name lmf.gorev.space;
+
+    # Let certbot issue its challenges before redirecting.
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name lmf.gorev.space;
+
+    # certbot --nginx will inject ssl_certificate / ssl_certificate_key here.
+
+    # Sensible TLS defaults; certbot will also touch these.
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+
+    # Tell upstream what scheme/host the client used.
+    proxy_set_header Host              $host;
+    proxy_set_header X-Real-IP         $remote_addr;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Host  $host;
+
+    # LiteMLflow streams artifact bodies up to 5 GiB; lift the default 1m cap.
+    client_max_body_size 5G;
+
+    # Keep upstream connection alive for fast successive API calls.
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+
+    # Reasonable timeouts: artifact uploads and big batches can be slow.
+    proxy_connect_timeout 10s;
+    proxy_send_timeout    300s;
+    proxy_read_timeout    300s;
+    send_timeout          300s;
+
+    # Don't buffer streaming responses (artifact downloads, log streams).
+    proxy_buffering off;
+    proxy_request_buffering off;
+
+    location / {
+        proxy_pass http://127.0.0.1:5050;
+    }
+
+    access_log /var/log/nginx/lmf.access.log;
+    error_log  /var/log/nginx/lmf.error.log;
+}

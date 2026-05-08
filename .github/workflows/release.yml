@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+      - name: build matrix
+        run: |
+          mkdir -p dist
+          for OS in linux darwin; do
+            for ARCH in amd64 arm64; do
+              echo "Building $OS/$ARCH ..."
+              GOOS=$OS GOARCH=$ARCH CGO_ENABLED=0 \
+                go build \
+                  -trimpath \
+                  -ldflags "-s -w \
+                    -X github.com/litemlflow/litemlflow/pkg/version.Version=${GITHUB_REF_NAME} \
+                    -X github.com/litemlflow/litemlflow/pkg/version.Commit=$(git rev-parse --short HEAD) \
+                    -X github.com/litemlflow/litemlflow/pkg/version.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                  -o dist/litemlflow-${GITHUB_REF_NAME}-$OS-$ARCH \
+                  ./cmd/litemlflow
+            done
+          done
+          (cd dist && sha256sum litemlflow-* > SHA256SUMS)
+      - name: create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "Auto-generated release. See CHANGELOG.md for details." \
+            dist/*

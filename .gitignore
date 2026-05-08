@@ -1,0 +1,69 @@
+# Build artifacts
+/bin/
+/dist/
+/build/
+/tmp/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go
+*.test
+*.out
+coverage.txt
+coverage.html
+vendor/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.pytest_cache/
+.tox/
+.venv/
+venv/
+env/
+.python-version
+build/
+dist/
+*.whl
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Local data
+/data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+litemlflow.db*
+artifacts/
+
+# Logs
+*.log
+logs/
+
+# Secrets
+.env
+.env.local
+*.pem
+*.key
+
+# UI build (generated)
+ui/dist/
+ui/node_modules/
+
+# Coverage reports
+*.lcov

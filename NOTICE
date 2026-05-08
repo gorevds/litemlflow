@@ -1,0 +1,17 @@
+LiteMLflow
+Copyright 2026 LiteMLflow Authors
+
+This product includes software developed at LiteMLflow Authors.
+
+This product is independent and not affiliated with, endorsed, or sponsored
+by Databricks, Inc. or any subsidiary thereof. "MLflow" is a trademark of
+Databricks, Inc. References to MLflow in this codebase exist solely for
+purposes of describing API compatibility and migration paths.
+
+This project bundles or depends on the following third-party software:
+
+- modernc.org/sqlite (BSD-3-Clause) — pure-Go SQLite implementation
+- github.com/go-chi/chi/v5 (MIT) — HTTP router
+- uPlot (MIT) — JavaScript plotting library used in the embedded UI
+
+See LICENSE for the terms governing use of LiteMLflow itself.

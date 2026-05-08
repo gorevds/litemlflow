@@ -1,0 +1,37 @@
+[Unit]
+Description=LiteMLflow experiment tracker (lmf.gorev.space)
+Documentation=https://github.com/litemlflow/litemlflow
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lmf
+Group=lmf
+ExecStart=/opt/lmf/litemlflow up --data /var/lib/lmf --addr 127.0.0.1:5050
+Restart=on-failure
+RestartSec=2s
+
+# Sandboxing
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/lmf
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+
+# Resources
+LimitNOFILE=65536
+
+# Logging via journald
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

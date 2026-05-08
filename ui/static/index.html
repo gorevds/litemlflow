@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LiteMLflow</title>
+  <link rel="stylesheet" href="/ui/styles.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">
+      <span class="brand-mark">●</span>
+      <span class="brand-name">LiteMLflow</span>
+      <span class="brand-version" id="version">dev</span>
+    </div>
+    <nav>
+      <a href="#/experiments">Experiments</a>
+      <a href="#/prompts">Prompts</a>
+      <a href="#/about">About</a>
+    </nav>
+    <div class="actions">
+      <button id="theme-toggle" title="Toggle theme">◐</button>
+    </div>
+  </header>
+
+  <main id="app" class="app-main">
+    <div class="loading">Loading…</div>
+  </main>
+
+  <footer class="app-footer">
+    <span>LiteMLflow · single-binary experiment tracker</span>
+  </footer>
+
+  <script src="/ui/app.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,89 @@
+# MLflow API compatibility surface
+
+LiteMLflow targets pragmatic 80% compatibility with the MLflow REST API. This document is the contract: anything listed as **Implemented** must remain wire-compatible with the MLflow Python client (versions 2.10+).
+
+The wire format is JSON over HTTP, request and response shapes match MLflow exactly unless noted.
+
+## Implemented (v0.1)
+
+### Experiments
+
+| Endpoint | Method | Notes |
+|---|---|---|
+| `/api/2.0/mlflow/experiments/create` | POST | accepts `name`, `artifact_location`, `tags` |
+| `/api/2.0/mlflow/experiments/get` | GET | by `experiment_id` |
+| `/api/2.0/mlflow/experiments/get-by-name` | GET | by `experiment_name` |
+| `/api/2.0/mlflow/experiments/search` | POST | supports basic `filter`, `order_by`, `max_results`, `page_token` |
+| `/api/2.0/mlflow/experiments/delete` | POST | sets lifecycle_stage to deleted |
+| `/api/2.0/mlflow/experiments/restore` | POST | sets lifecycle_stage to active |
+| `/api/2.0/mlflow/experiments/update` | POST | rename |
+| `/api/2.0/mlflow/experiments/set-experiment-tag` | POST | upsert experiment tag |
+
+### Runs
+
+| Endpoint | Method | Notes |
+|---|---|---|
+| `/api/2.0/mlflow/runs/create` | POST | `experiment_id`, `run_name`, `start_time`, `tags` |
+| `/api/2.0/mlflow/runs/get` | GET | by `run_id` |
+| `/api/2.0/mlflow/runs/update` | POST | status, end_time |
+| `/api/2.0/mlflow/runs/delete` | POST | sets lifecycle_stage to deleted |
+| `/api/2.0/mlflow/runs/restore` | POST | sets lifecycle_stage to active |
+| `/api/2.0/mlflow/runs/search` | POST | supports `experiment_ids`, `filter`, `order_by`, pagination |
+| `/api/2.0/mlflow/runs/log-metric` | POST | single metric write |
+| `/api/2.0/mlflow/runs/log-parameter` | POST | single param write |
+| `/api/2.0/mlflow/runs/log-batch` | POST | batch metrics/params/tags |
+| `/api/2.0/mlflow/runs/set-tag` | POST | upsert tag |
+| `/api/2.0/mlflow/runs/delete-tag` | POST | remove tag |
+| `/api/2.0/mlflow/metrics/get-history` | GET | timeseries by `run_id` + `metric_key` |
+
+### Artifacts
+
+| Endpoint | Method | Notes |
+|---|---|---|
+| `/api/2.0/mlflow/artifacts/list` | GET | list a run's artifacts directory |
+| `/api/2.0/mlflow-artifacts/artifacts/{path...}` | GET | download |
+| `/api/2.0/mlflow-artifacts/artifacts/{path...}` | PUT | upload |
+| `/api/2.0/mlflow-artifacts/artifacts/{path...}` | DELETE | delete |
+
+## Deferred to v0.2
+
+- `/api/2.0/mlflow/registered-models/...` — model registry
+- `/api/2.0/mlflow/model-versions/...` — model version lifecycle
+- `/api/2.0/mlflow/runs/log-inputs` — dataset linkage
+
+## Explicitly out of scope (use native API instead)
+
+- `/api/2.0/mlflow/projects/run` — we are not an executor
+- `/api/2.0/mlflow/gateway/...` — model gateway is a separate product space
+- Anything involving `mlflow projects` CLI
+
+## Error codes
+
+We return MLflow's `ErrorCode` enum where applicable:
+
+| Code | HTTP | Meaning |
+|---|---|---|
+| `RESOURCE_ALREADY_EXISTS` | 400 | duplicate experiment/run/param |
+| `RESOURCE_DOES_NOT_EXIST` | 404 | not found |
+| `INVALID_PARAMETER_VALUE` | 400 | malformed request |
+| `INTERNAL_ERROR` | 500 | unexpected |
+| `PERMISSION_DENIED` | 403 | auth required / insufficient |
+| `BAD_REQUEST` | 400 | other client errors |
+
+Error response shape:
+
+```json
+{
+  "error_code": "RESOURCE_DOES_NOT_EXIST",
+  "message": "experiment with id=42 does not exist"
+}
+```
+
+## Compatibility test matrix
+
+The `compat-test` Make target runs the MLflow Python client (versions 2.10, 2.11, 2.12, 2.13, 2.14) against a running LiteMLflow server and asserts these scripts complete without error:
+
+1. `examples/quickstart.py` — log_metric, log_param, log_artifact
+2. `examples/sklearn_example.py` — full sklearn workflow with autologging disabled
+3. `examples/search_runs.py` — create N runs, search by filter, paginate
+4. `examples/artifact_roundtrip.py` — upload, list, download, delete

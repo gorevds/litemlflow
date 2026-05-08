@@ -1,0 +1,898 @@
+package mlflow
+
+import (
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"path"
+	"strconv"
+	"strings"
+
+	"github.com/go-chi/chi/v5"
+
+	"github.com/litemlflow/litemlflow/internal/artifact"
+	"github.com/litemlflow/litemlflow/internal/model"
+	"github.com/litemlflow/litemlflow/internal/store"
+)
+
+// Handler bundles dependencies for the MLflow REST API.
+type Handler struct {
+	Store     store.Store
+	Artifacts artifact.Store
+}
+
+// Mount attaches the MLflow REST API to the given router.
+func (h *Handler) Mount(r chi.Router) {
+	// Experiments
+	r.Post("/api/2.0/mlflow/experiments/create", h.CreateExperiment)
+	r.Get("/api/2.0/mlflow/experiments/get", h.GetExperiment)
+	r.Get("/api/2.0/mlflow/experiments/get-by-name", h.GetExperimentByName)
+	r.Post("/api/2.0/mlflow/experiments/list", h.SearchExperiments) // legacy
+	r.Get("/api/2.0/mlflow/experiments/list", h.SearchExperiments)  // legacy
+	r.Post("/api/2.0/mlflow/experiments/search", h.SearchExperiments)
+	r.Get("/api/2.0/mlflow/experiments/search", h.SearchExperiments)
+	r.Post("/api/2.0/mlflow/experiments/delete", h.DeleteExperiment)
+	r.Post("/api/2.0/mlflow/experiments/restore", h.RestoreExperiment)
+	r.Post("/api/2.0/mlflow/experiments/update", h.UpdateExperiment)
+	r.Post("/api/2.0/mlflow/experiments/set-experiment-tag", h.SetExperimentTag)
+
+	// Runs
+	r.Post("/api/2.0/mlflow/runs/create", h.CreateRun)
+	r.Get("/api/2.0/mlflow/runs/get", h.GetRun)
+	r.Post("/api/2.0/mlflow/runs/update", h.UpdateRun)
+	r.Post("/api/2.0/mlflow/runs/delete", h.DeleteRun)
+	r.Post("/api/2.0/mlflow/runs/restore", h.RestoreRun)
+	r.Post("/api/2.0/mlflow/runs/search", h.SearchRuns)
+	r.Get("/api/2.0/mlflow/runs/search", h.SearchRuns)
+	r.Post("/api/2.0/mlflow/runs/log-metric", h.LogMetric)
+	r.Post("/api/2.0/mlflow/runs/log-parameter", h.LogParameter)
+	r.Post("/api/2.0/mlflow/runs/log-batch", h.LogBatch)
+	r.Post("/api/2.0/mlflow/runs/set-tag", h.SetTag)
+	r.Post("/api/2.0/mlflow/runs/delete-tag", h.DeleteTag)
+	r.Get("/api/2.0/mlflow/metrics/get-history", h.GetMetricHistory)
+
+	// Artifacts
+	r.Get("/api/2.0/mlflow/artifacts/list", h.ListArtifacts)
+	r.Mount("/api/2.0/mlflow-artifacts/artifacts", artifactsRouter(h))
+}
+
+// ---- experiments ------------------------------------------------------------
+
+type createExperimentReq struct {
+	Name             string             `json:"name"`
+	ArtifactLocation string             `json:"artifact_location,omitempty"`
+	Tags             []experimentTagDTO `json:"tags,omitempty"`
+}
+
+type createExperimentResp struct {
+	ExperimentID string `json:"experiment_id"`
+}
+
+// CreateExperiment handles POST /api/2.0/mlflow/experiments/create.
+func (h *Handler) CreateExperiment(w http.ResponseWriter, r *http.Request) {
+	var req createExperimentReq
+	if err := decodeJSON(r, &req); err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "name is required")
+		return
+	}
+	tags := make([]model.KV, 0, len(req.Tags))
+	for _, t := range req.Tags {
+		tags = append(tags, model.KV{Key: t.Key, Value: t.Value})
+	}
+	id, err := h.Store.CreateExperiment(r.Context(), &model.Experiment{
+		Name:             req.Name,
+		ArtifactLocation: req.ArtifactLocation,
+		Tags:             tags,
+	})
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, createExperimentResp{ExperimentID: strconv.FormatInt(id, 10)})
+}
+
+type getExperimentResp struct {
+	Experiment experimentDTO `json:"experiment"`
+}
+
+// GetExperiment handles GET /api/2.0/mlflow/experiments/get.
+func (h *Handler) GetExperiment(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.URL.Query().Get("experiment_id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "experiment_id is required")
+		return
+	}
+	e, err := h.Store.GetExperiment(r.Context(), id)
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, getExperimentResp{Experiment: experimentToDTO(e)})
+}
+
+// GetExperimentByName handles GET /api/2.0/mlflow/experiments/get-by-name.
+func (h *Handler) GetExperimentByName(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("experiment_name")
+	if name == "" {
+		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "experiment_name is required")
+		return
+	}
+	e, err := h.Store.GetExperimentByName(r.Context(), name)
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, getExperimentResp{Experiment: experimentToDTO(e)})
+}
+
+type searchExperimentsReq struct {
+	MaxResults int    `json:"max_results,omitempty"`
+	PageToken  string `json:"page_token,omitempty"`
+	Filter     string `json:"filter,omitempty"`
+	ViewType   string `json:"view_type,omitempty"` // ACTIVE_ONLY/DELETED_ONLY/ALL
+}
+
+type searchExperimentsResp struct {
+	Experiments   []experimentDTO `json:"experiments"`
+	NextPageToken string          `json:"next_page_token,omitempty"`
+}
+
+// SearchExperiments handles POST /api/2.0/mlflow/experiments/search.
+func (h *Handler) SearchExperiments(w http.ResponseWriter, r *http.Request) {
+	var req searchExperimentsReq
+	_ = decodeJSON(r, &req)
+	// Allow query-string variant too.
+	if req.MaxResults == 0 {
+		if v := r.URL.Query().Get("max_results"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil {
+				req.MaxResults = n
+			}
+		}
+	}
+	if req.Filter == "" {
+		req.Filter = r.URL.Query().Get("filter")
+	}
+	stage := mapViewType(req.ViewType)
+	res, err := h.Store.SearchExperiments(r.Context(), store.SearchOptions{
+		MaxResults:     req.MaxResults,
+		PageToken:      req.PageToken,
+		Filter:         req.Filter,
+		LifecycleStage: stage,
+	})
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	out := make([]experimentDTO, 0, len(res.Items))
+	for _, e := range res.Items {
+		out = append(out, experimentToDTO(e))
+	}
+	writeJSON(w, searchExperimentsResp{Experiments: out, NextPageToken: res.NextPageToken})
+}
+
+func mapViewType(v string) string {
+	switch strings.ToUpper(v) {
+	case "DELETED_ONLY":
+		return model.LifecycleDeleted
+	case "ALL":
+		return "all"
+	case "ACTIVE_ONLY", "":
+		return model.LifecycleActive
+	}
+	return model.LifecycleActive
+}
+
+type idReq struct {
+	ExperimentID string `json:"experiment_id"`
+}
+
+// DeleteExperiment handles POST .../experiments/delete.
+func (h *Handler) DeleteExperiment(w http.ResponseWriter, r *http.Request) {
+	var req idReq
+	if err := decodeJSON(r, &req); err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+	id, err := strconv.ParseInt(req.ExperimentID, 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "experiment_id is required")
+		return
+	}
+	if err := h.Store.SetExperimentLifecycle(r.Context(), id, model.LifecycleDeleted); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, struct{}{})
+}
+
+// RestoreExperiment handles POST .../experiments/restore.
+func (h *Handler) RestoreExperiment(w http.ResponseWriter, r *http.Request) {
+	var req idReq
+	if err := decodeJSON(r, &req); err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+	id, err := strconv.ParseInt(req.ExperimentID, 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "experiment_id is required")
+		return
+	}
+	if err := h.Store.SetExperimentLifecycle(r.Context(), id, model.LifecycleActive); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, struct{}{})
+}
+
+type updateExperimentReq struct {
+	ExperimentID string `json:"experiment_id"`
+	NewName      string `json:"new_name"`
+}
+
+// UpdateExperiment handles POST .../experiments/update (rename).
+func (h *Handler) UpdateExperiment(w http.ResponseWriter, r *http.Request) {
+	var req updateExperimentReq
+	if err := decodeJSON(r, &req); err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+	id, err := strconv.ParseInt(req.ExperimentID, 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "experiment_id is required")
+		return
+	}
+	if req.NewName == "" {
+		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "new_name is required")
+		return
+	}
+	if err := h.Store.UpdateExperiment(r.Context(), id, &req.NewName); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, struct{}{})
+}
+
+type setExperimentTagReq struct {
+	ExperimentID string `json:"experiment_id"`
+	Key          string `json:"key"`
+	Value        string `json:"value"`
+}
+
+// SetExperimentTag handles POST .../experiments/set-experiment-tag.
+func (h *Handler) SetExperimentTag(w http.ResponseWriter, r *http.Request) {
+	var req setExperimentTagReq
+	if err := decodeJSON(r, &req); err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+	id, err := strconv.ParseInt(req.ExperimentID, 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "experiment_id is required")
+		return
+	}
+	if err := h.Store.SetExperimentTag(r.Context(), id, req.Key, req.Value); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, struct{}{})
+}
+
+// ---- runs -------------------------------------------------------------------
+
+type createRunReq struct {
+	ExperimentID string    `json:"experiment_id"`
+	UserID       string    `json:"user_id,omitempty"`
+	StartTime    int64     `json:"start_time,omitempty"`
+	Tags         []tagDTO  `json:"tags,omitempty"`
+	RunName      string    `json:"run_name,omitempty"`
+}
+
+type runResp struct {
+	Run runDTO `json:"run"`
+}
+
+// CreateRun handles POST /api/2.0/mlflow/runs/create.
+func (h *Handler) CreateRun(w http.ResponseWriter, r *http.Request) {
+	var req createRunReq
+	if err := decodeJSON(r, &req); err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+	expID, err := strconv.ParseInt(req.ExperimentID, 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "experiment_id is required")
+		return
+	}
+	run := &model.Run{
+		ExperimentID: expID,
+		UserID:       req.UserID,
+		StartTime:    req.StartTime,
+		Name:         req.RunName,
+	}
+	if err := h.Store.CreateRun(r.Context(), run); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	for _, t := range req.Tags {
+		_ = h.Store.SetTag(r.Context(), run.ID, model.KV{Key: t.Key, Value: t.Value})
+	}
+	writeJSON(w, runResp{Run: runDTO{
+		Info: runInfoToDTO(run),
+		Data: runDataDTO{Tags: req.Tags},
+	}})
+}
+
+// GetRun handles GET /api/2.0/mlflow/runs/get.
+func (h *Handler) GetRun(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("run_id")
+	if id == "" {
+		id = r.URL.Query().Get("run_uuid")
+	}
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "run_id is required")
+		return
+	}
+	run, err := h.Store.GetRun(r.Context(), id)
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	data, err := h.collectRunData(r, id)
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, runResp{Run: runDTO{Info: runInfoToDTO(run), Data: data}})
+}
+
+func (h *Handler) collectRunData(r *http.Request, runID string) (runDataDTO, error) {
+	metrics, err := h.Store.GetLatestMetrics(r.Context(), runID)
+	if err != nil {
+		return runDataDTO{}, err
+	}
+	params, err := h.Store.GetParams(r.Context(), runID)
+	if err != nil {
+		return runDataDTO{}, err
+	}
+	tags, err := h.Store.GetTags(r.Context(), runID)
+	if err != nil {
+		return runDataDTO{}, err
+	}
+	return runDataDTO{
+		Metrics: metricsToDTO(metrics),
+		Params:  paramsToDTO(params),
+		Tags:    tagsToDTO(tags),
+	}, nil
+}
+
+type updateRunReq struct {
+	RunID   string `json:"run_id"`
+	RunUUID string `json:"run_uuid,omitempty"`
+	Status  string `json:"status,omitempty"`
+	EndTime int64  `json:"end_time,omitempty"`
+	RunName string `json:"run_name,omitempty"`
+}
+
+// UpdateRun handles POST .../runs/update.
+func (h *Handler) UpdateRun(w http.ResponseWriter, r *http.Request) {
+	var req updateRunReq
+	if err := decodeJSON(r, &req); err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+	id := req.RunID
+	if id == "" {
+		id = req.RunUUID
+	}
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "run_id is required")
+		return
+	}
+	var status *string
+	if req.Status != "" {
+		s := req.Status
+		status = &s
+	}
+	var end *int64
+	if req.EndTime != 0 {
+		end = &req.EndTime
+	}
+	var name *string
+	if req.RunName != "" {
+		name = &req.RunName
+	}
+	if err := h.Store.UpdateRun(r.Context(), id, status, end, name); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	run, err := h.Store.GetRun(r.Context(), id)
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, struct {
+		RunInfo runInfoDTO `json:"run_info"`
+	}{RunInfo: runInfoToDTO(run)})
+}
+
+// DeleteRun handles POST .../runs/delete.
+func (h *Handler) DeleteRun(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		RunID string `json:"run_id"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+	if err := h.Store.SetRunLifecycle(r.Context(), req.RunID, model.LifecycleDeleted); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, struct{}{})
+}
+
+// RestoreRun handles POST .../runs/restore.
+func (h *Handler) RestoreRun(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		RunID string `json:"run_id"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+	if err := h.Store.SetRunLifecycle(r.Context(), req.RunID, model.LifecycleActive); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, struct{}{})
+}
+
+type searchRunsReq struct {
+	ExperimentIDs []string `json:"experiment_ids"`
+	Filter        string   `json:"filter"`
+	ViewType      string   `json:"run_view_type"`
+	MaxResults    int      `json:"max_results"`
+	OrderBy       []string `json:"order_by"`
+	PageToken     string   `json:"page_token"`
+}
+
+type searchRunsResp struct {
+	Runs          []runDTO `json:"runs"`
+	NextPageToken string   `json:"next_page_token,omitempty"`
+}
+
+// SearchRuns handles POST .../runs/search.
+func (h *Handler) SearchRuns(w http.ResponseWriter, r *http.Request) {
+	var req searchRunsReq
+	_ = decodeJSON(r, &req)
+	expIDs := make([]int64, 0, len(req.ExperimentIDs))
+	for _, s := range req.ExperimentIDs {
+		n, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "invalid experiment_id "+s)
+			return
+		}
+		expIDs = append(expIDs, n)
+	}
+	res, err := h.Store.SearchRuns(r.Context(), store.SearchOptions{
+		ExperimentIDs:  expIDs,
+		Filter:         req.Filter,
+		LifecycleStage: mapViewType(req.ViewType),
+		MaxResults:     req.MaxResults,
+		OrderBy:        req.OrderBy,
+		PageToken:      req.PageToken,
+	})
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	runs := make([]runDTO, 0, len(res.Items))
+	for _, run := range res.Items {
+		data, err := h.collectRunData(r, run.ID)
+		if err != nil {
+			writeStoreErr(w, err)
+			return
+		}
+		runs = append(runs, runDTO{Info: runInfoToDTO(run), Data: data})
+	}
+	writeJSON(w, searchRunsResp{Runs: runs, NextPageToken: res.NextPageToken})
+}
+
+type logMetricReq struct {
+	RunID     string  `json:"run_id"`
+	RunUUID   string  `json:"run_uuid,omitempty"`
+	Key       string  `json:"key"`
+	Value     float64 `json:"value"`
+	Timestamp int64   `json:"timestamp"`
+	Step      int64   `json:"step,omitempty"`
+}
+
+// LogMetric handles POST .../runs/log-metric.
+func (h *Handler) LogMetric(w http.ResponseWriter, r *http.Request) {
+	var req logMetricReq
+	if err := decodeJSON(r, &req); err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+	runID := req.RunID
+	if runID == "" {
+		runID = req.RunUUID
+	}
+	if runID == "" {
+		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "run_id is required")
+		return
+	}
+	if err := h.Store.LogMetric(r.Context(), runID, model.Metric{
+		Key: req.Key, Value: req.Value, Timestamp: req.Timestamp, Step: req.Step,
+	}); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, struct{}{})
+}
+
+type logParameterReq struct {
+	RunID   string `json:"run_id"`
+	RunUUID string `json:"run_uuid,omitempty"`
+	Key     string `json:"key"`
+	Value   string `json:"value"`
+}
+
+// LogParameter handles POST .../runs/log-parameter.
+func (h *Handler) LogParameter(w http.ResponseWriter, r *http.Request) {
+	var req logParameterReq
+	if err := decodeJSON(r, &req); err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+	runID := req.RunID
+	if runID == "" {
+		runID = req.RunUUID
+	}
+	if err := h.Store.LogParam(r.Context(), runID, model.Param{Key: req.Key, Value: req.Value}); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, struct{}{})
+}
+
+type logBatchReq struct {
+	RunID   string      `json:"run_id"`
+	Metrics []metricDTO `json:"metrics,omitempty"`
+	Params  []paramDTO  `json:"params,omitempty"`
+	Tags    []tagDTO    `json:"tags,omitempty"`
+}
+
+// LogBatch handles POST .../runs/log-batch (canonical batch entry point).
+func (h *Handler) LogBatch(w http.ResponseWriter, r *http.Request) {
+	var req logBatchReq
+	if err := decodeJSON(r, &req); err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+	if req.RunID == "" {
+		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "run_id is required")
+		return
+	}
+	// Caps matching MLflow.
+	if len(req.Metrics) > 1000 || len(req.Params) > 100 || len(req.Tags) > 100 {
+		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE",
+			"batch caps exceeded (metrics<=1000, params<=100, tags<=100)")
+		return
+	}
+	metrics := make([]model.Metric, 0, len(req.Metrics))
+	for _, m := range req.Metrics {
+		metrics = append(metrics, model.Metric{Key: m.Key, Value: m.Value, Timestamp: m.Timestamp, Step: m.Step})
+	}
+	if err := h.Store.LogMetrics(r.Context(), req.RunID, metrics); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	for _, p := range req.Params {
+		if err := h.Store.LogParam(r.Context(), req.RunID, model.Param{Key: p.Key, Value: p.Value}); err != nil {
+			writeStoreErr(w, err)
+			return
+		}
+	}
+	tags := make([]model.KV, 0, len(req.Tags))
+	for _, t := range req.Tags {
+		tags = append(tags, model.KV{Key: t.Key, Value: t.Value})
+	}
+	if err := h.Store.SetTags(r.Context(), req.RunID, tags); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, struct{}{})
+}
+
+type setTagReq struct {
+	RunID   string `json:"run_id"`
+	RunUUID string `json:"run_uuid,omitempty"`
+	Key     string `json:"key"`
+	Value   string `json:"value"`
+}
+
+// SetTag handles POST .../runs/set-tag.
+func (h *Handler) SetTag(w http.ResponseWriter, r *http.Request) {
+	var req setTagReq
+	if err := decodeJSON(r, &req); err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+	runID := req.RunID
+	if runID == "" {
+		runID = req.RunUUID
+	}
+	if err := h.Store.SetTag(r.Context(), runID, model.KV{Key: req.Key, Value: req.Value}); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, struct{}{})
+}
+
+type deleteTagReq struct {
+	RunID string `json:"run_id"`
+	Key   string `json:"key"`
+}
+
+// DeleteTag handles POST .../runs/delete-tag.
+func (h *Handler) DeleteTag(w http.ResponseWriter, r *http.Request) {
+	var req deleteTagReq
+	if err := decodeJSON(r, &req); err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+	if req.RunID == "" || req.Key == "" {
+		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "run_id and key are required")
+		return
+	}
+	if err := h.Store.DeleteTag(r.Context(), req.RunID, req.Key); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, struct{}{})
+}
+
+type getMetricHistoryResp struct {
+	Metrics []metricDTO `json:"metrics"`
+}
+
+// GetMetricHistory handles GET .../metrics/get-history.
+func (h *Handler) GetMetricHistory(w http.ResponseWriter, r *http.Request) {
+	runID := r.URL.Query().Get("run_id")
+	if runID == "" {
+		runID = r.URL.Query().Get("run_uuid")
+	}
+	key := r.URL.Query().Get("metric_key")
+	if runID == "" || key == "" {
+		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "run_id and metric_key are required")
+		return
+	}
+	hist, err := h.Store.GetMetricHistory(r.Context(), runID, key)
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, getMetricHistoryResp{Metrics: metricsToDTO(hist)})
+}
+
+// ---- artifacts --------------------------------------------------------------
+
+type artifactFile struct {
+	Path     string `json:"path"`
+	IsDir    bool   `json:"is_dir"`
+	FileSize int64  `json:"file_size,omitempty"`
+}
+
+type listArtifactsResp struct {
+	RootURI string         `json:"root_uri"`
+	Files   []artifactFile `json:"files"`
+}
+
+// ListArtifacts handles GET /api/2.0/mlflow/artifacts/list.
+func (h *Handler) ListArtifacts(w http.ResponseWriter, r *http.Request) {
+	runID := r.URL.Query().Get("run_id")
+	if runID == "" {
+		runID = r.URL.Query().Get("run_uuid")
+	}
+	dir := r.URL.Query().Get("path")
+	if runID == "" {
+		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "run_id is required")
+		return
+	}
+	run, err := h.Store.GetRun(r.Context(), runID)
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	entries, err := h.Artifacts.List(runID, dir)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	files := make([]artifactFile, 0, len(entries))
+	for _, e := range entries {
+		f := artifactFile{Path: e.Path, IsDir: e.IsDir}
+		if !e.IsDir {
+			f.FileSize = e.Size
+		}
+		files = append(files, f)
+	}
+	writeJSON(w, listArtifactsResp{RootURI: run.ArtifactURI, Files: files})
+}
+
+// artifactsRouter handles upload/download/delete under
+// /api/2.0/mlflow-artifacts/artifacts/<run_id>/<path...>.
+//
+// It also handles MLflow's proxy-list shape:
+//
+//	GET /api/2.0/mlflow-artifacts/artifacts?path=<run_id>[/sub/dir]
+//
+// which lists immediate children of the given path. Used by the
+// MlflowArtifactsRepository client when artifact_uri is mlflow-artifacts:/...
+func artifactsRouter(h *Handler) http.Handler {
+	r := chi.NewRouter()
+	handle := func(w http.ResponseWriter, req *http.Request) {
+		// Proxy-list shape: GET with no path component, ?path= carries it.
+		if req.Method == http.MethodGet && strings.TrimPrefix(chi.URLParam(req, "*"), "/") == "" {
+			runID, rel := splitQueryPath(req.URL.Query().Get("path"))
+			if runID == "" {
+				writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "path is required")
+				return
+			}
+			if _, err := h.Store.GetRun(req.Context(), runID); err != nil {
+				writeStoreErr(w, err)
+				return
+			}
+			entries, err := h.Artifacts.List(runID, rel)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+				return
+			}
+			out := make([]artifactFile, 0, len(entries))
+			for _, e := range entries {
+				af := artifactFile{Path: e.Path, IsDir: e.IsDir}
+				if !e.IsDir {
+					af.FileSize = e.Size
+				}
+				out = append(out, af)
+			}
+			// MLflow's proxy list response shape is {"files": [...]}.
+			writeJSON(w, struct {
+				Files []artifactFile `json:"files"`
+			}{Files: out})
+			return
+		}
+
+		runID, rel, err := splitArtifactPath(req)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", err.Error())
+			return
+		}
+		// Every artifact operation must reference a real run. Without this
+		// check, a client could create orphaned files outside any run that
+		// will never be garbage-collected.
+		if _, err := h.Store.GetRun(req.Context(), runID); err != nil {
+			writeStoreErr(w, err)
+			return
+		}
+		switch req.Method {
+		case http.MethodGet:
+			rc, size, err := h.Artifacts.Open(runID, rel)
+			if err != nil {
+				if errors.Is(err, artifact.ErrNotFound) {
+					writeError(w, http.StatusNotFound, "RESOURCE_DOES_NOT_EXIST", "artifact not found")
+					return
+				}
+				writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+				return
+			}
+			defer rc.Close()
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+			// Quote-escape the filename to defeat header-injection via crafted
+			// artifact names (defense in depth — paths are already validated).
+			safeName := strings.ReplaceAll(path.Base(rel), `"`, `\"`)
+			w.Header().Set("Content-Disposition", `attachment; filename="`+safeName+`"`)
+			_, _ = io.Copy(w, rc)
+		case http.MethodPut:
+			if err := h.Artifacts.Upload(runID, rel, req.Body, 0); err != nil {
+				writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", err.Error())
+				return
+			}
+			writeJSON(w, struct{}{})
+		case http.MethodDelete:
+			if err := h.Artifacts.Delete(runID, rel); err != nil {
+				if errors.Is(err, artifact.ErrNotFound) {
+					writeError(w, http.StatusNotFound, "RESOURCE_DOES_NOT_EXIST", "artifact not found")
+					return
+				}
+				writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+				return
+			}
+			writeJSON(w, struct{}{})
+		default:
+			writeError(w, http.StatusMethodNotAllowed, "INVALID_PARAMETER_VALUE", "method not allowed")
+		}
+	}
+	r.HandleFunc("/*", handle)
+	return r
+}
+
+// splitArtifactPath parses /<run_id>/<rel> from chi.URLParam.
+func splitArtifactPath(r *http.Request) (string, string, error) {
+	rest := chi.URLParam(r, "*")
+	rest = strings.TrimPrefix(rest, "/")
+	if rest == "" {
+		return "", "", errors.New("path is required")
+	}
+	parts := strings.SplitN(rest, "/", 2)
+	if len(parts) == 1 {
+		return parts[0], "", nil
+	}
+	return parts[0], parts[1], nil
+}
+
+// splitQueryPath splits a "?path=<run_id>[/sub/dir]" query value into the
+// run id and the relative subdirectory.
+func splitQueryPath(p string) (string, string) {
+	p = strings.TrimPrefix(p, "/")
+	if p == "" {
+		return "", ""
+	}
+	parts := strings.SplitN(p, "/", 2)
+	if len(parts) == 1 {
+		return parts[0], ""
+	}
+	return parts[0], parts[1]
+}
+
+// ---- shared helpers --------------------------------------------------------
+
+func decodeJSON(r *http.Request, dst any) error {
+	if r.Body == nil {
+		return errors.New("empty body")
+	}
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	return nil
+}
+
+func writeBadRequest(w http.ResponseWriter, err error) {
+	writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", err.Error())
+}
+
+func writeStoreErr(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		writeError(w, http.StatusNotFound, "RESOURCE_DOES_NOT_EXIST", err.Error())
+	case errors.Is(err, store.ErrAlreadyExists):
+		writeError(w, http.StatusBadRequest, "RESOURCE_ALREADY_EXISTS", err.Error())
+	case errors.Is(err, store.ErrConflict):
+		writeError(w, http.StatusConflict, "RESOURCE_CONFLICT", err.Error())
+	default:
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+	}
+}
+
+func writeError(w http.ResponseWriter, status int, code, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"error_code": code,
+		"message":    msg,
+	})
+}
+
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(v)
+}
