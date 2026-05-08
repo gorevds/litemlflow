@@ -15,6 +15,9 @@ import (
 type SyncDelivery struct {
 	// Client is the HTTP client to use; defaults to a 10s timeout client.
 	Client *http.Client
+	// Echo is the in-process echo ring buffer. If non-nil and the webhook URL
+	// uses the lmf:// scheme, the delivery is recorded here instead of HTTP.
+	Echo *EchoLog
 }
 
 // Deliver POSTs a synthetic payload to the webhook URL and returns the HTTP
@@ -28,6 +31,22 @@ func (s *SyncDelivery) Deliver(wh *model.Webhook, event string, run *model.Run) 
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return 0, fmt.Errorf("marshal payload: %w", err)
+	}
+
+	if IsEchoURL(wh.URL) {
+		if s.Echo != nil {
+			runID := ""
+			if run != nil {
+				runID = run.ID
+			}
+			s.Echo.Record(EchoEntry{
+				Event:     event,
+				WebhookID: wh.ID,
+				Body:      string(body),
+				RunID:     runID,
+			})
+		}
+		return http.StatusOK, nil
 	}
 
 	client := s.Client

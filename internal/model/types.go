@@ -82,6 +82,18 @@ type Run struct {
 	ParentRunID    string `json:"parent_run_id,omitempty"`
 }
 
+// Dashboard is a list of widgets pinned to a (workspace, project) pair.
+// Widgets is the raw JSON array of widget configs as round-tripped to/from
+// the UI; the server does not parse it.
+type Dashboard struct {
+	ID          int64  `json:"id"`
+	WorkspaceID string `json:"workspace_id"`
+	Project     string `json:"project"`
+	Widgets     string `json:"widgets"` // JSON array, e.g. [{"type":"metric_trend","title":"loss","config":{...}}]
+	CreatedAt   int64  `json:"created_at"`
+	UpdatedAt   int64  `json:"updated_at"`
+}
+
 // Webhook is a configured notification endpoint.
 type Webhook struct {
 	ID           int64  `json:"id"`

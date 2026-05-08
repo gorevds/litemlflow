@@ -79,6 +79,7 @@ type Dispatcher struct {
 	client    *http.Client
 	logger    *slog.Logger
 	retryBase time.Duration
+	echo      *EchoLog
 	dropped   atomic.Int64 // count of dropped jobs due to backpressure
 }
 
@@ -96,6 +97,9 @@ type Options struct {
 	RetryBase time.Duration
 	// HTTPClient overrides the default 10s-timeout client.
 	HTTPClient *http.Client
+	// Echo is the in-process echo ring buffer. If non-nil, deliveries to
+	// lmf://echo URLs are routed here instead of dispatched as HTTP.
+	Echo *EchoLog
 }
 
 // New creates a Dispatcher and starts the worker pool. Call Stop to drain.
@@ -122,6 +126,7 @@ func NewWithOptions(ctx context.Context, store WebhookLookup, logger *slog.Logge
 		client:    client,
 		logger:    logger,
 		retryBase: base,
+		echo:      opts.Echo,
 	}
 	for i := 0; i < maxWorkers; i++ {
 		go d.worker(ctx)
@@ -187,6 +192,24 @@ func (d *Dispatcher) deliver(ctx context.Context, j job) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		d.logger.Error("webhooks: marshal payload failed", slog.String("err", err.Error()))
+		return
+	}
+
+	// Echo short-circuit: write to in-process ring buffer, no HTTP.
+	if IsEchoURL(j.wh.URL) {
+		if d.echo != nil {
+			runID := ""
+			if j.run != nil {
+				runID = j.run.ID
+			}
+			d.echo.Record(EchoEntry{
+				Event:     j.event,
+				WebhookID: j.wh.ID,
+				Body:      string(body),
+				RunID:     runID,
+			})
+		}
+		_ = d.store.RecordWebhookAttempt(ctx, j.wh.ID, http.StatusOK, time.Now().UnixMilli())
 		return
 	}
 

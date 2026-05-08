@@ -2,6 +2,7 @@ package native
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -25,6 +26,10 @@ import (
 // Operators who genuinely need a webhook to a private address can set
 // LITEMLFLOW_WEBHOOK_ALLOW_PRIVATE=1 to disable this check at server start.
 func validateWebhookURL(rawURL string) error {
+	// Special-case the in-process echo target (used by the live demo).
+	if webhooks.IsEchoURL(rawURL) {
+		return nil
+	}
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return fmt.Errorf("invalid url: %w", err)
@@ -85,11 +90,19 @@ func (h *Handler) mountWebhookRoutes(r chi.Router) {
 	r.Delete("/api/v1/webhooks/{id}", h.DeleteWebhook)
 	r.Post("/api/v1/webhooks/{id}/test", h.TestWebhook)
 
+	// Echo log: in-process ring buffer of deliveries to lmf://echo URLs.
+	// Provides a zero-setup demo target on the public deploy.
+	r.Get("/api/v1/webhooks/echo", h.ListEchoDeliveries)
+
 	// Run lineage.
 	r.Get("/api/v1/runs/{runID}/lineage", h.GetRunLineage)
 
 	// Experiment clone.
 	r.Post("/api/v1/experiments/{id}/clone", h.CloneExperiment)
+
+	// Dashboards (W8.5).
+	r.Get("/api/v1/dashboards/{project}", h.GetDashboard)
+	r.Put("/api/v1/dashboards/{project}", h.SaveDashboard)
 }
 
 // ---- webhook CRUD -----------------------------------------------------------
@@ -254,8 +267,9 @@ func (h *Handler) TestWebhook(w http.ResponseWriter, r *http.Request) {
 	endTime := now
 	syntheticRun.EndTime = &endTime
 
-	// Deliver synchronously for the test endpoint.
-	dispatcher := &webhooks.SyncDelivery{}
+	// Deliver synchronously for the test endpoint. Wire EchoLog so lmf://echo
+	// targets get recorded in the in-process ring buffer.
+	dispatcher := &webhooks.SyncDelivery{Echo: h.EchoLog}
 	status, deliveryErr := dispatcher.Deliver(wh, "run_finished", syntheticRun)
 	if deliveryErr != nil {
 		_ = h.Store.RecordWebhookAttempt(r.Context(), id, 0, now)
@@ -264,6 +278,26 @@ func (h *Handler) TestWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = h.Store.RecordWebhookAttempt(r.Context(), id, status, now)
 	writeJSON(w, map[string]any{"ok": true, "status": status})
+}
+
+// ---- echo log ---------------------------------------------------------------
+
+// ListEchoDeliveries handles GET /api/v1/webhooks/echo?max=N.
+// Returns recent webhook deliveries that targeted the in-process lmf://echo
+// URL. Used by the UI to demonstrate webhook firing on the public demo.
+func (h *Handler) ListEchoDeliveries(w http.ResponseWriter, r *http.Request) {
+	max := 50
+	if v := r.URL.Query().Get("max"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 500 {
+			max = n
+		}
+	}
+	if h.EchoLog == nil {
+		writeJSON(w, map[string]any{"entries": []any{}})
+		return
+	}
+	entries := h.EchoLog.List(max)
+	writeJSON(w, map[string]any{"entries": entries})
 }
 
 // ---- run lineage ------------------------------------------------------------
@@ -315,5 +349,67 @@ func (h *Handler) CloneExperiment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, newExp)
+}
+
+// ---- dashboards -------------------------------------------------------------
+
+// GetDashboard handles GET /api/v1/dashboards/{project}.
+// Returns the dashboard row or, if none exists, an empty dashboard so the
+// UI can render the "+ Add widget" empty state without a separate code path.
+func (h *Handler) GetDashboard(w http.ResponseWriter, r *http.Request) {
+	project := chi.URLParam(r, "project")
+	ws := workspaceFromReq(r)
+	d, err := h.Store.GetDashboard(r.Context(), ws, project)
+	if err != nil {
+		// Synthesize an empty dashboard rather than returning 404.
+		writeJSON(w, &model.Dashboard{
+			WorkspaceID: ws,
+			Project:     project,
+			Widgets:     "[]",
+		})
+		return
+	}
+	writeJSON(w, d)
+}
+
+// SaveDashboard handles PUT /api/v1/dashboards/{project}.
+// Body: { "widgets": "[{...}]" } — widgets is the JSON array as a string,
+// because storing as a column we want to preserve client-controlled key order.
+type saveDashboardReq struct {
+	Widgets json.RawMessage `json:"widgets"`
+}
+
+func (h *Handler) SaveDashboard(w http.ResponseWriter, r *http.Request) {
+	project := chi.URLParam(r, "project")
+	ws := workspaceFromReq(r)
+	var req saveDashboardReq
+	if err := decodeJSON(r, &req); err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+	widgets := string(req.Widgets)
+	if widgets == "" || widgets == "null" {
+		widgets = "[]"
+	}
+	// Cap size at 64 KiB to prevent storage abuse via the dashboard endpoint.
+	const maxWidgetsBytes = 64 * 1024
+	if len(widgets) > maxWidgetsBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "PAYLOAD_TOO_LARGE",
+			fmt.Sprintf("widgets payload exceeds %d bytes", maxWidgetsBytes))
+		return
+	}
+	// Quick sanity check: must be valid JSON array.
+	var sanity []any
+	if err := json.Unmarshal([]byte(widgets), &sanity); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE",
+			"widgets must be a JSON array")
+		return
+	}
+	d, err := h.Store.SaveDashboard(r.Context(), ws, project, widgets)
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, d)
 }
 

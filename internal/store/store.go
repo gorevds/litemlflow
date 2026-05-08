@@ -131,6 +131,10 @@ type Store interface {
 
 	// Prompts.
 	CreatePrompt(ctx context.Context, p *model.Prompt) (int64, error)
+	// ListPrompts returns the latest version of each prompt name, newest first.
+	// Used by the UI prompts page (no per-user list scoping yet — single-user
+	// instances are the v1 hero use case).
+	ListPrompts(ctx context.Context) ([]*model.Prompt, error)
 	GetLatestPrompt(ctx context.Context, name string) (*model.Prompt, error)
 	GetPromptVersion(ctx context.Context, name string, version int64) (*model.Prompt, error)
 	ListPromptVersions(ctx context.Context, name string) ([]*model.Prompt, error)
@@ -189,6 +193,10 @@ type Store interface {
 
 	// Experiment clone.
 	CloneExperiment(ctx context.Context, srcID int64, newName, workspaceID string) (*model.Experiment, error)
+
+	// Dashboards (per-project widget config).
+	GetDashboard(ctx context.Context, workspaceID, project string) (*model.Dashboard, error)
+	SaveDashboard(ctx context.Context, workspaceID, project, widgetsJSON string) (*model.Dashboard, error)
 
 	// Workspaces.
 	CreateWorkspace(ctx context.Context, w *model.Workspace) error

@@ -648,16 +648,19 @@
       const cmpMatch      = hash.match(/^\/experiments\/(\d+)\/compare/);
       const promptMatch   = hash.match(/^\/prompts\/(.+)$/);
       const wsMembersMatch = hash.match(/^\/workspaces\/([^/]+)\/members$/);
+      const dashMatch      = hash.match(/^\/dashboards\/(.+)$/);
 
       if (runMatch)        return this.renderRun(parseInt(runMatch[1], 10), runMatch[2]);
       if (cmpMatch)        return this.renderCompare(parseInt(cmpMatch[1], 10));
       if (expMatch)        return this.renderExperiment(parseInt(expMatch[1], 10));
       if (promptMatch)     return this.renderPromptDetail(promptMatch[1]);
       if (wsMembersMatch)  return this.renderWorkspaceMembers(wsMembersMatch[1]);
+      if (dashMatch)       return this.renderDashboard(decodeURIComponent(dashMatch[1]));
       if (hash.startsWith("/workspaces")) return this.renderWorkspaces();
       if (hash.startsWith("/prompts")) return this.renderPrompts();
       if (hash.startsWith("/about"))   return this.renderAbout();
       if (hash.startsWith("/webhooks")) return this.renderWebhooks();
+      if (hash.startsWith("/dashboards")) return this.renderDashboardsIndex();
       return this.renderExperiments();
     },
 
@@ -692,30 +695,50 @@ mlflow.log_metric("loss", 0.42)</pre>
         const groupKey = "litemlflow.experiments.groupBy";
         let groupBy = localStorage.getItem(groupKey) || (projects.length > 0 ? "project" : "flat");
 
-        const renderRows = (filterFn) => exps.filter(filterFn || (() => true)).map((e, i) => {
+        // Active-project chip filter (separate from groupBy).
+        const filterKey = "litemlflow.experiments.projectFilter";
+        let projectFilter = localStorage.getItem(filterKey) || ""; // "" = no filter
+
+        // Build the canonical list of project names from the live exps so it
+        // matches the data on screen (the /projects endpoint is best-effort).
+        const knownProjects = (() => {
+          const set = new Set();
+          exps.forEach(e => { const p = projectOf(e); if (p) set.add(p); });
+          return Array.from(set).sort();
+        })();
+
+        const filteredExps = projectFilter === ""
+          ? exps
+          : exps.filter(e => projectOf(e) === projectFilter);
+
+        const rowHTML = (e, i) => {
           const proj = projectOf(e);
           const otherTags = (e.tags || []).filter(t => t.key !== PROJ_KEY);
           return `
-            <tr data-row-index="${i}" onclick="location.hash='#/experiments/${e.experiment_id}'">
+            <tr data-row-index="${i}" data-exp-id="${e.experiment_id}">
               <td class="mono">${e.experiment_id}</td>
-              <td><a href="#/experiments/${e.experiment_id}">${escapeHTML(e.name)}</a>${proj ? ` <span class="proj-pill" title="Project">${escapeHTML(proj)}</span>` : ""}</td>
+              <td>
+                <a href="#/experiments/${e.experiment_id}">${escapeHTML(e.name)}</a>
+                ${proj ? ` <span class="proj-pill" title="Project">${escapeHTML(proj)}</span>` : ""}
+                <button class="proj-move-btn" data-move-id="${e.experiment_id}" data-current-proj="${escapeHTML(proj)}" title="Assign or change project">${proj ? "Move…" : "+ Project"}</button>
+              </td>
               <td>${formatTime(e.creation_time)}</td>
               <td>${formatTime(e.last_update_time)}</td>
               <td>${otherTags.map(t => `<span class="tag">${escapeHTML(t.key)}=${escapeHTML(t.value)}</span>`).join(" ")}</td>
             </tr>`;
-        }).join("");
+        };
+
+        const renderRows = () => filteredExps.map(rowHTML).join("");
 
         // Group sections (one <table> per project) when groupBy === 'project'.
+        // When a filter is active we always render flat (only one bucket would show).
         const renderGrouped = () => {
-          // Build buckets from the live exps array (don't trust counts from the
-          // /projects endpoint — workspace selector can change between requests).
           const buckets = new Map();
-          exps.forEach(e => {
+          filteredExps.forEach(e => {
             const p = projectOf(e);
             if (!buckets.has(p)) buckets.set(p, []);
             buckets.get(p).push(e);
           });
-          // Stable order: real projects first (alphabetical), then "no project" last.
           const names = Array.from(buckets.keys()).sort((a, b) => {
             if (a === "" && b !== "") return 1;
             if (b === "" && a !== "") return -1;
@@ -724,17 +747,7 @@ mlflow.log_metric("loss", 0.42)</pre>
           return names.map(name => {
             const list = buckets.get(name);
             const heading = name === "" ? "No project" : name;
-            const rows = list.map((e, i) => {
-              const otherTags = (e.tags || []).filter(t => t.key !== PROJ_KEY);
-              return `
-                <tr data-row-index="${i}" onclick="location.hash='#/experiments/${e.experiment_id}'">
-                  <td class="mono">${e.experiment_id}</td>
-                  <td><a href="#/experiments/${e.experiment_id}">${escapeHTML(e.name)}</a></td>
-                  <td>${formatTime(e.creation_time)}</td>
-                  <td>${formatTime(e.last_update_time)}</td>
-                  <td>${otherTags.map(t => `<span class="tag">${escapeHTML(t.key)}=${escapeHTML(t.value)}</span>`).join(" ")}</td>
-                </tr>`;
-            }).join("");
+            const rows = list.map(rowHTML).join("");
             return `
               <h2 class="proj-heading">${escapeHTML(heading)} <span class="proj-count">${list.length}</span></h2>
               <div class="card" style="padding:0; margin-bottom:18px;">
@@ -746,21 +759,52 @@ mlflow.log_metric("loss", 0.42)</pre>
           }).join("");
         };
 
+        // Project filter chips: All + each known project + "Unassigned".
+        const chipsHTML = (() => {
+          const chip = (label, value, count) => `
+            <button class="proj-chip ${projectFilter === value ? "active" : ""}" data-proj-filter="${escapeHTML(value)}">
+              ${escapeHTML(label)}<span class="proj-chip-count">${count}</span>
+            </button>`;
+          const all = chip("All", "", exps.length);
+          const projChips = knownProjects.map(p =>
+            chip(p, p, exps.filter(e => projectOf(e) === p).length)
+          ).join("");
+          const unassigned = exps.filter(e => projectOf(e) === "").length;
+          const unassignedChip = unassigned > 0
+            ? chip("Unassigned", "__none__", unassigned) : "";
+          return all + projChips + unassignedChip;
+        })();
+
+        // Apply __none__ pseudo-filter
+        const useFilter = projectFilter === "__none__"
+          ? (e => projectOf(e) === "")
+          : (projectFilter === "" ? () => true : (e => projectOf(e) === projectFilter));
+        const finalExps = exps.filter(useFilter);
+
+        const finalRows = finalExps.map(rowHTML).join("");
+
         main.innerHTML = `
           <div class="toolbar">
             <h1 style="margin:0">Experiments</h1>
+            <button id="new-project-btn" class="btn-primary" title="Create a new project">+ New project</button>
             <div class="proj-toggle" role="tablist" aria-label="Group by">
               <button data-mode="project" class="${groupBy === "project" ? "active" : ""}" title="Group by project">By project</button>
               <button data-mode="flat" class="${groupBy === "flat" ? "active" : ""}" title="Flat list">Flat</button>
             </div>
             <input type="search" id="exp-search" placeholder="Filter by name…" />
           </div>
+          <p style="color:var(--fg-muted);font-size:13px;margin:0 0 4px">
+            Group experiments into projects with a single click. Each "project" is the
+            <code>lmf.project</code> tag on an experiment — assign it via the <strong>Move…</strong>
+            or <strong>+ Project</strong> button on each row.
+          </p>
+          <div class="proj-chip-row">${chipsHTML}</div>
           <div id="exp-list">
-            ${groupBy === "project" ? renderGrouped() : `
+            ${(groupBy === "project" && projectFilter === "") ? renderGrouped() : `
               <div class="card" style="padding:0">
                 <table>
                   <thead><tr><th>ID</th><th>Name</th><th>Created</th><th>Updated</th><th>Tags</th></tr></thead>
-                  <tbody id="exp-tbody">${renderRows()}</tbody>
+                  <tbody id="exp-tbody">${finalRows}</tbody>
                 </table>
               </div>`}
           </div>`;
@@ -771,22 +815,55 @@ mlflow.log_metric("loss", 0.42)</pre>
             const mode = btn.dataset.mode;
             if (mode === groupBy) return;
             localStorage.setItem(groupKey, mode);
-            App.renderExperiments();  // re-render
+            App.renderExperiments();
+          });
+        });
+
+        // Project chip click → set filter
+        $$(".proj-chip", main).forEach(chip => {
+          chip.addEventListener("click", () => {
+            const v = chip.dataset.projFilter;
+            if (v === projectFilter) return;
+            localStorage.setItem(filterKey, v);
+            App.renderExperiments();
+          });
+        });
+
+        // New-project button → create modal that lets user create + assign experiments
+        $("#new-project-btn").addEventListener("click", () => this._showNewProjectModal(exps, knownProjects));
+
+        // Per-row move-project button
+        $$(".proj-move-btn", main).forEach(btn => {
+          btn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            this._showMoveProjectModal(
+              btn.dataset.moveId,
+              btn.dataset.currentProj || "",
+              knownProjects,
+            );
+          });
+        });
+
+        // Row click navigates (but not if click hit a button inside)
+        $$("tr[data-exp-id]", main).forEach(tr => {
+          tr.style.cursor = "pointer";
+          tr.addEventListener("click", e => {
+            if (e.target.closest("button") || e.target.tagName === "A") return;
+            location.hash = `#/experiments/${tr.dataset.expId}`;
           });
         });
 
         // Live filter
         $("#exp-search").addEventListener("input", function () {
           const q = this.value.toLowerCase();
-          $$("tr[data-row-index]", main).forEach(tr => {
+          $$("tr[data-exp-id]", main).forEach(tr => {
             const name = tr.querySelector("td:nth-child(2)").textContent.toLowerCase();
             tr.style.display = (!q || name.includes(q)) ? "" : "none";
           });
-          // Also hide group headings whose siblings are all hidden.
           $$(".proj-heading", main).forEach(h => {
             const card = h.nextElementSibling;
             if (!card) return;
-            const visible = $$("tr[data-row-index]", card).some(tr => tr.style.display !== "none");
+            const visible = $$("tr[data-exp-id]", card).some(tr => tr.style.display !== "none");
             h.style.display = visible ? "" : "none";
             card.style.display = visible ? "" : "none";
           });
@@ -892,6 +969,10 @@ mlflow.log_metric("loss", 0.42)</pre>
           if (thead) thead.innerHTML = buildHeader();
         };
 
+        // View mode: "list" (default) or "timeline". Persisted per experiment.
+        const viewModeKey = `litemlflow.exp.${expID}.viewMode`;
+        let viewMode = localStorage.getItem(viewModeKey) || "list";
+
         main.innerHTML = `
           <div class="crumbs"><a href="#/experiments">Experiments</a> / ${escapeHTML(e.name)}</div>
           <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
@@ -911,16 +992,20 @@ mlflow.log_metric("loss", 0.42)</pre>
           </div>
           <div style="display:flex;align-items:center;gap:12px;margin:12px 0 6px">
             <h2 style="margin:0;flex:1">Runs (${runs.length})</h2>
-            <label style="font-size:12px;color:var(--fg-muted);display:flex;align-items:center;gap:4px;cursor:pointer">
+            <div class="proj-toggle" role="tablist" aria-label="View mode">
+              <button data-view="list" class="${viewMode === "list" ? "active" : ""}" title="Table view">List</button>
+              <button data-view="timeline" class="${viewMode === "timeline" ? "active" : ""}" title="Gantt-style timeline">Timeline</button>
+            </div>
+            <label style="font-size:12px;color:var(--fg-muted);display:flex;align-items:center;gap:4px;cursor:pointer" id="starred-first-label">
               <input type="checkbox" id="starred-first-cb" ${starredFirst ? "checked" : ""}/>
               Starred first
             </label>
-            <div style="position:relative">
+            <div style="position:relative" id="cols-btn-wrap">
               <button id="cols-btn" style="font-size:12px;padding:4px 10px">Columns</button>
               <div id="cols-dropdown" class="cols-dropdown" style="display:none"></div>
             </div>
           </div>
-          <div class="card" style="padding:0">
+          <div id="runs-list-view" class="card" style="padding:0;${viewMode === "list" ? "" : "display:none"}">
             <table>
               <thead>
                 <tr>
@@ -930,9 +1015,76 @@ mlflow.log_metric("loss", 0.42)</pre>
               </thead>
               <tbody id="exp-tbody"></tbody>
             </table>
-          </div>`;
+          </div>
+          <div id="runs-timeline-view" style="${viewMode === "timeline" ? "" : "display:none"}"></div>`;
+
+        const renderTimeline = () => {
+          const wrap = $("#runs-timeline-view");
+          if (!wrap) return;
+          if (runs.length === 0) {
+            wrap.innerHTML = `<div class="empty card">No runs yet.</div>`;
+            return;
+          }
+          // Find time bounds across all runs.
+          const now = Date.now();
+          const sts = runs.map(r => r.info.start_time).filter(t => t > 0);
+          const ets = runs.map(r => r.info.end_time || now);
+          const minT = Math.min(...sts);
+          const maxT = Math.max(...ets);
+          const span = Math.max(1, maxT - minT);
+          const bars = sortRuns(runs).map(r => {
+            const st = r.info.start_time;
+            const et = r.info.end_time || now;
+            const left = ((st - minT) / span) * 100;
+            const width = Math.max(0.4, ((et - st) / span) * 100);
+            const dur = formatDuration(et - st);
+            const tip = `${escapeHTML(r.info.run_name || r.info.run_id.slice(0, 8))} • ${r.info.status} • ${dur}`;
+            return `
+              <div class="timeline-row" data-run-id="${r.info.run_id}" title="${tip}">
+                <div class="timeline-name"><a href="#/experiments/${expID}/runs/${r.info.run_id}">${escapeHTML(r.info.run_name || r.info.run_id.slice(0,8))}</a></div>
+                <div class="timeline-track">
+                  <div class="timeline-bar status-${r.info.status}" style="left:${left}%;width:${width}%"></div>
+                </div>
+              </div>`;
+          }).join("");
+          wrap.innerHTML = `
+            <div class="timeline-wrap">
+              <div class="timeline-axis">
+                <div></div>
+                <div class="timeline-axis-ticks">
+                  <span>${formatTime(minT)}</span>
+                  <span>${formatTime((minT + maxT) / 2)}</span>
+                  <span>${formatTime(maxT)}</span>
+                </div>
+              </div>
+              ${bars}
+            </div>`;
+        };
+        if (viewMode === "timeline") renderTimeline();
 
         renderTable();
+
+        // View-mode toggle (List / Timeline)
+        $$(".proj-toggle button[data-view]", main).forEach(btn => {
+          btn.addEventListener("click", () => {
+            const v = btn.dataset.view;
+            if (v === viewMode) return;
+            viewMode = v;
+            localStorage.setItem(viewModeKey, v);
+            $$(".proj-toggle button[data-view]", main).forEach(b => {
+              b.classList.toggle("active", b.dataset.view === v);
+            });
+            $("#runs-list-view").style.display = v === "list" ? "" : "none";
+            $("#runs-timeline-view").style.display = v === "timeline" ? "" : "none";
+            $("#cols-btn-wrap").style.visibility = v === "list" ? "" : "hidden";
+            $("#starred-first-label").style.visibility = v === "list" ? "" : "hidden";
+            if (v === "timeline") renderTimeline();
+          });
+        });
+        if (viewMode === "timeline") {
+          $("#cols-btn-wrap").style.visibility = "hidden";
+          $("#starred-first-label").style.visibility = "hidden";
+        }
 
         // Starred-first toggle (re-renders via the same renderTable path)
         const sfCb = $("#starred-first-cb");
@@ -1847,80 +1999,119 @@ mlflow.log_metric("loss", 0.42)</pre>
     // ── Prompts list ─────────────────────────────────────────────────────────
     async renderPrompts() {
       const main = $("#app");
-
-      // Load known prompt names from localStorage
-      const stored = localStorage.getItem("litemlflow.knownPrompts");
-      let known = [];
-      try { known = JSON.parse(stored) || []; } catch {}
-      if (!Array.isArray(known)) known = [];
-
-      // Probe each known name
-      const results = await Promise.allSettled(
-        known.map(name =>
-          fetchJSON(`/api/v1/prompts/${encodeURIComponent(name)}`)
-            .then(data => ({ name, data }))
-        )
-      );
-      const live = results
-        .filter(r => r.status === "fulfilled")
-        .map(r => r.value);
-
-      // Remove names that 404'd from registry
-      const liveNames = new Set(live.map(l => l.name));
-      const pruned = known.filter(n => liveNames.has(n));
-      if (pruned.length !== known.length) {
-        localStorage.setItem("litemlflow.knownPrompts", JSON.stringify(pruned));
+      let prompts = [];
+      try {
+        const data = await fetchJSON("/api/v1/prompts");
+        prompts = data.prompts || [];
+      } catch (err) {
+        main.innerHTML = `<div class="empty">Failed to load prompts: ${escapeHTML(String(err))}</div>`;
+        return;
       }
 
-      const rows = live.map((l, i) => `
-        <tr data-row-index="${i}" onclick="location.hash='#/prompts/${encodeURIComponent(l.name)}'">
-          <td><a href="#/prompts/${encodeURIComponent(l.name)}">${escapeHTML(l.name)}</a></td>
-          <td class="mono">${escapeHTML(l.data.latest_version || l.data.version || "—")}</td>
-          <td>${escapeHTML(l.data.description || "—")}</td>
+      const rows = prompts.map((p, i) => `
+        <tr data-row-index="${i}" data-prompt-name="${escapeHTML(p.name)}">
+          <td><a href="#/prompts/${encodeURIComponent(p.name)}">${escapeHTML(p.name)}</a></td>
+          <td class="mono">v${escapeHTML(String(p.version))}</td>
+          <td>${escapeHTML(p.description || "—")}</td>
+          <td>${formatTime(p.created_at)}</td>
         </tr>`).join("");
 
       main.innerHTML = `
-        <h1>Prompts</h1>
-        <div class="card" style="margin-bottom:16px;background:var(--bg-alt)">
-          <p style="margin:0 0 8px;color:var(--fg-muted);font-size:12px">
-            v0.4 limitation: there is no list-all endpoint yet. The UI probes names you've registered locally.
-            A <code>GET /api/v1/prompts</code> list endpoint will land in v0.5.
-          </p>
-          <div style="display:flex;gap:8px;align-items:center">
-            <input type="text" id="add-prompt-input" placeholder="Prompt name to add…" style="flex:1" />
-            <button id="add-prompt-btn" style="white-space:nowrap">+ Add</button>
-          </div>
+        <div class="toolbar">
+          <h1 style="margin:0">Prompts</h1>
+          <button id="new-prompt-btn" class="btn-primary" title="Register a new prompt">+ New prompt</button>
         </div>
-        ${live.length ? `
+        <p style="color:var(--fg-muted);margin-top:0">
+          Versioned, content-addressed text snippets. Aliases like <code>production</code> or <code>candidate</code>
+          pin a stable version while you iterate.
+          <a href="/docs/cookbook.md" target="_blank" rel="noopener">See cookbook</a>.
+        </p>
+        ${prompts.length ? `
         <div class="card" style="padding:0">
           <table>
-            <thead><tr><th>Name</th><th>Latest version</th><th>Description</th></tr></thead>
+            <thead><tr><th>Name</th><th>Latest</th><th>Description</th><th>Created</th></tr></thead>
             <tbody>${rows}</tbody>
           </table>
-        </div>` : `<div class="empty card">No prompts registered yet. Add one above.</div>`}`;
+        </div>` : `
+        <div class="empty card">
+          <p>No prompts yet. Register one with the <strong>+ New prompt</strong> button, or programmatically:</p>
+          <pre>from litemlflow import Client
+c = Client("${location.origin}")
+c.create_prompt("rag.system", "You are a helpful assistant.", description="seed v1")</pre>
+        </div>`}`;
 
-      $("#add-prompt-btn").addEventListener("click", async () => {
-        const input = $("#add-prompt-input");
-        const name = input.value.trim();
-        if (!name) return;
-        try {
-          await fetchJSON(`/api/v1/prompts/${encodeURIComponent(name)}`);
-          // Success — register and navigate
-          this._registerPrompt(name);
-          input.value = "";
-          location.hash = `#/prompts/${encodeURIComponent(name)}`;
-        } catch {
-          input.style.borderColor = "var(--error)";
-          setTimeout(() => { input.style.borderColor = ""; }, 1500);
-        }
-      });
-
-      $("#add-prompt-input").addEventListener("keydown", e => {
-        if (e.key === "Enter") $("#add-prompt-btn").click();
+      $("#new-prompt-btn").addEventListener("click", () => this._showPromptCreateModal());
+      $$("tr[data-prompt-name]", main).forEach(tr => {
+        tr.style.cursor = "pointer";
+        tr.addEventListener("click", e => {
+          if (e.target.tagName === "A") return;
+          location.hash = `#/prompts/${encodeURIComponent(tr.dataset.promptName)}`;
+        });
       });
     },
 
+    _showPromptCreateModal(prefillName) {
+      const wrap = document.createElement("div");
+      wrap.className = "modal-backdrop";
+      wrap.innerHTML = `
+        <div class="card modal" style="max-width:600px">
+          <h2 style="margin-top:0">Register a new prompt</h2>
+          <p style="color:var(--fg-muted);font-size:13px;margin-top:0">
+            The prompt is content-addressed: re-registering identical content under the same name reuses the version.
+          </p>
+          <table class="form-table">
+            <tr>
+              <th><label for="np-name">Name</label></th>
+              <td><input type="text" id="np-name" placeholder="e.g. rag.system" style="width:100%" value="${escapeHTML(prefillName || "")}"/></td>
+            </tr>
+            <tr>
+              <th><label for="np-content">Content</label></th>
+              <td><textarea id="np-content" rows="8" placeholder="You are a helpful assistant." style="width:100%;font-family:var(--mono);font-size:13px"></textarea></td>
+            </tr>
+            <tr>
+              <th><label for="np-desc">Description (optional)</label></th>
+              <td><input type="text" id="np-desc" placeholder="What is this prompt for?" style="width:100%"/></td>
+            </tr>
+          </table>
+          <div id="np-err" style="color:var(--error);min-height:18px;font-size:13px"></div>
+          <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
+            <button id="np-cancel">Cancel</button>
+            <button id="np-save" class="btn-primary">Register</button>
+          </div>
+        </div>`;
+      document.body.appendChild(wrap);
+      $("#np-name").focus();
+
+      const close = () => wrap.remove();
+      wrap.addEventListener("click", e => { if (e.target === wrap) close(); });
+      $("#np-cancel").addEventListener("click", close);
+      const submit = async () => {
+        const name = $("#np-name").value.trim();
+        const content = $("#np-content").value;
+        const description = $("#np-desc").value.trim();
+        if (!name) { $("#np-err").textContent = "Name is required."; return; }
+        if (!content) { $("#np-err").textContent = "Content is required."; return; }
+        try {
+          await fetchJSON("/api/v1/prompts", {
+            method: "POST",
+            body: JSON.stringify({ name, content, description }),
+          });
+          showToast(`Registered prompt ${name}`);
+          close();
+          location.hash = `#/prompts/${encodeURIComponent(name)}`;
+        } catch (err) {
+          $("#np-err").textContent = String(err);
+        }
+      };
+      $("#np-save").addEventListener("click", submit);
+      $("#np-name").addEventListener("keydown", e => { if (e.key === "Enter") $("#np-content").focus(); });
+      $("#np-content").addEventListener("keydown", e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) submit(); });
+    },
+
     _registerPrompt(name) {
+      // Legacy localStorage helper kept for renderPromptDetail; with the new
+      // list endpoint we no longer need to track names client-side, but the
+      // helper is harmless and avoids breaking older bookmarks.
       const stored = localStorage.getItem("litemlflow.knownPrompts");
       let known = [];
       try { known = JSON.parse(stored) || []; } catch {}
@@ -1929,6 +2120,144 @@ mlflow.log_metric("loss", 0.42)</pre>
         known.push(name);
         localStorage.setItem("litemlflow.knownPrompts", JSON.stringify(known));
       }
+    },
+
+    // ── Project management (lmf.project tag) ──────────────────────────────────
+    _showNewProjectModal(exps, knownProjects) {
+      const wrap = document.createElement("div");
+      wrap.className = "modal-backdrop";
+      const expOpts = (exps || []).map(e => `
+        <label style="display:block;padding:2px 0">
+          <input type="checkbox" data-exp-id="${e.experiment_id}" />
+          <span class="mono" style="color:var(--fg-muted)">#${e.experiment_id}</span>
+          ${escapeHTML(e.name)}
+        </label>`).join("");
+      wrap.innerHTML = `
+        <div class="card modal" style="max-width:520px">
+          <h2 style="margin-top:0">New project</h2>
+          <p style="color:var(--fg-muted);font-size:13px;margin:0 0 12px">
+            A project is just a label that groups experiments. Existing projects: ${
+              knownProjects.length ? knownProjects.map(p => `<code>${escapeHTML(p)}</code>`).join(", ") : "<em>none yet</em>"
+            }
+          </p>
+          <table class="form-table">
+            <tr>
+              <th><label for="np-proj-name">Name</label></th>
+              <td><input type="text" id="np-proj-name" placeholder="e.g. Search Quality" style="width:100%"/></td>
+            </tr>
+            <tr>
+              <th>Assign experiments</th>
+              <td>
+                <div style="max-height:200px;overflow-y:auto;border:1px solid var(--border);padding:8px;border-radius:6px">
+                  ${expOpts || `<div class="empty">No experiments to assign yet.</div>`}
+                </div>
+                <div style="font-size:12px;color:var(--fg-muted);margin-top:4px">
+                  You can assign more experiments later via the Move… button on each row.
+                </div>
+              </td>
+            </tr>
+          </table>
+          <div id="np-proj-err" style="color:var(--error);min-height:18px;font-size:13px"></div>
+          <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
+            <button id="np-proj-cancel">Cancel</button>
+            <button id="np-proj-save" class="btn-primary">Create project</button>
+          </div>
+        </div>`;
+      document.body.appendChild(wrap);
+      $("#np-proj-name").focus();
+
+      const close = () => wrap.remove();
+      wrap.addEventListener("click", e => { if (e.target === wrap) close(); });
+      $("#np-proj-cancel").addEventListener("click", close);
+
+      const submit = async () => {
+        const name = $("#np-proj-name").value.trim();
+        if (!name) { $("#np-proj-err").textContent = "Project name is required."; return; }
+        const ids = $$("input[data-exp-id]:checked", wrap).map(cb => cb.dataset.expId);
+        try {
+          // Set lmf.project tag on each selected experiment.
+          for (const id of ids) {
+            await this._setExperimentProject(id, name);
+          }
+          showToast(ids.length
+            ? `Created project ${name} with ${ids.length} experiment${ids.length === 1 ? "" : "s"}`
+            : `Created project ${name} (no experiments yet — use Move… on a row to add some)`);
+          close();
+          App.renderExperiments();
+        } catch (err) {
+          $("#np-proj-err").textContent = String(err);
+        }
+      };
+      $("#np-proj-save").addEventListener("click", submit);
+      $("#np-proj-name").addEventListener("keydown", e => { if (e.key === "Enter") submit(); });
+    },
+
+    _showMoveProjectModal(expID, currentProj, knownProjects) {
+      const wrap = document.createElement("div");
+      wrap.className = "modal-backdrop";
+      const opts = ['<option value="">— No project —</option>']
+        .concat(knownProjects.map(p =>
+          `<option value="${escapeHTML(p)}" ${p === currentProj ? "selected" : ""}>${escapeHTML(p)}</option>`))
+        .concat(['<option value="__new__">+ Create new project…</option>'])
+        .join("");
+      wrap.innerHTML = `
+        <div class="card modal" style="max-width:420px">
+          <h2 style="margin-top:0">Move experiment to project</h2>
+          <table class="form-table">
+            <tr>
+              <th><label for="mv-proj">Project</label></th>
+              <td><select id="mv-proj" style="width:100%">${opts}</select></td>
+            </tr>
+            <tr id="mv-newrow" style="display:none">
+              <th><label for="mv-newname">New name</label></th>
+              <td><input type="text" id="mv-newname" placeholder="e.g. Sales Forecast" style="width:100%"/></td>
+            </tr>
+          </table>
+          <div id="mv-err" style="color:var(--error);min-height:18px;font-size:13px"></div>
+          <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
+            <button id="mv-cancel">Cancel</button>
+            <button id="mv-save" class="btn-primary">Apply</button>
+          </div>
+        </div>`;
+      document.body.appendChild(wrap);
+
+      const close = () => wrap.remove();
+      wrap.addEventListener("click", e => { if (e.target === wrap) close(); });
+      $("#mv-cancel").addEventListener("click", close);
+      $("#mv-proj").addEventListener("change", () => {
+        const isNew = $("#mv-proj").value === "__new__";
+        $("#mv-newrow").style.display = isNew ? "" : "none";
+        if (isNew) $("#mv-newname").focus();
+      });
+      $("#mv-save").addEventListener("click", async () => {
+        let target = $("#mv-proj").value;
+        if (target === "__new__") {
+          target = $("#mv-newname").value.trim();
+          if (!target) { $("#mv-err").textContent = "Enter a name for the new project."; return; }
+        }
+        try {
+          await this._setExperimentProject(expID, target);
+          showToast(target ? `Moved to ${target}` : "Removed from project");
+          close();
+          App.renderExperiments();
+        } catch (err) {
+          $("#mv-err").textContent = String(err);
+        }
+      });
+    },
+
+    async _setExperimentProject(experimentID, projectName) {
+      // MLflow doesn't have a public delete-experiment-tag endpoint; setting
+      // the value to "" is treated as unassigned by the rendering code
+      // (projectOf falls back to "" when the value is empty).
+      return fetchJSON("/api/2.0/mlflow/experiments/set-experiment-tag", {
+        method: "POST",
+        body: JSON.stringify({
+          experiment_id: String(experimentID),
+          key: "lmf.project",
+          value: projectName || "",
+        }),
+      });
     },
 
     // ── Prompt detail ────────────────────────────────────────────────────────
@@ -2226,9 +2555,16 @@ mlflow.log_metric("loss", 0.42)</pre>
         const data = await fetchJSON("/api/v1/webhooks").catch(() => ({ webhooks: [] }));
         return data.webhooks || [];
       };
+      const loadEchoLog = async () => {
+        try {
+          const data = await fetchJSON("/api/v1/webhooks/echo?max=20");
+          return data.entries || [];
+        } catch { return []; }
+      };
 
       const renderPage = async () => {
-        const webhooks = await load();
+        const [webhooks, echoEntries] = await Promise.all([load(), loadEchoLog()]);
+        const hasEcho = webhooks.some(w => (w.url || "").startsWith("lmf://echo"));
 
         const rows = webhooks.map((wh, i) => {
           const evBadges = (wh.events || "").split(",").filter(Boolean)
@@ -2257,11 +2593,33 @@ mlflow.log_metric("loss", 0.42)</pre>
             </tr>`;
         }).join("");
 
+        const echoRows = echoEntries.map(e => {
+          const t = formatTime(e.timestamp);
+          let preview = "";
+          try {
+            const obj = JSON.parse(e.body);
+            preview = obj.run ? `run ${obj.run.id} (${obj.run.status})` : "—";
+          } catch { preview = (e.body || "").slice(0, 80); }
+          return `
+            <div class="wh-deliveries-row">
+              <span class="mono">${t}</span>
+              <span class="tag">${escapeHTML(e.event)}</span>
+              <span class="mono">#${e.webhook_id}</span>
+              <span style="color:var(--fg-muted)">${escapeHTML(preview)}</span>
+            </div>`;
+        }).join("");
+
         main.innerHTML = `
           <div class="toolbar">
             <h1 style="margin:0">Webhooks</h1>
-            <button id="wh-add-btn">+ Add webhook</button>
+            <button id="wh-add-btn" class="btn-primary">+ Add webhook</button>
+            ${hasEcho ? "" : `<button id="wh-demo-btn" title="Create a built-in echo webhook so you can see deliveries fire end-to-end">+ Try the demo (echo)</button>`}
           </div>
+          <p style="color:var(--fg-muted);margin-top:0;font-size:13px">
+            Get notified when a run starts, finishes, fails, or is killed. Deliveries are HMAC-SHA256-signed
+            (header <code>X-LiteMLflow-Signature</code>) and retried up to 3× with exponential backoff.
+            Use <code>lmf://echo</code> as the URL to record deliveries in-process for testing.
+          </p>
 
           <div class="card" style="padding:0;margin-bottom:20px">
             <table>
@@ -2278,6 +2636,16 @@ mlflow.log_metric("loss", 0.42)</pre>
               </thead>
               <tbody>${rows || `<tr><td colspan="7" class="empty">No webhooks configured.</td></tr>`}</tbody>
             </table>
+          </div>
+
+          <div class="card" style="margin-bottom:20px">
+            <h2 style="margin-top:0;font-size:14px">Recent deliveries to lmf://echo
+              <span style="color:var(--fg-muted);font-size:12px;font-weight:normal">(in-process ring buffer; cleared on restart)</span>
+              <button id="wh-echo-refresh" style="float:right;font-size:12px">↻ Refresh</button>
+            </h2>
+            <div id="wh-deliveries-list" class="wh-deliveries">
+              ${echoRows || `<div class="empty" style="padding:8px 0">No echo deliveries yet. Click "+ Try the demo" or send a Test from a webhook with URL <code>lmf://echo</code>.</div>`}
+            </div>
           </div>
 
           <div id="wh-form-panel" class="card" style="display:none">
@@ -2386,6 +2754,35 @@ mlflow.log_metric("loss", 0.42)</pre>
         $("#wh-add-btn").addEventListener("click", () => showForm(null));
         $("#wh-save-btn").addEventListener("click", saveWebhook);
         $("#wh-cancel-btn").addEventListener("click", hideForm);
+        $("#wh-echo-refresh")?.addEventListener("click", () => renderPage());
+
+        // One-click demo webhook (lmf://echo target)
+        const demoBtn = $("#wh-demo-btn");
+        if (demoBtn) {
+          demoBtn.addEventListener("click", async () => {
+            demoBtn.disabled = true;
+            demoBtn.textContent = "Creating…";
+            try {
+              const created = await fetchJSON("/api/v1/webhooks", {
+                method: "POST",
+                body: JSON.stringify({
+                  name: "Demo (echo)",
+                  url: "lmf://echo",
+                  events: ALL_EVENTS.join(","),
+                  enabled: true,
+                }),
+              });
+              // Immediately fire a synthetic delivery so the user sees it.
+              await fetchJSON(`/api/v1/webhooks/${created.id}/test`, { method: "POST", body: "{}" });
+              showToast("Demo webhook created and a test event fired.");
+              renderPage();
+            } catch (err) {
+              alert(`Failed: ${err}`);
+              demoBtn.disabled = false;
+              demoBtn.textContent = "+ Try the demo (echo)";
+            }
+          });
+        }
 
         // Enable/disable toggles
         $$(".wh-enabled", main).forEach(cb => {
@@ -2459,6 +2856,326 @@ mlflow.log_metric("loss", 0.42)</pre>
       };
 
       renderPage();
+    },
+
+    // ── Dashboards ───────────────────────────────────────────────────────────
+    async renderDashboardsIndex() {
+      const main = $("#app");
+      try {
+        const projectsRes = await fetchJSON("/api/v1/projects");
+        const projects = (projectsRes.projects || []).filter(p => p.name !== "");
+        if (projects.length === 0) {
+          main.innerHTML = `
+            <h1>Dashboards</h1>
+            <div class="empty card">
+              <p>No projects yet. Create one from the <a href="#/experiments">Experiments</a> page
+              with the <strong>+ New project</strong> button. Each project gets its own dashboard
+              for trend charts, leaderboards, and widget pinning.</p>
+            </div>`;
+          return;
+        }
+        const cards = projects.map(p => `
+          <a href="#/dashboards/${encodeURIComponent(p.name)}" class="card" style="text-decoration:none;color:inherit;display:block;padding:18px;cursor:pointer">
+            <h3 style="margin:0 0 4px;color:var(--accent)">${escapeHTML(p.name)}</h3>
+            <div style="color:var(--fg-muted);font-size:12px">${p.count} experiment${p.count === 1 ? "" : "s"}</div>
+          </a>`).join("");
+        main.innerHTML = `
+          <h1>Dashboards</h1>
+          <p style="color:var(--fg-muted)">Pick a project to open its dashboard. Each dashboard is a board of metric-trend, leaderboard, and stat widgets.</p>
+          <div class="dashboard-grid">${cards}</div>`;
+      } catch (err) {
+        main.innerHTML = `<div class="empty">Failed to load: ${escapeHTML(String(err))}</div>`;
+      }
+    },
+
+    async renderDashboard(project) {
+      const main = $("#app");
+      // Fetch dashboard config + all runs in the project for client-side
+      // widget rendering.
+      let dashboard, runsByExp = {}, expList = [];
+      try {
+        dashboard = await fetchJSON(`/api/v1/dashboards/${encodeURIComponent(project)}`);
+        // Find experiments with lmf.project == project.
+        const expRes = await fetchJSON("/api/2.0/mlflow/experiments/search?max_results=1000");
+        expList = (expRes.experiments || []).filter(e =>
+          e.lifecycle_stage === "active" &&
+          (e.tags || []).some(t => t.key === "lmf.project" && t.value === project)
+        );
+        // Pull recent runs for each.
+        const runs = await Promise.all(expList.map(e =>
+          fetchJSON("/api/2.0/mlflow/runs/search", {
+            method: "POST",
+            body: JSON.stringify({ experiment_ids: [String(e.experiment_id)], max_results: 100 }),
+          }).then(r => r.runs || []).catch(() => [])
+        ));
+        expList.forEach((e, i) => { runsByExp[e.experiment_id] = runs[i]; });
+      } catch (err) {
+        main.innerHTML = `<div class="empty">Failed to load dashboard: ${escapeHTML(String(err))}</div>`;
+        return;
+      }
+
+      const allRuns = Object.values(runsByExp).flat();
+      let widgets;
+      try { widgets = JSON.parse(dashboard.widgets || "[]"); } catch { widgets = []; }
+      let editMode = false;
+
+      const allMetricKeys = [...new Set(allRuns.flatMap(r => (r.data?.metrics || []).map(m => m.key)))].sort();
+      const allParamKeys  = [...new Set(allRuns.flatMap(r => (r.data?.params  || []).map(p => p.key)))].sort();
+
+      const renderWidgetBody = (w) => {
+        switch (w.type) {
+          case "run_count": {
+            const total = allRuns.length;
+            const finished = allRuns.filter(r => r.info.status === "FINISHED").length;
+            const running = allRuns.filter(r => r.info.status === "RUNNING").length;
+            const failed = allRuns.filter(r => r.info.status === "FAILED").length;
+            return `
+              <div class="widget-big-num">${total}</div>
+              <div class="widget-row"><span>Finished</span><span class="mono">${finished}</span></div>
+              <div class="widget-row"><span>Running</span><span class="mono">${running}</span></div>
+              <div class="widget-row"><span>Failed</span><span class="mono">${failed}</span></div>`;
+          }
+          case "latest_best": {
+            const metric = (w.config && w.config.metric) || "";
+            const dir = (w.config && w.config.direction) || "max";
+            const candidates = allRuns
+              .map(r => ({
+                r,
+                v: (r.data?.metrics || []).find(m => m.key === metric)?.value,
+              }))
+              .filter(x => x.v != null);
+            if (candidates.length === 0) {
+              return `<div class="widget-row" style="color:var(--fg-muted)">No runs with metric <code>${escapeHTML(metric)}</code>.</div>`;
+            }
+            candidates.sort((a, b) => dir === "min" ? a.v - b.v : b.v - a.v);
+            const best = candidates[0];
+            return `
+              <div class="widget-big-num">${best.v.toPrecision(5)}</div>
+              <div class="widget-subtitle">best ${escapeHTML(dir)}imum of <code>${escapeHTML(metric)}</code></div>
+              <div class="widget-row">
+                <a href="#/experiments/${best.r.info.experiment_id}/runs/${best.r.info.run_id}">${escapeHTML(best.r.info.run_name || best.r.info.run_id.slice(0,8))}</a>
+                <span class="mono">${best.r.info.status}</span>
+              </div>`;
+          }
+          case "param_leaderboard": {
+            const sortMetric = (w.config && w.config.sort_metric) || "";
+            const dir = (w.config && w.config.direction) || "max";
+            const limit = (w.config && w.config.limit) || 5;
+            const ranked = allRuns
+              .map(r => ({
+                r,
+                v: (r.data?.metrics || []).find(m => m.key === sortMetric)?.value,
+              }))
+              .filter(x => x.v != null);
+            ranked.sort((a, b) => dir === "min" ? a.v - b.v : b.v - a.v);
+            const top = ranked.slice(0, limit);
+            if (top.length === 0) {
+              return `<div class="widget-row" style="color:var(--fg-muted)">No runs with metric <code>${escapeHTML(sortMetric)}</code>.</div>`;
+            }
+            return top.map(({ r, v }) => `
+              <div class="widget-row">
+                <a href="#/experiments/${r.info.experiment_id}/runs/${r.info.run_id}">${escapeHTML(r.info.run_name || r.info.run_id.slice(0,8))}</a>
+                <span class="mono">${v.toPrecision(4)}</span>
+              </div>`).join("");
+          }
+          case "metric_trend": {
+            const metric = (w.config && w.config.metric) || "";
+            const points = allRuns
+              .map(r => {
+                const m = (r.data?.metrics || []).find(x => x.key === metric);
+                return m ? { x: r.info.start_time, y: m.value, name: r.info.run_name || r.info.run_id.slice(0, 8), id: r.info.run_id, expID: r.info.experiment_id } : null;
+              })
+              .filter(Boolean)
+              .sort((a, b) => a.x - b.x);
+            if (points.length === 0) {
+              return `<div class="widget-row" style="color:var(--fg-muted)">No runs with metric <code>${escapeHTML(metric)}</code>.</div>`;
+            }
+            const w0 = 280, h0 = 100, pad = 8;
+            const xs = points.map(p => p.x), ys = points.map(p => p.y);
+            const xMin = Math.min(...xs), xMax = Math.max(...xs);
+            const yMin = Math.min(...ys), yMax = Math.max(...ys);
+            const xSpan = Math.max(1, xMax - xMin);
+            const ySpan = Math.max(1e-9, yMax - yMin);
+            const sx = x => pad + ((x - xMin) / xSpan) * (w0 - 2 * pad);
+            const sy = y => h0 - pad - ((y - yMin) / ySpan) * (h0 - 2 * pad);
+            const path = points.map((p, i) => `${i === 0 ? "M" : "L"}${sx(p.x).toFixed(1)},${sy(p.y).toFixed(1)}`).join(" ");
+            const circles = points.map(p => `<circle cx="${sx(p.x).toFixed(1)}" cy="${sy(p.y).toFixed(1)}" r="2" fill="var(--accent)"/>`).join("");
+            return `
+              <svg viewBox="0 0 ${w0} ${h0}" style="width:100%;height:${h0}px">
+                <path d="${path}" stroke="var(--accent)" stroke-width="1.5" fill="none"/>
+                ${circles}
+              </svg>
+              <div class="widget-subtitle">${points.length} runs · range ${yMin.toPrecision(3)} → ${yMax.toPrecision(3)}</div>`;
+          }
+          default:
+            return `<div class="widget-row" style="color:var(--fg-muted)">Unknown widget type: ${escapeHTML(w.type)}</div>`;
+        }
+      };
+
+      const renderBoard = () => {
+        const cards = widgets.map((w, i) => `
+          <div class="widget" data-widget-idx="${i}">
+            ${editMode ? `<div class="widget-actions" style="display:flex">
+              <button class="widget-up" data-idx="${i}" title="Move up">↑</button>
+              <button class="widget-down" data-idx="${i}" title="Move down">↓</button>
+              <button class="widget-rm btn-danger" data-idx="${i}" title="Remove">✕</button>
+            </div>` : ""}
+            <h3 class="widget-title">${escapeHTML(w.title || w.type)}</h3>
+            ${renderWidgetBody(w)}
+          </div>`).join("");
+
+        main.innerHTML = `
+          <div class="crumbs"><a href="#/dashboards">Dashboards</a> / ${escapeHTML(project)}</div>
+          <div class="toolbar">
+            <h1 style="margin:0">${escapeHTML(project)}</h1>
+            <span style="color:var(--fg-muted);font-size:13px">
+              ${expList.length} experiment${expList.length === 1 ? "" : "s"} · ${allRuns.length} run${allRuns.length === 1 ? "" : "s"}
+            </span>
+            <button id="dash-edit-btn">${editMode ? "Done" : "Edit"}</button>
+            ${editMode ? `<button id="dash-add-btn" class="btn-primary">+ Add widget</button>` : ""}
+          </div>
+          ${widgets.length === 0 ? `
+            <div class="empty card">
+              <p>This project has no widgets yet. Click <strong>Edit → + Add widget</strong> to pin a metric chart, leaderboard, or run-count tile.</p>
+            </div>` : `<div class="dashboard-grid">${cards}</div>`}`;
+
+        $("#dash-edit-btn").addEventListener("click", () => {
+          if (editMode) {
+            // Save and exit edit mode.
+            saveWidgets().then(() => { editMode = false; renderBoard(); });
+          } else {
+            editMode = true;
+            renderBoard();
+          }
+        });
+        const addBtn = $("#dash-add-btn");
+        if (addBtn) addBtn.addEventListener("click", () => this._showAddWidgetModal(allMetricKeys, allParamKeys, (cfg) => {
+          widgets.push(cfg);
+          renderBoard();
+        }));
+
+        if (editMode) {
+          $$(".widget-rm", main).forEach(b => b.addEventListener("click", (e) => {
+            e.stopPropagation();
+            const idx = Number(b.dataset.idx);
+            widgets.splice(idx, 1);
+            renderBoard();
+          }));
+          $$(".widget-up", main).forEach(b => b.addEventListener("click", (e) => {
+            e.stopPropagation();
+            const i = Number(b.dataset.idx);
+            if (i > 0) [widgets[i - 1], widgets[i]] = [widgets[i], widgets[i - 1]];
+            renderBoard();
+          }));
+          $$(".widget-down", main).forEach(b => b.addEventListener("click", (e) => {
+            e.stopPropagation();
+            const i = Number(b.dataset.idx);
+            if (i < widgets.length - 1) [widgets[i + 1], widgets[i]] = [widgets[i], widgets[i + 1]];
+            renderBoard();
+          }));
+        }
+      };
+
+      const saveWidgets = async () => {
+        try {
+          await fetchJSON(`/api/v1/dashboards/${encodeURIComponent(project)}`, {
+            method: "PUT",
+            body: JSON.stringify({ widgets: JSON.stringify(widgets) }),
+          });
+          showToast("Dashboard saved");
+        } catch (err) {
+          alert(`Failed to save: ${err}`);
+        }
+      };
+
+      renderBoard();
+    },
+
+    _showAddWidgetModal(metricKeys, paramKeys, onAdd) {
+      const wrap = document.createElement("div");
+      wrap.className = "modal-backdrop";
+      const metricOpts = metricKeys.map(k => `<option value="${escapeHTML(k)}">${escapeHTML(k)}</option>`).join("");
+      wrap.innerHTML = `
+        <div class="card modal" style="max-width:520px">
+          <h2 style="margin-top:0">Add widget</h2>
+          <table class="form-table">
+            <tr>
+              <th><label for="aw-type">Type</label></th>
+              <td>
+                <select id="aw-type" style="width:100%">
+                  <option value="run_count">Run count tile</option>
+                  <option value="latest_best">Latest best run</option>
+                  <option value="param_leaderboard">Run leaderboard</option>
+                  <option value="metric_trend">Metric trend chart</option>
+                </select>
+              </td>
+            </tr>
+            <tr>
+              <th><label for="aw-title">Title</label></th>
+              <td><input type="text" id="aw-title" placeholder="e.g. Best loss" style="width:100%"/></td>
+            </tr>
+            <tr id="aw-metric-row">
+              <th><label for="aw-metric">Metric</label></th>
+              <td>
+                <select id="aw-metric" style="width:100%">
+                  ${metricOpts || '<option value="">— no metrics yet —</option>'}
+                </select>
+              </td>
+            </tr>
+            <tr id="aw-dir-row">
+              <th><label for="aw-dir">Direction</label></th>
+              <td>
+                <select id="aw-dir" style="width:100%">
+                  <option value="max">Higher is better</option>
+                  <option value="min">Lower is better</option>
+                </select>
+              </td>
+            </tr>
+            <tr id="aw-limit-row" style="display:none">
+              <th><label for="aw-limit">Top N</label></th>
+              <td><input type="number" id="aw-limit" value="5" min="1" max="20" style="width:80px"/></td>
+            </tr>
+          </table>
+          <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
+            <button id="aw-cancel">Cancel</button>
+            <button id="aw-save" class="btn-primary">Add</button>
+          </div>
+        </div>`;
+      document.body.appendChild(wrap);
+
+      const close = () => wrap.remove();
+      wrap.addEventListener("click", e => { if (e.target === wrap) close(); });
+      $("#aw-cancel").addEventListener("click", close);
+
+      const updateRows = () => {
+        const t = $("#aw-type").value;
+        $("#aw-metric-row").style.display = (t === "run_count") ? "none" : "";
+        $("#aw-dir-row").style.display = (t === "metric_trend" || t === "run_count") ? "none" : "";
+        $("#aw-limit-row").style.display = (t === "param_leaderboard") ? "" : "none";
+      };
+      $("#aw-type").addEventListener("change", updateRows);
+      updateRows();
+
+      $("#aw-save").addEventListener("click", () => {
+        const type = $("#aw-type").value;
+        const title = $("#aw-title").value.trim() || ({
+          run_count: "Run count",
+          latest_best: "Latest best",
+          param_leaderboard: "Leaderboard",
+          metric_trend: "Metric trend",
+        })[type];
+        const cfg = { type, title, config: {} };
+        if (type !== "run_count") cfg.config.metric = $("#aw-metric").value;
+        if (type === "latest_best" || type === "param_leaderboard") {
+          cfg.config.direction = $("#aw-dir").value;
+        }
+        if (type === "param_leaderboard") {
+          cfg.config.sort_metric = $("#aw-metric").value;
+          cfg.config.limit = parseInt($("#aw-limit").value, 10) || 5;
+        }
+        onAdd(cfg);
+        close();
+      });
     },
 
     // ── About ────────────────────────────────────────────────────────────────

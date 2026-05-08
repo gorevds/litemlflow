@@ -436,6 +436,7 @@ func (s *inMemStore) GetSpansByTrace(_ context.Context, _ string) ([]model.Span,
 	return nil, nil
 }
 func (s *inMemStore) CreatePrompt(_ context.Context, _ *model.Prompt) (int64, error) { return 0, nil }
+func (s *inMemStore) ListPrompts(_ context.Context) ([]*model.Prompt, error)          { return nil, nil }
 func (s *inMemStore) GetLatestPrompt(_ context.Context, _ string) (*model.Prompt, error) {
 	return nil, store.ErrNotFound
 }
@@ -542,6 +543,12 @@ func (s *inMemStore) RecordWebhookAttempt(_ context.Context, _ int64, _ int, _ i
 	return nil
 }
 func (s *inMemStore) CloneExperiment(_ context.Context, _ int64, _, _ string) (*model.Experiment, error) {
+	return nil, store.ErrNotFound
+}
+func (s *inMemStore) GetDashboard(_ context.Context, _, _ string) (*model.Dashboard, error) {
+	return nil, store.ErrNotFound
+}
+func (s *inMemStore) SaveDashboard(_ context.Context, _, _, _ string) (*model.Dashboard, error) {
 	return nil, store.ErrNotFound
 }
 

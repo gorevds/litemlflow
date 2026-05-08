@@ -154,6 +154,7 @@ make fuzz-short     # fuzz targets (parsers, JWT, OTLP)
 | | |
 |---|---|
 | [Quickstart](docs/quickstart.md) | Install, run, first metric |
+| [Quickstart notebook](examples/quickstart.ipynb) | One Jupyter tour of every feature end-to-end |
 | [Cookbook](docs/cookbook.md) | sklearn, PyTorch, LangChain, LlamaIndex, OTLP, deployment |
 | [Architecture](docs/architecture.md) | System design, concurrency model, perf budgets |
 | [Benchmarks](docs/bench-v04.md) | 143× cold start and honest trade-offs |

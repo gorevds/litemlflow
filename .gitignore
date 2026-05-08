@@ -72,3 +72,4 @@ ui/node_modules/
 
 # Repo-root binary (anchored — must NOT match python/litemlflow/...)
 /litemlflow
+bench-report.json

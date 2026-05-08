@@ -141,6 +141,9 @@ func (s *stubStore) GetRunNote(_ context.Context, _ string) (string, string, int
 func (s *stubStore) CreatePrompt(_ context.Context, _ *model.Prompt) (int64, error) {
 	return 0, store.ErrNotFound
 }
+func (s *stubStore) ListPrompts(_ context.Context) ([]*model.Prompt, error) {
+	return nil, nil
+}
 func (s *stubStore) GetLatestPrompt(_ context.Context, _ string) (*model.Prompt, error) {
 	return nil, store.ErrNotFound
 }
@@ -266,6 +269,12 @@ func (s *stubStore) RecordWebhookAttempt(_ context.Context, _ int64, _ int, _ in
 	return nil
 }
 func (s *stubStore) CloneExperiment(_ context.Context, _ int64, _, _ string) (*model.Experiment, error) {
+	return nil, store.ErrNotFound
+}
+func (s *stubStore) GetDashboard(_ context.Context, _, _ string) (*model.Dashboard, error) {
+	return nil, store.ErrNotFound
+}
+func (s *stubStore) SaveDashboard(_ context.Context, _, _, _ string) (*model.Dashboard, error) {
 	return nil, store.ErrNotFound
 }
 

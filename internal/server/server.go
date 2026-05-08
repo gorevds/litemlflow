@@ -76,9 +76,11 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Server, 
 		_ = st.Close()
 		return nil, err
 	}
-	// Create webhook dispatcher (started lazily in buildRouter).
-	dispatcher := webhooks.New(ctx, st, logger)
-	router := buildRouter(cfg, logger, st, art, uiFS, dispatcher)
+	// Create webhook dispatcher (started lazily in buildRouter). The echo
+	// ring buffer captures deliveries to lmf:// URLs for the demo UI.
+	echoLog := webhooks.NewEchoLog(0)
+	dispatcher := webhooks.NewWithOptions(ctx, st, logger, webhooks.Options{Echo: echoLog})
+	router := buildRouter(cfg, logger, st, art, uiFS, dispatcher, echoLog)
 
 	httpSrv := &http.Server{
 		Addr:              cfg.Addr,
@@ -158,7 +160,7 @@ func (s *Server) Close() error {
 	return s.store.Close()
 }
 
-func buildRouter(cfg config.Config, logger *slog.Logger, st store.Store, art artifact.Store, uiFS fs.FS, dispatcher *webhooks.Dispatcher) http.Handler {
+func buildRouter(cfg config.Config, logger *slog.Logger, st store.Store, art artifact.Store, uiFS fs.FS, dispatcher *webhooks.Dispatcher, echoLog *webhooks.EchoLog) http.Handler {
 	// Build the metrics registry before anything else so we can mount /metrics
 	// BEFORE the auth middleware (Prometheus scrapers don't send credentials).
 	reg := metrics.NewRegistry()
@@ -203,7 +205,7 @@ func buildRouter(cfg config.Config, logger *slog.Logger, st store.Store, art art
 	mlh.Mount(r)
 
 	// AUTH-OIDC: build native handler with full auth wiring.
-	nat := &native.Handler{Store: st, Cfg: cfg, SessionStore: nil}
+	nat := &native.Handler{Store: st, Cfg: cfg, SessionStore: nil, EchoLog: echoLog}
 	if sqlSt, ok := st.(*store.SQLiteStore); ok {
 		nat.SessionStore = sqlSt
 	}

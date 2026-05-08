@@ -1407,6 +1407,35 @@ func (s *SQLiteStore) CreatePrompt(ctx context.Context, p *model.Prompt) (int64,
 	return p.Version, nil
 }
 
+// ListPrompts returns the latest version of each prompt name, newest first.
+// Implemented as a window-function-free query: pick MAX(version) per name then
+// join back. Modernc/sqlite supports window functions but the join form keeps
+// the query plan obvious.
+func (s *SQLiteStore) ListPrompts(ctx context.Context) ([]*model.Prompt, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT p.name, p.version, p.content, p.content_hash, p.created_at,
+		       COALESCE(p.created_by,''), COALESCE(p.description,'')
+		FROM prompts p
+		JOIN (SELECT name, MAX(version) AS v FROM prompts GROUP BY name) latest
+		  ON p.name = latest.name AND p.version = latest.v
+		ORDER BY p.created_at DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*model.Prompt
+	for rows.Next() {
+		var p model.Prompt
+		if err := rows.Scan(&p.Name, &p.Version, &p.Content, &p.ContentHash,
+			&p.CreatedAt, &p.CreatedBy, &p.Description); err != nil {
+			return nil, err
+		}
+		out = append(out, &p)
+	}
+	return out, rows.Err()
+}
+
 // GetLatestPrompt returns the highest-versioned prompt with the given name.
 func (s *SQLiteStore) GetLatestPrompt(ctx context.Context, name string) (*model.Prompt, error) {
 	row := s.db.QueryRowContext(ctx, `

@@ -23,6 +23,7 @@ import (
 	"github.com/gorevds/litemlflow/internal/config"
 	"github.com/gorevds/litemlflow/internal/model"
 	"github.com/gorevds/litemlflow/internal/store"
+	"github.com/gorevds/litemlflow/internal/webhooks"
 	"github.com/gorevds/litemlflow/pkg/version"
 )
 
@@ -33,6 +34,7 @@ type Handler struct {
 	Cfg          config.Config
 	SessionStore SessionStore
 	OIDCProvider OIDCProvider // nil when auth != "oidc"
+	EchoLog      *webhooks.EchoLog
 }
 
 // SessionStore is the session-persistence interface used by auth handlers.
@@ -64,6 +66,7 @@ func (h *Handler) Mount(r chi.Router) {
 	r.Post("/v1/traces", h.IngestOTLP)
 
 	// Prompts
+	r.Get("/api/v1/prompts", h.ListPrompts)
 	r.Post("/api/v1/prompts", h.CreatePrompt)
 	r.Get("/api/v1/prompts/{name}", h.GetLatestPrompt)
 	r.Get("/api/v1/prompts/{name}/versions", h.ListPromptVersions)
@@ -644,6 +647,19 @@ type createPromptReq struct {
 	Content     string `json:"content"`
 	Description string `json:"description,omitempty"`
 	CreatedBy   string `json:"created_by,omitempty"`
+}
+
+// ListPrompts handles GET /api/v1/prompts (latest version per name).
+func (h *Handler) ListPrompts(w http.ResponseWriter, r *http.Request) {
+	prompts, err := h.Store.ListPrompts(r.Context())
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	if prompts == nil {
+		prompts = []*model.Prompt{}
+	}
+	writeJSON(w, map[string]any{"prompts": prompts})
 }
 
 // CreatePrompt handles POST /api/v1/prompts.

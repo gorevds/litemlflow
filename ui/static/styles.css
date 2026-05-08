@@ -751,3 +751,232 @@ button.btn-ghost:hover { background: var(--bg-alt); }
   color: var(--accent);
 }
 .lineage-node:hover { text-decoration: underline; }
+
+/* ── Generic modal pattern ─────────────────────────────────────────────────── */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 400;
+  background: var(--overlay-bg);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 10vh;
+}
+.modal {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 18px 22px;
+  min-width: 320px;
+  max-width: 600px;
+  width: 92vw;
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.32);
+  max-height: 80vh;
+  overflow-y: auto;
+}
+.form-table { width: 100%; border-collapse: collapse; }
+.form-table th {
+  text-align: left;
+  padding: 8px 10px 8px 0;
+  font-weight: 500;
+  font-size: 13px;
+  color: var(--fg-muted);
+  vertical-align: top;
+  width: 140px;
+}
+.form-table td { padding: 6px 0; }
+.form-table input[type="text"],
+.form-table input[type="url"],
+.form-table textarea,
+.form-table select {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: inherit;
+}
+.form-table textarea { resize: vertical; min-height: 80px; }
+.btn-primary {
+  background: var(--accent);
+  color: #fff;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 6px 12px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+}
+.btn-primary:hover { filter: brightness(1.08); }
+.btn-primary[disabled] { opacity: 0.6; cursor: not-allowed; }
+
+/* ── Project chips on experiments page ─────────────────────────────────────── */
+.proj-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 12px 0 16px;
+}
+.proj-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg-card);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+.proj-chip:hover { border-color: var(--accent); }
+.proj-chip.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+.proj-chip-count {
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 8px;
+  padding: 0 6px;
+  font-size: 11px;
+}
+.proj-chip:not(.active) .proj-chip-count {
+  background: var(--bg-alt);
+  color: var(--fg-muted);
+}
+.proj-move-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--fg-muted);
+  padding: 2px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  margin-left: 4px;
+}
+.proj-move-btn:hover {
+  background: var(--bg-alt);
+  border-color: var(--border);
+  color: var(--fg);
+}
+
+/* ── Webhook delivery log ──────────────────────────────────────────────────── */
+.wh-deliveries {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.wh-deliveries-row {
+  display: grid;
+  grid-template-columns: 120px 60px 80px 1fr;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+.wh-deliveries-row:last-child { border-bottom: none; }
+.wh-status-2xx { color: var(--success, #16a34a); font-weight: 600; }
+.wh-status-4xx, .wh-status-5xx { color: var(--error); font-weight: 600; }
+
+/* ── Timeline view ──────────────────────────────────────────────────────────── */
+.timeline-wrap {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  overflow-x: auto;
+}
+.timeline-row {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.timeline-row:hover { background: var(--bg-alt); }
+.timeline-name {
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.timeline-track {
+  position: relative;
+  height: 20px;
+  background: var(--bg-alt);
+  border-radius: 4px;
+}
+.timeline-bar {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  background: var(--accent);
+  border-radius: 3px;
+  cursor: pointer;
+  min-width: 2px;
+}
+.timeline-bar.status-FINISHED { background: #16a34a; }
+.timeline-bar.status-RUNNING { background: var(--accent); }
+.timeline-bar.status-FAILED { background: #dc2626; }
+.timeline-bar.status-KILLED { background: #b45309; }
+.timeline-bar:hover { filter: brightness(1.1); }
+.timeline-axis {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: 12px;
+  margin-bottom: 4px;
+  color: var(--fg-muted);
+  font-size: 11px;
+}
+.timeline-axis-ticks {
+  display: flex;
+  justify-content: space-between;
+}
+
+/* ── Dashboards ────────────────────────────────────────────────────────────── */
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 14px;
+  margin-top: 16px;
+}
+.widget {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  position: relative;
+}
+.widget-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0 0 6px;
+}
+.widget-subtitle {
+  color: var(--fg-muted);
+  font-size: 11px;
+  margin: 0 0 10px;
+}
+.widget-actions {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: none;
+  gap: 4px;
+}
+.widget:hover .widget-actions { display: flex; }
+.widget-big-num {
+  font-size: 32px;
+  font-weight: 600;
+  margin: 6px 0;
+  font-family: var(--mono);
+}
+.widget-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 4px 0;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border);
+}
+.widget-row:last-child { border-bottom: none; }

@@ -2,6 +2,28 @@
 
 All notable changes to LiteMLflow are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/) starting at v1.0.
 
+## [v1.0.0-rc4] — 2026-05-08
+
+Wave 8 polish and feature-completeness pass driven by direct user feedback against rc3.
+
+### Added
+
+- **Custom dashboards per project** — every project has a board at `#/dashboards/{project}` with four widget types: run-count tile, latest-best-run, run leaderboard (top N by metric), metric-trend chart (inline SVG). Edit mode lets you add/reorder/delete widgets; layout is persisted server-side per (workspace, project) via new `PUT /api/v1/dashboards/{project}` (migration 009).
+- **Run timeline view** — Gantt-style alternative to the runs list on each experiment page. Toggle between **List** and **Timeline**; bars are coloured by run status and link to run details.
+- **Webhook echo demo** — pseudo-scheme `lmf://echo` routes deliveries to an in-process ring buffer instead of HTTP, with a "Recent deliveries" panel on the Webhooks page. One-click "+ Try the demo" creates an echo webhook and fires a synthetic event so first-time users see the lifecycle without setting up an external receiver.
+- **Explicit project UX** — toolbar `+ New project` button (with multi-experiment assignment), per-row **Move…** / **+ Project** buttons, and a project-chip filter row above the experiments list. `lmf.project` tag is unchanged on the wire; only the UI affordances are new.
+- **Prompts list endpoint** — `GET /api/v1/prompts` returns latest version per name (previously the UI probed names from `localStorage`). New "+ New prompt" UI modal registers a prompt without leaving the page.
+- **examples/quickstart.ipynb** — single Jupyter notebook end-to-end tour: experiments+projects, runs+notes, traces, prompts+aliases, lineage, model registry, search/compare, webhook echo, dashboards.
+
+### Changed
+
+- **Dark theme by default** — flips `data-theme="light"` → `"dark"` on the root element. Existing users with a stored theme preference keep their choice; new visitors see dark.
+- **Repo cleanup** — `REPORT*.md` files moved to `docs/reports/` (kept for history, out of root). `bench-report.json` removed and added to `.gitignore`.
+
+### Fixed
+
+- (W7 review carryover) `validateWebhookURL` now allows `lmf://` prefix without DNS resolution, scoped to the in-process echo target.
+
 ## [v1.0.0-rc1] — 2026-05-08
 
 The year-1 stabilization release. All Q1–Q4 roadmap streams delivered. See [docs/roadmap-y1.md](docs/roadmap-y1.md).

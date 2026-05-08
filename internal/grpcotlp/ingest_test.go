@@ -121,6 +121,7 @@ func (nopStore) GetRunNote(_ context.Context, _ string) (string, string, int64, 
 	panic("not impl")
 }
 func (nopStore) CreatePrompt(_ context.Context, _ *model.Prompt) (int64, error) { panic("not impl") }
+func (nopStore) ListPrompts(_ context.Context) ([]*model.Prompt, error)          { panic("not impl") }
 func (nopStore) GetLatestPrompt(_ context.Context, _ string) (*model.Prompt, error) {
 	panic("not impl")
 }
@@ -226,6 +227,12 @@ func (nopStore) RecordWebhookAttempt(_ context.Context, _ int64, _ int, _ int64)
 	return nil
 }
 func (nopStore) CloneExperiment(_ context.Context, _ int64, _, _ string) (*model.Experiment, error) {
+	return nil, store.ErrNotFound
+}
+func (nopStore) GetDashboard(_ context.Context, _, _ string) (*model.Dashboard, error) {
+	return nil, store.ErrNotFound
+}
+func (nopStore) SaveDashboard(_ context.Context, _, _, _ string) (*model.Dashboard, error) {
 	return nil, store.ErrNotFound
 }
 

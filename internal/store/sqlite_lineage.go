@@ -346,3 +346,47 @@ func (s *SQLiteStore) CloneExperiment(ctx context.Context, srcID int64, newName,
 	}
 	return s.GetExperiment(ctx, id)
 }
+
+// ----- dashboards -----
+
+// GetDashboard returns the dashboard for (workspace, project), or ErrNotFound.
+func (s *SQLiteStore) GetDashboard(ctx context.Context, workspaceID, project string) (*model.Dashboard, error) {
+	if workspaceID == "" {
+		workspaceID = "default"
+	}
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, workspace_id, project, widgets, created_at, updated_at
+		FROM dashboards WHERE workspace_id = ? AND project = ?
+	`, workspaceID, project)
+	var d model.Dashboard
+	if err := row.Scan(&d.ID, &d.WorkspaceID, &d.Project, &d.Widgets, &d.CreatedAt, &d.UpdatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &d, nil
+}
+
+// SaveDashboard upserts the widgets JSON for (workspace, project). Returns
+// the resulting dashboard row.
+func (s *SQLiteStore) SaveDashboard(ctx context.Context, workspaceID, project, widgetsJSON string) (*model.Dashboard, error) {
+	if workspaceID == "" {
+		workspaceID = "default"
+	}
+	now := time.Now().UnixMilli()
+	if widgetsJSON == "" {
+		widgetsJSON = "[]"
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO dashboards(workspace_id, project, widgets, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(workspace_id, project) DO UPDATE SET
+			widgets = excluded.widgets,
+			updated_at = excluded.updated_at
+	`, workspaceID, project, widgetsJSON, now, now)
+	if err != nil {
+		return nil, fmt.Errorf("save dashboard: %w", err)
+	}
+	return s.GetDashboard(ctx, workspaceID, project)
+}
