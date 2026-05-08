@@ -122,7 +122,78 @@ chain.invoke({"context": "...", "question": "..."}, config={"callbacks": [handle
 run.finish()
 ```
 
-## 4. Evaluate two models against each other
+## 4. Auto-instrument a LlamaIndex query engine
+
+Install the optional extra:
+
+```bash
+pip install 'litemlflow[llamaindex]'
+```
+
+```python
+from litemlflow import Client
+from litemlflow.llamaindex import LiteMLflowEventHandler
+import llama_index.core.instrumentation as instrument
+
+# Connect and create the handler — it auto-creates a run in the "llamaindex"
+# experiment (or specify experiment_id= / run_id= to attach to an existing one).
+client = Client("http://localhost:5000")
+handler = LiteMLflowEventHandler(client, auto_metrics=True)
+
+# Register the handler on the root dispatcher so it receives all events
+# emitted by any LlamaIndex component in this process.
+dispatcher = instrument.get_dispatcher()
+dispatcher.add_event_handler(handler)
+
+# Run any query — the handler records spans automatically.
+from llama_index.core import VectorStoreIndex, SimpleDirectoryReader
+
+documents = SimpleDirectoryReader("data/").load_data()
+index = VectorStoreIndex.from_documents(documents)
+query_engine = index.as_query_engine()
+response = query_engine.query("What is LiteMLflow?")
+print(response)
+```
+
+Sample trace tree (visible in the LiteMLflow UI under the auto-created run):
+
+```
+llamaindex-trace-1746700000
+└── query:a3f1b2c4                        [OK, 0.91 s]
+    ├── retrieval                          [OK, 0.03 s]
+    │     nodes.count=3
+    ├── synthesis                          [OK, 0.87 s]
+    └── llm:gpt-4o-mini                   [OK, 0.86 s]
+          tokens.prompt=312  tokens.completion=45  cost.usd=0.0000735
+
+Metrics logged to run:
+  tokens.prompt      312
+  tokens.completion  45
+  tokens.total       357
+  cost.usd           0.0000735
+```
+
+Every LlamaIndex event type (query, retrieval, synthesis, LLM completion, chat,
+embedding) is captured as a span with timing, status, and relevant attributes.
+Token usage and cost are logged as run metrics when present.
+
+Spans are batched and flushed in a single HTTP call when the root query span
+closes, so you pay one round-trip per query invocation.
+
+### Attaching to an existing run
+
+```python
+exp_id = client.create_experiment("rag-evals")
+run = client.create_run(exp_id, name="trial-1")
+run.log_param("retriever_k", "5")
+
+handler = LiteMLflowEventHandler(client, run_id=run.id)
+dispatcher.add_event_handler(handler)
+# ... run your queries ...
+run.finish()
+```
+
+## 6. Evaluate two models against each other
 
 ```python
 from litemlflow import Client
@@ -149,7 +220,7 @@ c.create_eval(
 )
 ```
 
-## 5. Send OpenTelemetry traces
+## 7. Send OpenTelemetry traces
 
 LiteMLflow accepts standard OTLP/JSON at `/v1/traces`. Configure your OTel exporter:
 

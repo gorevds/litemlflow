@@ -36,7 +36,7 @@ from typing import Any
 from uuid import UUID
 
 from litemlflow.client import Client, LiteMLflowError
-from litemlflow.langchain.pricing import cost
+from litemlflow._pricing import cost
 
 _LANGCHAIN_IMPORT_ERROR = (
     "langchain-core is required for LiteMLflowCallbackHandler. "
