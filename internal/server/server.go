@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -44,7 +45,23 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Server, 
 		_ = st.Close()
 		return nil, err
 	}
-	art, err := artifact.NewFilesystemStore(cfg.ArtifactsDir)
+	// STORAGE-S3: select backend based on config.ArtifactBackend.
+	var art artifact.Store
+	switch cfg.ArtifactBackend {
+	case "", "fs":
+		art, err = artifact.NewFilesystemStore(cfg.ArtifactsDir)
+	case "s3":
+		art, err = artifact.NewS3Store(artifact.S3Config{
+			Endpoint:  cfg.S3Endpoint,
+			Bucket:    cfg.S3Bucket,
+			Region:    cfg.S3Region,
+			AccessKey: cfg.S3AccessKey,
+			SecretKey: cfg.S3SecretKey,
+			Prefix:    cfg.S3Prefix,
+		})
+	default:
+		err = fmt.Errorf("unknown artifact backend %q", cfg.ArtifactBackend)
+	}
 	if err != nil {
 		_ = st.Close()
 		return nil, err

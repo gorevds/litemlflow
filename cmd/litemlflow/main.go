@@ -73,6 +73,9 @@ Usage:
   litemlflow up       [--data DIR] [--addr HOST:PORT] [--auth MODE] [--basic-user USER --basic-pass-hash HASH] [--dev]
                       [--oidc-issuer URL] [--oidc-client-id ID] [--oidc-client-secret SECRET]
                       [--oidc-redirect-url URL] [--session-ttl DURATION]
+                      [--artifact-backend fs|s3]
+                      [--s3-endpoint URL] [--s3-bucket BUCKET] [--s3-region REGION]
+                      [--s3-access-key KEY] [--s3-secret-key SECRET] [--s3-prefix PREFIX]
   litemlflow migrate  [--data DIR]
   litemlflow rollback [--data DIR]
   litemlflow backup   [--data DIR] [--out FILE]
@@ -92,6 +95,13 @@ Environment variables override defaults; flags override env vars.
   LITEMLFLOW_OIDC_REDIRECT_URL   OIDC redirect URL (required for auth=oidc)
   LITEMLFLOW_OIDC_SCOPES         space-separated scopes (default: openid email profile)
   LITEMLFLOW_SESSION_TTL         session duration, e.g. 168h (default 168h = 7 days)
+  LITEMLFLOW_ARTIFACT_BACKEND    artifact backend: fs (default) or s3
+  LITEMLFLOW_S3_ENDPOINT         S3-compatible endpoint URL
+  LITEMLFLOW_S3_BUCKET           S3 bucket name
+  LITEMLFLOW_S3_REGION           S3 region (e.g. us-east-1)
+  LITEMLFLOW_S3_ACCESS_KEY       S3 access key ID
+  LITEMLFLOW_S3_SECRET_KEY       S3 secret access key
+  LITEMLFLOW_S3_PREFIX           optional S3 key prefix (e.g. litemlflow/)
   LITEMLFLOW_DEV=1               dev-mode logs and verbose errors
 `)
 }
@@ -110,6 +120,14 @@ func runUp(args []string) error {
 	oidcClientSecret := fs.String("oidc-client-secret", "", "OIDC client secret (optional for public clients)")
 	oidcRedirectURL := fs.String("oidc-redirect-url", "", "OIDC redirect URL")
 	sessionTTL := fs.Duration("session-ttl", 0, "session lifetime, e.g. 168h (default 7 days)")
+	// STORAGE-S3: artifact backend flags
+	artifactBackend := fs.String("artifact-backend", "", "artifact storage backend: fs (default) or s3")
+	s3Endpoint := fs.String("s3-endpoint", "", "S3 endpoint URL, e.g. https://s3.amazonaws.com")
+	s3Bucket := fs.String("s3-bucket", "", "S3 bucket name")
+	s3Region := fs.String("s3-region", "", "S3 region, e.g. us-east-1")
+	s3AccessKey := fs.String("s3-access-key", "", "S3 access key ID")
+	s3SecretKey := fs.String("s3-secret-key", "", "S3 secret access key")
+	s3Prefix := fs.String("s3-prefix", "", "optional S3 key prefix, e.g. litemlflow/")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -125,6 +143,13 @@ func runUp(args []string) error {
 		OIDCClientSecret: *oidcClientSecret,
 		OIDCRedirectURL:  *oidcRedirectURL,
 		SessionTTL:       *sessionTTL,
+		ArtifactBackend:  *artifactBackend,
+		S3Endpoint:       *s3Endpoint,
+		S3Bucket:         *s3Bucket,
+		S3Region:         *s3Region,
+		S3AccessKey:      *s3AccessKey,
+		S3SecretKey:      *s3SecretKey,
+		S3Prefix:         *s3Prefix,
 	})
 	if err != nil {
 		return err

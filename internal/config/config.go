@@ -51,6 +51,17 @@ type Config struct {
 
 	// DevMode enables verbose error responses and pretty logs.
 	DevMode bool
+
+	// ArtifactBackend selects the artifact storage backend: "fs" (default) or "s3".
+	ArtifactBackend string
+
+	// S3* fields are used when ArtifactBackend == "s3".
+	S3Endpoint  string // e.g. "https://s3.amazonaws.com" or "http://minio:9000"
+	S3Bucket    string
+	S3Region    string
+	S3AccessKey string
+	S3SecretKey string
+	S3Prefix    string // optional key prefix, e.g. "litemlflow/"
 }
 
 // FromEnv returns a Config populated from environment variables, then
@@ -125,6 +136,27 @@ func overlayFromEnv(c Config) Config {
 	if v := os.Getenv("LITEMLFLOW_DEV"); v == "1" {
 		c.DevMode = true
 	}
+	if v := os.Getenv("LITEMLFLOW_ARTIFACT_BACKEND"); v != "" {
+		c.ArtifactBackend = v
+	}
+	if v := os.Getenv("LITEMLFLOW_S3_ENDPOINT"); v != "" {
+		c.S3Endpoint = v
+	}
+	if v := os.Getenv("LITEMLFLOW_S3_BUCKET"); v != "" {
+		c.S3Bucket = v
+	}
+	if v := os.Getenv("LITEMLFLOW_S3_REGION"); v != "" {
+		c.S3Region = v
+	}
+	if v := os.Getenv("LITEMLFLOW_S3_ACCESS_KEY"); v != "" {
+		c.S3AccessKey = v
+	}
+	if v := os.Getenv("LITEMLFLOW_S3_SECRET_KEY"); v != "" {
+		c.S3SecretKey = v
+	}
+	if v := os.Getenv("LITEMLFLOW_S3_PREFIX"); v != "" {
+		c.S3Prefix = v
+	}
 	return c
 }
 
@@ -187,6 +219,27 @@ func overlay(base, explicit Config) Config {
 	if explicit.DevMode {
 		base.DevMode = true
 	}
+	if explicit.ArtifactBackend != "" {
+		base.ArtifactBackend = explicit.ArtifactBackend
+	}
+	if explicit.S3Endpoint != "" {
+		base.S3Endpoint = explicit.S3Endpoint
+	}
+	if explicit.S3Bucket != "" {
+		base.S3Bucket = explicit.S3Bucket
+	}
+	if explicit.S3Region != "" {
+		base.S3Region = explicit.S3Region
+	}
+	if explicit.S3AccessKey != "" {
+		base.S3AccessKey = explicit.S3AccessKey
+	}
+	if explicit.S3SecretKey != "" {
+		base.S3SecretKey = explicit.S3SecretKey
+	}
+	if explicit.S3Prefix != "" {
+		base.S3Prefix = explicit.S3Prefix
+	}
 	return base
 }
 
@@ -206,6 +259,29 @@ func (c *Config) Validate() error {
 	// AUTH-OIDC: oidc mode requires issuer and client_id at minimum.
 	if c.Auth == "oidc" && (c.OIDCIssuer == "" || c.OIDCClientID == "") {
 		return errors.New("oidc auth requires oidc-issuer and oidc-client-id to be set")
+	}
+	// STORAGE-S3: validate artifact backend selection.
+	switch c.ArtifactBackend {
+	case "", "fs":
+		// filesystem backend; no extra validation required.
+	case "s3":
+		if c.S3Endpoint == "" {
+			return errors.New("s3 backend requires --s3-endpoint (or LITEMLFLOW_S3_ENDPOINT)")
+		}
+		if c.S3Bucket == "" {
+			return errors.New("s3 backend requires --s3-bucket (or LITEMLFLOW_S3_BUCKET)")
+		}
+		if c.S3Region == "" {
+			return errors.New("s3 backend requires --s3-region (or LITEMLFLOW_S3_REGION)")
+		}
+		if c.S3AccessKey == "" {
+			return errors.New("s3 backend requires --s3-access-key (or LITEMLFLOW_S3_ACCESS_KEY)")
+		}
+		if c.S3SecretKey == "" {
+			return errors.New("s3 backend requires --s3-secret-key (or LITEMLFLOW_S3_SECRET_KEY)")
+		}
+	default:
+		return errors.New("artifact-backend must be one of: fs, s3")
 	}
 	return nil
 }

@@ -8,7 +8,7 @@ LiteMLflow is a single Go binary that embeds:
 - A SQLite database (pure-Go via `modernc.org/sqlite`)
 - An optional DuckDB attachment for analytical queries
 - A static UI bundle (vanilla HTML/CSS/JS)
-- Storage backends for artifacts (filesystem in core; S3-compatible via plugin)
+- Storage backends for artifacts: **filesystem** (default) and **S3-compatible** (built-in, no extra dependency)
 - An auth layer (no-op / basic / OIDC / mTLS)
 - A migration runner
 
@@ -61,6 +61,8 @@ For batches (`log-batch`), all rows are inserted inside one transaction.
 
 ## Storage layout
 
+### Filesystem backend (default)
+
 ```
 $DATA/
 ├── litemlflow.db         # SQLite WAL mode (the database)
@@ -73,6 +75,25 @@ $DATA/
 ```
 
 A `litemlflow backup` is just `tar -czf snap.tgz $DATA`.
+
+### S3-compatible backend
+
+When `--artifact-backend s3` is set, the SQLite database remains on local disk
+while artifacts are stored in an S3-compatible object store (AWS S3, MinIO,
+Garage, Ceph, etc.). The object key layout mirrors the filesystem layout:
+
+```
+<prefix>artifacts/<run-id>/<relative-path>
+```
+
+All requests are signed with **AWS Signature Version 4** implemented in pure Go
+(`crypto/hmac`, `crypto/sha256`, `encoding/hex`) — no SDK dependency is added.
+Addressing defaults to **path-style** for non-amazonaws.com endpoints (required
+by MinIO) and to **virtual-hosted style** for amazonaws.com.
+
+The backend is selected in `internal/server/server.go` at the artifact-store
+construction point (marked `// STORAGE-S3`) and implements the same `artifact.Store`
+interface as `FilesystemStore`, making it fully transparent to all API handlers.
 
 ## Schema versioning
 
