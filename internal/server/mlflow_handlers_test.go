@@ -90,15 +90,16 @@ func TestMlflowCreateExperiment_DuplicateName(t *testing.T) {
 func TestMlflowGetExperiment_NotFound(t *testing.T) {
 	t.Parallel()
 	ts, _ := newTestServer(t, config.Config{})
-	resp, raw := mustPostJSON(t, ts.URL+"/api/2.0/mlflow/experiments/get?experiment_id=99999", "")
 	// MLflow contract: GET-shaped fetch via query string.
-	resp2, _ := http.Get(ts.URL + "/api/2.0/mlflow/experiments/get?experiment_id=99999")
-	defer resp2.Body.Close()
-	if resp2.StatusCode != http.StatusNotFound {
-		raw, _ = io.ReadAll(resp2.Body)
-		t.Fatalf("expected 404 from GET, got %d (%s)", resp2.StatusCode, raw)
+	resp, err := http.Get(ts.URL + "/api/2.0/mlflow/experiments/get?experiment_id=99999")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
 	}
-	_ = resp
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		raw, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 404 from GET, got %d (%s)", resp.StatusCode, raw)
+	}
 }
 
 func TestMlflowDeleteExperiment_NotFound(t *testing.T) {

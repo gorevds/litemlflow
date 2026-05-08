@@ -229,7 +229,10 @@ func TestDatasetLineage(t *testing.T) {
 	}
 
 	// Child lineage shows parent as ancestor.
-	resp, _ := http.Get(srv.URL + "/api/v1/datasets/child/versions/1/lineage")
+	resp, err := http.Get(srv.URL + "/api/v1/datasets/child/versions/1/lineage")
+	if err != nil {
+		t.Fatalf("get child lineage: %v", err)
+	}
 	defer resp.Body.Close()
 	var lin struct {
 		Self      struct{ Name string }
@@ -244,7 +247,10 @@ func TestDatasetLineage(t *testing.T) {
 	}
 
 	// Parent lineage shows child as descendant.
-	resp2, _ := http.Get(srv.URL + "/api/v1/datasets/parent/versions/1/lineage")
+	resp2, err := http.Get(srv.URL + "/api/v1/datasets/parent/versions/1/lineage")
+	if err != nil {
+		t.Fatalf("get parent lineage: %v", err)
+	}
 	defer resp2.Body.Close()
 	var lin2 struct {
 		Descendants []struct{ Name string }
@@ -284,7 +290,10 @@ func TestDatasetSoftDelete(t *testing.T) {
 		t.Errorf("delete: %d", dr.StatusCode)
 	}
 	// List shows 0 (latest active is gone).
-	lr, _ := http.Get(srv.URL + "/api/v1/datasets")
+	lr, err := http.Get(srv.URL + "/api/v1/datasets")
+	if err != nil {
+		t.Fatalf("list datasets: %v", err)
+	}
 	defer lr.Body.Close()
 	var ds struct {
 		Datasets []any
