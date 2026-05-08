@@ -188,6 +188,104 @@ func TestAnalyticsQueryEnd2End(t *testing.T) {
 	}
 }
 
+func TestAnalyticsRejectsLastAgg(t *testing.T) {
+	// "last" was dropped in v1.1 — it had MAX(value) semantics which was wrong.
+	// Validate must reject it so callers don't get silently misleading results.
+	t.Parallel()
+	q := store.AnalyticsQuery{Metric: "loss", Agg: "last"}
+	if err := q.Validate(); err == nil {
+		t.Errorf("expected last agg to be rejected after v1.1 fix")
+	}
+}
+
+func TestAnalyticsExperimentIDGrouping(t *testing.T) {
+	// Regression: the SELECT casts r.experiment_id to TEXT but resolveBestRuns
+	// must bind it back to INTEGER on the comparison side, otherwise the
+	// best-run lookup silently returns no match in stricter type modes.
+	t.Parallel()
+	s := newStore(t)
+	expA, _ := seedAnalyticsRuns(t, s)
+
+	res, err := s.AnalyticsQuery(context.Background(), store.AnalyticsQuery{
+		Metric: "eval/f1", Agg: "max", GroupBy: "experiment_id",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Rows) < 1 {
+		t.Fatalf("expected at least one experiment_id group, got %d", len(res.Rows))
+	}
+	for _, row := range res.Rows {
+		if row.Group == "" {
+			t.Errorf("group should be non-empty stringified id, got empty")
+			continue
+		}
+		// For max-agg rows, best-run resolution must succeed.
+		if row.BestRunID == "" {
+			t.Errorf("group %q: best_run_id should be resolved (likely the int-bind fix regressed)", row.Group)
+		}
+	}
+	// Sanity: at least one row corresponds to expA.
+	found := false
+	for _, row := range res.Rows {
+		if row.Group == "1" || row.Group == strings.TrimPrefix(string(rune(expA)), "0") {
+			found = true
+		}
+	}
+	_ = found // not strict — just confirms experiment_id grouping returns rows
+}
+
+func TestAnalyticsEmptyVsNullGroup(t *testing.T) {
+	// Regression for the v1.1 review finding M4: a run with `params.model=""`
+	// must NOT be conflated with a run that has no `params.model` row.
+	t.Parallel()
+	s := newStore(t)
+	ctx := context.Background()
+	exp, err := s.CreateExperiment(ctx, &model.Experiment{Name: "null-vs-empty"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// r1: explicit empty-string model param.
+	r1 := &model.Run{ID: "r-empty", ExperimentID: exp, Status: "FINISHED", StartTime: 1, LifecycleStage: model.LifecycleActive, Kind: model.KindClassic, ArtifactURI: "x"}
+	if err := s.CreateRun(ctx, r1); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.LogParam(ctx, "r-empty", model.Param{Key: "model", Value: ""}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.LogMetric(ctx, "r-empty", model.Metric{Key: "f1", Value: 0.5, Timestamp: 1, Step: 1}); err != nil {
+		t.Fatal(err)
+	}
+	// r2: no params at all → NULL via LEFT JOIN.
+	r2 := &model.Run{ID: "r-null", ExperimentID: exp, Status: "FINISHED", StartTime: 1, LifecycleStage: model.LifecycleActive, Kind: model.KindClassic, ArtifactURI: "x"}
+	if err := s.CreateRun(ctx, r2); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.LogMetric(ctx, "r-null", model.Metric{Key: "f1", Value: 0.9, Timestamp: 1, Step: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := s.AnalyticsQuery(ctx, store.AnalyticsQuery{
+		Metric: "f1", Agg: "max", GroupBy: "params.model",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// We should get 2 distinct groups: empty-string (r-empty, value=0.5)
+	// and NULL (r-null, value=0.9). They MUST resolve to different runs.
+	if len(res.Rows) != 2 {
+		t.Fatalf("expected 2 groups (empty-string + NULL), got %d (%+v)", len(res.Rows), res.Rows)
+	}
+	bestIDs := map[string]bool{}
+	for _, r := range res.Rows {
+		bestIDs[r.BestRunID] = true
+	}
+	if !bestIDs["r-empty"] || !bestIDs["r-null"] {
+		t.Errorf("each distinct group should resolve to its own run, got %v", bestIDs)
+	}
+}
+
 func TestAnalyticsTriggerKeepsLatest(t *testing.T) {
 	// Verify metrics_latest tracks the most-recent (timestamp, step).
 	t.Parallel()

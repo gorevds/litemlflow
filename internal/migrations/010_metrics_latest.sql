@@ -35,22 +35,22 @@ CREATE TABLE metrics_latest (
 -- Hot index for analytics: "top N runs by metric X".
 CREATE INDEX idx_metrics_latest_key_value ON metrics_latest(key, value DESC, run_id);
 
--- Backfill: take the (timestamp, step) tuple-max per (run_id, key).
--- We insert via INSERT OR REPLACE so the existing PK serialises duplicates
--- (the metrics table allows multiple obs at the same step due to the wider
--- PK). Walks the metrics table in run-id order, so the backfill is O(N).
+-- Backfill: take the lexicographically-max (timestamp, step) row per
+-- (run_id, key). The naive "MAX(timestamp), MAX(step) independently" join
+-- silently drops rows where the max-timestamp row's step isn't also the
+-- group max-step (e.g. (ts=100,step=5) + (ts=200,step=2) → joins on
+-- (ts=200,step=5) which matches nothing). ROW_NUMBER() over the tuple
+-- gets it right.
 INSERT INTO metrics_latest (run_id, key, value, timestamp, step)
-SELECT m.run_id, m.key, m.value, m.timestamp, m.step
-FROM metrics m
-JOIN (
-    SELECT run_id, key, MAX(timestamp) AS ts, MAX(step) AS st
-    FROM metrics
-    GROUP BY run_id, key
-) latest
-  ON m.run_id = latest.run_id
- AND m.key    = latest.key
- AND m.timestamp = latest.ts
- AND m.step  = latest.st;
+SELECT run_id, key, value, timestamp, step FROM (
+    SELECT m.run_id, m.key, m.value, m.timestamp, m.step,
+           ROW_NUMBER() OVER (
+               PARTITION BY m.run_id, m.key
+               ORDER BY m.timestamp DESC, m.step DESC
+           ) AS rn
+    FROM metrics m
+)
+WHERE rn = 1;
 
 -- INSERT trigger: keep the latest row in sync.
 -- Compare (timestamp, step) lexicographically: higher timestamp wins, ties

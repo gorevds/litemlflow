@@ -15,6 +15,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -71,12 +72,20 @@ type AnalyticsWhere struct {
 
 // AnalyticsRow is one row of the result.
 type AnalyticsRow struct {
-	Group      string  `json:"group,omitempty"`        // value of group-by dimension; empty when no grouping
-	AggValue   float64 `json:"agg_value"`              // aggregated metric value
-	RunCount   int64   `json:"run_count"`              // distinct runs in this bucket
-	BestRunID  string  `json:"best_run_id,omitempty"`  // the run id whose metric == AggValue (max/min only)
-	BestRunName string `json:"best_run_name,omitempty"`
-	BestExpID  int64   `json:"best_experiment_id,omitempty"`
+	Group       string  `json:"group,omitempty"`       // value of group-by dimension; empty when no grouping or value is NULL/missing
+	AggValue    float64 `json:"agg_value"`             // aggregated metric value
+	RunCount    int64   `json:"run_count"`             // distinct runs in this bucket
+	BestRunID   string  `json:"best_run_id,omitempty"` // the run id whose metric == AggValue (max/min only)
+	BestRunName string  `json:"best_run_name,omitempty"`
+	BestExpID   int64   `json:"best_experiment_id,omitempty"`
+
+	// groupIsNull is true when the SQL row had NULL in the group_key column
+	// (i.e. the run had no matching params/tags row, or no group_by was used).
+	// We track it separately from `Group=""` so that resolveBestRuns can
+	// distinguish "param value is empty string" (Group="", groupIsNull=false)
+	// from "param row missing" (Group="", groupIsNull=true). Not exposed in
+	// JSON because the consumer can derive it from the absence of `group`.
+	groupIsNull bool
 }
 
 // AnalyticsResult is what the API returns.
@@ -89,11 +98,16 @@ type AnalyticsResult struct {
 
 // allowedAggs / allowedOrderBy / allowedLifecycle are the safe enum sets
 // dispatched by the SQL builder. Anything outside fails Validate().
+//
+// "last" was deliberately removed in v1.1: implementing it correctly requires
+// picking the row with max (timestamp, step) per group rather than max value,
+// which is a different SQL shape. The compromise during the v1.1 review was
+// to drop the alias rather than ship a misleading agg. Will return in v1.2
+// as a separate code path with explicit "latest_by_timestamp" semantics.
 var allowedAggs = map[string]string{
-	"max":  "MAX(ml.value)",
-	"min":  "MIN(ml.value)",
-	"avg":  "AVG(ml.value)",
-	"last": "MAX(ml.value)", // semantic alias when not grouping; same SQL shape
+	"max": "MAX(ml.value)",
+	"min": "MIN(ml.value)",
+	"avg": "AVG(ml.value)",
 }
 
 var allowedLifecycle = map[string]string{
@@ -120,7 +134,7 @@ func (q *AnalyticsQuery) Validate() error {
 		return fmt.Errorf("metric name too long")
 	}
 	if _, ok := allowedAggs[q.Agg]; !ok {
-		return fmt.Errorf("agg must be one of max, min, avg, last")
+		return fmt.Errorf("agg must be one of max, min, avg")
 	}
 	if q.GroupBy != "" && q.GroupBy != "experiment_id" && q.GroupBy != "status" {
 		// Must be params.<key> or tags.<key>
@@ -212,7 +226,9 @@ func (s *SQLiteStore) AnalyticsQuery(ctx context.Context, q AnalyticsQuery) (*An
 
 	rows, err := s.db.QueryContext(ctx, sqlText, args...)
 	if err != nil {
-		return nil, fmt.Errorf("analytics query: %w (sql=%s)", err, sqlText)
+		// Don't leak the SQL into the API-visible error. The dev override
+		// emits it to stderr above when LITEMLFLOW_DEBUG_ANALYTICS=1.
+		return nil, fmt.Errorf("analytics query: %w", err)
 	}
 	defer rows.Close()
 
@@ -228,8 +244,12 @@ func (s *SQLiteStore) AnalyticsQuery(ctx context.Context, q AnalyticsQuery) (*An
 			continue
 		}
 		r.AggValue = aggVal.Float64
+		// Distinguish NULL group (no params/tags row) from empty-string group
+		// so resolveBestRuns can pick the right SQL clause.
 		if grp.Valid {
 			r.Group = grp.String
+		} else {
+			r.groupIsNull = true
 		}
 		res.TotalRunsScanned += r.RunCount
 		res.Rows = append(res.Rows, r)
@@ -314,20 +334,26 @@ func (s *SQLiteStore) resolveBestRuns(ctx context.Context, q AnalyticsQuery, row
 		}
 		switch {
 		case q.GroupBy == "experiment_id":
+			// Bind as INTEGER (the SELECT casts to TEXT only for return-side
+			// uniformity). A non-numeric Group means no rows in any case.
+			id, perr := strconv.ParseInt(row.Group, 10, 64)
+			if perr != nil {
+				continue
+			}
 			sb.WriteString("  AND r.experiment_id = ?\n")
-			args = append(args, row.Group)
+			args = append(args, id)
 		case q.GroupBy == "status":
 			sb.WriteString("  AND r.status = ?\n")
 			args = append(args, row.Group)
 		case strings.HasPrefix(q.GroupBy, "params."):
-			if row.Group == "" {
+			if row.groupIsNull {
 				sb.WriteString("  AND p.value IS NULL\n")
 			} else {
 				sb.WriteString("  AND p.value = ?\n")
 				args = append(args, row.Group)
 			}
 		case strings.HasPrefix(q.GroupBy, "tags."):
-			if row.Group == "" {
+			if row.groupIsNull {
 				sb.WriteString("  AND t.value IS NULL\n")
 			} else {
 				sb.WriteString("  AND t.value = ?\n")

@@ -3351,7 +3351,6 @@ c.create_prompt("rag.system", "You are a helpful assistant.", description="seed 
               <option value="max"${query.agg === "max" ? " selected" : ""}>max</option>
               <option value="min"${query.agg === "min" ? " selected" : ""}>min</option>
               <option value="avg"${query.agg === "avg" ? " selected" : ""}>avg</option>
-              <option value="last"${query.agg === "last" ? " selected" : ""}>last</option>
             </select>
           </label>
           <label class="aq-field">
