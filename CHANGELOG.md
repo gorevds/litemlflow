@@ -2,6 +2,44 @@
 
 All notable changes to LiteMLflow are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/) starting at v1.0.
 
+## [v0.4.0-rc1] — 2026-05-08
+
+The Q4 "Polish & distribution" release. See [docs/roadmap-y1.md](docs/roadmap-y1.md).
+
+### Added
+
+- **Distribution artifacts under `dist/`**: Homebrew formula, Debian package source tree, RPM spec, Snap manifest, Helm chart with StatefulSet + PersistentVolumeClaim + ServiceMonitor + ingress. `make dist-helm-lint`, `make dist-deb`, `make dist-rpm` targets glue them to local CI. Documented in `dist/README.md` and `docs/quickstart.md` "Install via package manager".
+- **UI v2 polish**: keyboard shortcuts (`?` for help, `j/k` to navigate lists, `g e/p/h` for global jumps, `Enter` to open, `Esc` to dismiss, `cmd+K`/`ctrl+K` for command palette, `/` to focus search). Command palette with debounced experiment search. Real prompts page with version history and side-by-side diff. Runs-list bulk-select with Compare / Delete / Export JSON. Embed mode (`?embed=1`) for iframe integration. Workspace selector dropdown in the header.
+- **LlamaIndex auto-instrumentation**: `pip install 'litemlflow[llamaindex]'` and `LiteMLflowEventHandler` records query/retrieval/synthesis/LLM/chat/embed events as spans. Shares the pricing table with the LangChain handler via `litemlflow._pricing`. Stack-based parent tracking matches LlamaIndex's depth-first event order.
+- **Comparative MLflow benchmark** at `docs/bench-v04.md` with raw JSON in `bench-v04.json`. Headline: **143× faster cold start, 15× faster log_metric p50, 3.1× faster log_batch throughput** vs MLflow + SQLite. Where MLflow wins (raw sequential metric scans), reported honestly.
+- **Demo seeder** at `scripts/demo/seed.py` populates a live instance with realistic content: 3 experiments, 12 runs with traces, 8 prompt versions across 4 names with 4 aliases, 1 eval run.
+
+### Fixed (independent review pass)
+
+- `.gitignore`: rules `/dist/` and `dist/` (Python build) over-matched our distribution-artifacts directory `dist/`. Replaced with scoped `python/dist/` so `dist/{homebrew,debian,rpm,snap,helm}/` are tracked.
+- `LiteMLflowEventHandler`: unrecognized event class names now log a warning (one per class name per handler instance) instead of silently dropping spans. Helps detect llama-index-core upgrades that rename events.
+- `docs/bench-v04.md`: incorrectly described LiteMLflow's store as "bbolt"; corrected to SQLite (modernc.org/sqlite, pure Go).
+
+### Stats
+
+- Go LOC (non-test): 11,129 (unchanged — v0.4 is mostly distribution + UI + Python)
+- Go test files: 18 — all green with `-race`
+- Python LOC: ~2,500 (+~820 vs v0.3 — LlamaIndex handler + tests + bench harness extensions)
+- UI bundle: 59.6 KB (CSS + JS, +40 KB vs v0.3)
+- Markdown docs: 2,470 (+341 vs v0.3 — bench doc, dist/README, roadmap updates, cookbook recipes for shortcuts/LlamaIndex)
+- 31/31 MLflow compat checks pass against live `https://lmf.gorev.space`
+- 35 Python tests pass (LlamaIndex live tests skip when llama-index-core absent)
+
+### Deferred to v1.0 / post-Y1
+
+- Kubernetes operator (CRD + reconciler) — Helm chart covers the common case; operator would manage many instances
+- Terraform provider — relies on a stable HTTP-only management API
+- External pen test
+- Public docs site (Astro/Starlight at docs.litemlflow.dev)
+- Multipart S3 upload (still single PUT)
+- gRPC OTLP receiver
+- OIDC nonce was already added in v0.3; remaining auth work is RBAC for non-default workspaces (already enforced) and admin UI for member management
+
 ## [v0.3.0-rc1] — 2026-05-08
 
 The Q3 "Scale & ergonomics" release. See [docs/roadmap-y1.md](docs/roadmap-y1.md).
