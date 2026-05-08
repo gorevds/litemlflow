@@ -44,6 +44,10 @@ type Stats struct {
 	Params      int
 	Tags        int
 	Artifacts   int
+	// Skipped counts runs the importer chose not to (re-)import: either
+	// they were already present in the target store (idempotent re-run) or
+	// the import of that single run failed and we logged-and-continued.
+	Skipped     int
 	Elapsed     time.Duration
 }
 
@@ -143,9 +147,31 @@ func (m *MLflowImporter) Run(ctx context.Context) (Stats, error) {
 				stats.Runs++
 				continue
 			}
+			// Per-run idempotency: a parallel-running second importer might
+			// race the checkpoint file and double-import. Defend by checking
+			// the target store directly. ErrNotFound (= not yet imported) is
+			// the only path that proceeds; any other error from the lookup is
+			// surfaced.
+			if !m.DryRun {
+				if _, err := m.Store.GetRun(ctx, run.Info.RunID); err == nil {
+					// Already in target store — treat as imported, advance.
+					stats.Runs++
+					m.imported[run.Info.RunID] = true
+					continue
+				} else if !errors.Is(err, store.ErrNotFound) {
+					fmt.Fprintf(os.Stderr, "[import] warn: lookup run %s: %v (skipping)\n", run.Info.RunID, err)
+					stats.Skipped++
+					continue
+				}
+			}
 			rs, err := m.importRun(ctx, localExpID, run)
 			if err != nil {
-				return stats, fmt.Errorf("import run %s: %w", run.Info.RunID, err)
+				// Skip-with-log: a single failed run must not abort the whole
+				// import. Operators can re-run with the checkpoint intact and
+				// only the failed runs will be re-tried.
+				fmt.Fprintf(os.Stderr, "[import] error: import run %s: %v (skipping)\n", run.Info.RunID, err)
+				stats.Skipped++
+				continue
 			}
 			stats.Runs += rs.Runs
 			stats.Metrics += rs.Metrics

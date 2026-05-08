@@ -21,6 +21,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -297,7 +298,12 @@ func (p *Provider) Exchange(ctx context.Context, code, codeVerifier, expectedNon
 		slog.Warn("oidc: nonce not present in PKCE state cookie; skipping nonce check (in-flight upgrade?)")
 	} else {
 		gotNonce, _ := claims["nonce"].(string)
-		if gotNonce != expectedNonce {
+		// Constant-time comparison: while nonces aren't long-lived secrets,
+		// a timing-leaky compare lets an attacker probe nonce prefixes by
+		// measuring callback latency. subtle.ConstantTimeCompare returns 1
+		// only on exact equal-length match, so we ignore length-mismatch
+		// timing too.
+		if subtle.ConstantTimeCompare([]byte(gotNonce), []byte(expectedNonce)) != 1 {
 			return "", nil, ErrNonceMismatch
 		}
 	}
