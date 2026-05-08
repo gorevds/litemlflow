@@ -160,7 +160,7 @@ func TestMetricsParamsTags(t *testing.T) {
 			t.Fatalf("log metric: %v", err)
 		}
 	}
-	hist, err := s.GetMetricHistory(ctx, r.ID, "loss")
+	hist, _, err := s.GetMetricHistory(ctx, r.ID, "loss", store.MetricHistoryOptions{})
 	if err != nil {
 		t.Fatalf("history: %v", err)
 	}
@@ -367,7 +367,7 @@ func TestConcurrentWrites(t *testing.T) {
 	}
 	wg.Wait()
 
-	hist, _ := s.GetMetricHistory(ctx, r.ID, "loss")
+	hist, _, _ := s.GetMetricHistory(ctx, r.ID, "loss", store.MetricHistoryOptions{})
 	if len(hist) != writers*each {
 		t.Fatalf("want %d metrics, got %d", writers*each, len(hist))
 	}

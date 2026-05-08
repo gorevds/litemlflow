@@ -37,6 +37,13 @@ type SearchResult[T any] struct {
 	NextPageToken string
 }
 
+// MetricHistoryOptions controls the get-history endpoint.
+// MaxResults=0 means return all points.
+type MetricHistoryOptions struct {
+	MaxResults int
+	PageToken  string // opaque: "timestamp:step" encoded as base64
+}
+
 // Store is the persistence interface.
 type Store interface {
 	// Lifecycle.
@@ -67,10 +74,14 @@ type Store interface {
 	SetTag(ctx context.Context, runID string, t model.KV) error
 	SetTags(ctx context.Context, runID string, ts []model.KV) error
 	DeleteTag(ctx context.Context, runID, key string) error
-	GetMetricHistory(ctx context.Context, runID, key string) ([]model.Metric, error)
+	GetMetricHistory(ctx context.Context, runID, key string, opt MetricHistoryOptions) ([]model.Metric, string, error)
 	GetParams(ctx context.Context, runID string) ([]model.Param, error)
 	GetTags(ctx context.Context, runID string) ([]model.KV, error)
 	GetLatestMetrics(ctx context.Context, runID string) ([]model.Metric, error)
+
+	// Datasets / log_inputs.
+	LogInputs(ctx context.Context, runID string, inputs []model.DatasetInput) error
+	GetRunDatasets(ctx context.Context, runID string) ([]model.DatasetInput, error)
 
 	// Traces.
 	InsertSpans(ctx context.Context, spans []model.Span) error

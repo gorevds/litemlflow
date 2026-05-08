@@ -163,6 +163,159 @@ def _run_compat(url: str) -> None:
     print("\nAll MLflow compat checks passed.")
 
 
+def _run_extended_compat(url: str) -> None:
+    """Extended MLflow compat checks covering new features. Raises on failure."""
+    import mlflow
+    from mlflow.tracking import MlflowClient
+    from mlflow.entities import Dataset, DatasetInput, InputTag, Metric, Param, RunTag
+
+    mlflow.set_tracking_uri(url)
+    client = MlflowClient(tracking_uri=url)
+
+    # ---- 1. set_experiment auto-create flow ----
+    exp_name = f"set-exp-test-{int(time.time() * 1000)}"
+    # First set: experiment doesn't exist => create.
+    exp1 = mlflow.set_experiment(exp_name)
+    assert exp1 is not None, "set_experiment should return an Experiment"
+    # Second set: experiment exists => just return it (no error).
+    exp2 = mlflow.set_experiment(exp_name)
+    assert exp2.experiment_id == exp1.experiment_id, "re-set should return same experiment"
+    eid = exp1.experiment_id
+    print(f"[ok]  set_experiment auto-create flow -> eid={eid}")
+
+    # ---- 2. Run-name non-uniqueness ----
+    r1 = client.create_run(eid, run_name="shared-name")
+    r2 = client.create_run(eid, run_name="shared-name")
+    assert r1.info.run_id != r2.info.run_id, "run IDs must differ"
+    found = client.search_runs([str(eid)], filter_string="attributes.run_name = 'shared-name'")
+    assert len(found) == 2, f"both runs with same name should be found, got {len(found)}"
+    print(f"[ok]  two runs with same name in same experiment -> both found")
+
+    # ---- 3. log_inputs (datasets) ----
+    run_with_ds = client.create_run(eid, run_name="dataset-run")
+    ds_run_id = run_with_ds.info.run_id
+    client.log_inputs(
+        run_id=ds_run_id,
+        datasets=[
+            DatasetInput(
+                dataset=Dataset(
+                    name="wikipedia-2024-q1",
+                    digest="abc123",
+                    source_type="http",
+                    source="https://example.com/wiki",
+                    schema='{"columns":["text","label"]}',
+                    profile='{"num_rows":50000}',
+                ),
+                tags=[InputTag(key="split", value="train")],
+            )
+        ],
+    )
+    # Verify get_run returns the dataset in inputs.
+    run_data = client.get_run(ds_run_id)
+    inputs = run_data.inputs
+    assert inputs is not None, "run.inputs should not be None after log_inputs"
+    ds_inputs = inputs.dataset_inputs
+    assert len(ds_inputs) == 1, f"expected 1 dataset input, got {len(ds_inputs)}"
+    di = ds_inputs[0]
+    assert di.dataset.name == "wikipedia-2024-q1", f"unexpected name: {di.dataset.name}"
+    assert di.dataset.digest == "abc123", f"unexpected digest: {di.dataset.digest}"
+    assert di.dataset.source_type == "http", f"unexpected source_type: {di.dataset.source_type}"
+    assert len(di.tags) == 1 and di.tags[0].key == "split" and di.tags[0].value == "train"
+    print(f"[ok]  log_inputs + get_run includes dataset (name={di.dataset.name})")
+
+    # ---- 4. search_runs with attributes.run_id IN (...) ----
+    search_exp_name = f"search-in-{int(time.time() * 1000)}"
+    search_exp = mlflow.set_experiment(search_exp_name)
+    s_eid = search_exp.experiment_id
+    s_r1 = client.create_run(s_eid)
+    s_r2 = client.create_run(s_eid)
+    s_r3 = client.create_run(s_eid)  # not in the filter
+    filter_str = f"attributes.run_id IN ('{s_r1.info.run_id}','{s_r2.info.run_id}')"
+    found = client.search_runs([str(s_eid)], filter_string=filter_str)
+    assert len(found) == 2, f"IN filter should return 2 runs, got {len(found)}"
+    found_ids = {r.info.run_id for r in found}
+    assert s_r1.info.run_id in found_ids and s_r2.info.run_id in found_ids
+    assert s_r3.info.run_id not in found_ids
+    print(f"[ok]  search_runs with attributes.run_id IN (...) -> {len(found)} runs")
+
+    # ---- 5. get-history pagination via raw HTTP ----
+    hist_run = client.create_run(eid, run_name="hist-pag")
+    hist_run_id = hist_run.info.run_id
+    now = int(time.time() * 1000)
+    client.log_batch(
+        hist_run_id,
+        metrics=[Metric("pag_loss", float(i), now + i, i) for i in range(25)],
+    )
+    # Raw HTTP call with max_results=10.
+    resp = requests.get(
+        url + "/api/2.0/mlflow/metrics/get-history",
+        params={"run_id": hist_run_id, "metric_key": "pag_loss", "max_results": 10},
+    )
+    assert resp.status_code == 200, f"get-history failed: {resp.text}"
+    body = resp.json()
+    assert "metrics" in body, f"missing 'metrics' key: {body}"
+    assert len(body["metrics"]) == 10, f"expected 10 metrics, got {len(body['metrics'])}"
+    assert "next_page_token" in body and body["next_page_token"], "expected next_page_token"
+    page_token = body["next_page_token"]
+
+    # Fetch next page.
+    resp2 = requests.get(
+        url + "/api/2.0/mlflow/metrics/get-history",
+        params={"run_id": hist_run_id, "metric_key": "pag_loss", "max_results": 10, "page_token": page_token},
+    )
+    assert resp2.status_code == 200, f"page2 failed: {resp2.text}"
+    body2 = resp2.json()
+    assert len(body2["metrics"]) == 10, f"expected 10 metrics on page2, got {len(body2['metrics'])}"
+    print(f"[ok]  get-history pagination (25 points, 10/page => token={page_token!r})")
+
+    # ---- 6. log_batch exactly 1000 metrics (boundary) ----
+    batch_run = client.create_run(eid, run_name="batch-1000")
+    batch_run_id = batch_run.info.run_id
+    now2 = int(time.time() * 1000)
+    client.log_batch(
+        batch_run_id,
+        metrics=[Metric("x", float(i), now2 + i, i) for i in range(1000)],
+    )
+    hist = client.get_metric_history(batch_run_id, "x")
+    assert len(hist) == 1000, f"expected 1000 metrics after batch, got {len(hist)}"
+    print(f"[ok]  log_batch with exactly 1000 metrics succeeds (len={len(hist)})")
+
+    # ---- 7. log_batch with 1001 metrics must fail ----
+    batch_run_fail = client.create_run(eid, run_name="batch-1001")
+    batch_run_fail_id = batch_run_fail.info.run_id
+    resp_fail = requests.post(
+        url + "/api/2.0/mlflow/runs/log-batch",
+        json={
+            "run_id": batch_run_fail_id,
+            "metrics": [
+                {"key": "y", "value": float(i), "timestamp": now2 + i, "step": i}
+                for i in range(1001)
+            ],
+        },
+    )
+    assert resp_fail.status_code == 400, f"1001 metrics should fail with 400, got {resp_fail.status_code}"
+    err_body = resp_fail.json()
+    assert err_body.get("error_code") == "INVALID_PARAMETER_VALUE", f"wrong error_code: {err_body}"
+    print(f"[ok]  log_batch with 1001 metrics fails with INVALID_PARAMETER_VALUE")
+
+    # ---- 8. search-experiments view_type via query string ----
+    vt_exp_name = f"viewtype-del-{int(time.time() * 1000)}"
+    vt_eid = client.create_experiment(vt_exp_name)
+    client.delete_experiment(vt_eid)
+    # Query string: view_type=DELETED_ONLY should return the deleted experiment.
+    resp_vt = requests.get(
+        url + "/api/2.0/mlflow/experiments/search",
+        params={"view_type": "DELETED_ONLY", "max_results": 50},
+    )
+    assert resp_vt.status_code == 200, f"search deleted: {resp_vt.text}"
+    vt_body = resp_vt.json()
+    deleted_ids = {e["experiment_id"] for e in vt_body.get("experiments", [])}
+    assert str(vt_eid) in deleted_ids, f"deleted experiment {vt_eid} not found in DELETED_ONLY results"
+    print(f"[ok]  search-experiments?view_type=DELETED_ONLY returns deleted experiment")
+
+    print("\nAll extended MLflow compat checks passed.")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--keep", action="store_true", help="keep server running after test")
@@ -182,6 +335,7 @@ def main() -> int:
             url = "https://" + args.addr
         try:
             _run_compat(url)
+            _run_extended_compat(url)
         except Exception as exc:
             print(f"\n[FAIL] {exc}", file=sys.stderr)
             return 1
@@ -194,6 +348,7 @@ def main() -> int:
         url = f"http://127.0.0.1:{port}"
         try:
             _run_compat(url)
+            _run_extended_compat(url)
         except Exception as exc:
             print(f"\n[FAIL] {exc}", file=sys.stderr)
             return 1
