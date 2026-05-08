@@ -1,0 +1,48 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: litemlflow-operator-manager-role
+  labels:
+    app.kubernetes.io/name: litemlflow-operator
+rules:
+  # LiteMLflow CRD
+  - apiGroups: [litemlflow.dev]
+    resources: [litemlflows]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [litemlflow.dev]
+    resources: [litemlflows/status]
+    verbs: [get, update, patch]
+  - apiGroups: [litemlflow.dev]
+    resources: [litemlflows/finalizers]
+    verbs: [update]
+
+  # StatefulSets
+  - apiGroups: [apps]
+    resources: [statefulsets]
+    verbs: [get, list, watch, create, update, patch, delete]
+
+  # Services
+  - apiGroups: [""]
+    resources: [services]
+    verbs: [get, list, watch, create, update, patch, delete]
+
+  # PVCs (for status reads; VolumeClaimTemplates are created by the StatefulSet controller)
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [get, list, watch, create, update, patch, delete]
+
+  # Secrets (read-only — for validation)
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch]
+
+  # Events (for recording reconcile events)
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+
+  # Leader election
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]

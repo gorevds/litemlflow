@@ -497,15 +497,18 @@
       const bar = $("#bulk-action-bar");
       if (bar) bar.remove();
 
-      const expMatch   = hash.match(/^\/experiments\/(\d+)$/);
-      const runMatch   = hash.match(/^\/experiments\/(\d+)\/runs\/([0-9a-f]+)$/);
-      const cmpMatch   = hash.match(/^\/experiments\/(\d+)\/compare/);
-      const promptMatch = hash.match(/^\/prompts\/(.+)$/);
+      const expMatch      = hash.match(/^\/experiments\/(\d+)$/);
+      const runMatch      = hash.match(/^\/experiments\/(\d+)\/runs\/([0-9a-f]+)$/);
+      const cmpMatch      = hash.match(/^\/experiments\/(\d+)\/compare/);
+      const promptMatch   = hash.match(/^\/prompts\/(.+)$/);
+      const wsMembersMatch = hash.match(/^\/workspaces\/([^/]+)\/members$/);
 
-      if (runMatch)   return this.renderRun(parseInt(runMatch[1], 10), runMatch[2]);
-      if (cmpMatch)   return this.renderCompare(parseInt(cmpMatch[1], 10));
-      if (expMatch)   return this.renderExperiment(parseInt(expMatch[1], 10));
-      if (promptMatch) return this.renderPromptDetail(promptMatch[1]);
+      if (runMatch)        return this.renderRun(parseInt(runMatch[1], 10), runMatch[2]);
+      if (cmpMatch)        return this.renderCompare(parseInt(cmpMatch[1], 10));
+      if (expMatch)        return this.renderExperiment(parseInt(expMatch[1], 10));
+      if (promptMatch)     return this.renderPromptDetail(promptMatch[1]);
+      if (wsMembersMatch)  return this.renderWorkspaceMembers(wsMembersMatch[1]);
+      if (hash.startsWith("/workspaces")) return this.renderWorkspaces();
       if (hash.startsWith("/prompts")) return this.renderPrompts();
       if (hash.startsWith("/about"))   return this.renderAbout();
       return this.renderExperiments();
@@ -1063,6 +1066,193 @@ mlflow.log_metric("loss", 0.42)</pre>
       } catch (err) {
         main.innerHTML = `<div class="empty">Failed to load prompt: ${escapeHTML(String(err))}</div>`;
       }
+    },
+
+    // ── Workspaces list ──────────────────────────────────────────────────────
+    async renderWorkspaces() {
+      const main = $("#app");
+      try {
+        const data = await fetchJSON("/api/v1/workspaces");
+        const workspaces = data.workspaces || [];
+
+        const rows = workspaces.map((ws, i) => `
+          <tr data-row-index="${i}">
+            <td class="mono">${escapeHTML(ws.id)}</td>
+            <td>${escapeHTML(ws.name || ws.id)}</td>
+            <td>${escapeHTML(ws.description || "—")}</td>
+            <td>${formatTime(ws.created_at || ws.creation_time)}</td>
+            <td>
+              <a href="#/workspaces/${encodeURIComponent(ws.id)}/members" class="btn-link">Manage members</a>
+            </td>
+          </tr>`).join("");
+
+        main.innerHTML = `
+          <div class="toolbar">
+            <h1 style="margin:0">Workspaces</h1>
+          </div>
+          <div class="card" style="padding:0">
+            <table>
+              <thead>
+                <tr><th>ID</th><th>Name</th><th>Description</th><th>Created</th><th>Actions</th></tr>
+              </thead>
+              <tbody>${rows || `<tr><td colspan="5" class="empty">No workspaces found.</td></tr>`}</tbody>
+            </table>
+          </div>`;
+      } catch (err) {
+        main.innerHTML = `<div class="empty">Failed to load workspaces: ${escapeHTML(String(err))}</div>`;
+      }
+    },
+
+    // ── Workspace members ────────────────────────────────────────────────────
+    async renderWorkspaceMembers(wsID) {
+      const main = $("#app");
+      try {
+        const [wsData, membersData] = await Promise.all([
+          fetchJSON(`/api/v1/workspaces/${encodeURIComponent(wsID)}`),
+          fetchJSON(`/api/v1/workspaces/${encodeURIComponent(wsID)}/members`),
+        ]);
+        const ws = wsData;
+        const members = membersData.members || [];
+        this._renderWorkspaceMembersPage(main, wsID, ws, members);
+      } catch (err) {
+        const status = String(err);
+        if (status.includes("403")) {
+          main.innerHTML = `
+            <div class="crumbs"><a href="#/workspaces">Workspaces</a> / ${escapeHTML(wsID)} / Members</div>
+            <div class="empty card" style="margin-top:24px">
+              You must be an <strong>admin</strong> of workspace
+              <code>${escapeHTML(wsID)}</code> to manage its members.
+            </div>`;
+          return;
+        }
+        main.innerHTML = `<div class="empty">Failed to load: ${escapeHTML(status)}</div>`;
+      }
+    },
+
+    _renderWorkspaceMembersPage(main, wsID, ws, members) {
+      const roles = ["viewer", "editor", "admin"];
+
+      const memberRows = members.map(m => `
+        <tr data-member-id="${escapeHTML(m.user_id)}">
+          <td class="mono">${escapeHTML(m.user_id)}</td>
+          <td>
+            <select class="member-role-select" data-user-id="${escapeHTML(m.user_id)}">
+              ${roles.map(r => `<option value="${r}"${r === m.role ? " selected" : ""}>${r}</option>`).join("")}
+            </select>
+          </td>
+          <td>
+            <button class="member-remove-btn btn-danger" data-user-id="${escapeHTML(m.user_id)}">Remove</button>
+          </td>
+        </tr>`).join("");
+
+      main.innerHTML = `
+        <div class="crumbs"><a href="#/workspaces">Workspaces</a> / ${escapeHTML(wsID)} / Members</div>
+        <h1>${escapeHTML(ws.name || wsID)} — Members</h1>
+        ${ws.description ? `<p style="color:var(--fg-muted);margin:-8px 0 16px">${escapeHTML(ws.description)}</p>` : ""}
+
+        <div class="card" style="padding:0;margin-bottom:20px">
+          <table>
+            <thead><tr><th>User ID</th><th>Role</th><th>Actions</th></tr></thead>
+            <tbody id="members-tbody">
+              ${memberRows || `<tr><td colspan="3" class="empty">No members yet.</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+
+        <div class="card" style="margin-bottom:20px">
+          <h2 style="margin-top:0">Add member</h2>
+          <div class="toolbar" style="flex-wrap:wrap;gap:8px">
+            <input type="text" id="new-user-id" placeholder="User ID…" style="flex:1;min-width:140px" />
+            <select id="new-user-role" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-card);color:var(--fg);font:inherit">
+              ${roles.map(r => `<option value="${r}">${r}</option>`).join("")}
+            </select>
+            <button id="add-member-btn">+ Add member</button>
+          </div>
+          <div id="member-msg" style="margin-top:8px;font-size:13px"></div>
+        </div>`;
+
+      // Wire role-change dropdowns
+      $$(".member-role-select", main).forEach(sel => {
+        sel.addEventListener("change", async () => {
+          const userID = sel.dataset.userId;
+          const role = sel.value;
+          try {
+            await fetchJSON(`/api/v1/workspaces/${encodeURIComponent(wsID)}/members/${encodeURIComponent(userID)}`, {
+              method: "PUT",
+              body: JSON.stringify({ role }),
+            });
+          } catch (err) {
+            alert(`Failed to update role: ${err}`);
+            // Reload to restore correct state
+            this.renderWorkspaceMembers(wsID);
+          }
+        });
+      });
+
+      // Wire remove buttons
+      $$(".member-remove-btn", main).forEach(btn => {
+        btn.addEventListener("click", async () => {
+          const userID = btn.dataset.userId;
+          if (!confirm(`Remove ${userID} from workspace ${wsID}?`)) return;
+          try {
+            await fetch(
+              `/api/v1/workspaces/${encodeURIComponent(wsID)}/members/${encodeURIComponent(userID)}`,
+              {
+                method: "DELETE",
+                headers: Object.assign({ "Content-Type": "application/json" }, Workspace.header()),
+              }
+            );
+            // Remove row optimistically
+            const row = main.querySelector(`tr[data-member-id="${CSS.escape(userID)}"]`);
+            if (row) row.remove();
+            // If tbody is now empty, show placeholder
+            const tbody = $("#members-tbody");
+            if (tbody && !tbody.querySelector("tr[data-member-id]")) {
+              tbody.innerHTML = `<tr><td colspan="3" class="empty">No members yet.</td></tr>`;
+            }
+          } catch (err) {
+            alert(`Failed to remove member: ${err}`);
+          }
+        });
+      });
+
+      // Wire add-member form
+      const addBtn = $("#add-member-btn");
+      const msg = $("#member-msg");
+
+      const doAdd = async () => {
+        const userInput = $("#new-user-id");
+        const roleSelect = $("#new-user-role");
+        const userID = userInput.value.trim();
+        const role = roleSelect.value;
+        msg.textContent = "";
+        if (!userID) {
+          msg.style.color = "var(--error)";
+          msg.textContent = "User ID is required.";
+          return;
+        }
+        try {
+          await fetchJSON(`/api/v1/workspaces/${encodeURIComponent(wsID)}/members/${encodeURIComponent(userID)}`, {
+            method: "PUT",
+            body: JSON.stringify({ role }),
+          });
+          msg.style.color = "var(--success)";
+          msg.textContent = `Added ${userID} as ${role}.`;
+          userInput.value = "";
+          // Reload page to show new member in table
+          this.renderWorkspaceMembers(wsID);
+        } catch (err) {
+          msg.style.color = "var(--error)";
+          if (String(err).includes("403")) {
+            msg.textContent = "You must be admin to add members.";
+          } else {
+            msg.textContent = `Failed: ${err}`;
+          }
+        }
+      };
+
+      addBtn.addEventListener("click", doAdd);
+      $("#new-user-id").addEventListener("keydown", e => { if (e.key === "Enter") doAdd(); });
     },
 
     // ── About ────────────────────────────────────────────────────────────────

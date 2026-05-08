@@ -9,7 +9,7 @@ LDFLAGS    := -X github.com/litemlflow/litemlflow/pkg/version.Version=$(shell gi
               -X github.com/litemlflow/litemlflow/pkg/version.Commit=$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown) \
               -X github.com/litemlflow/litemlflow/pkg/version.Date=$(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
-.PHONY: help build run dev test test-go test-py test-integration lint fmt vet clean docker compat-test py-install py-build dist-helm-lint dist-helm-template dist-deb dist-rpm
+.PHONY: help build run dev test test-go test-py test-integration lint fmt vet clean docker compat-test py-install py-build dist-helm-lint dist-helm-template dist-deb dist-rpm operator-build operator-test
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -81,6 +81,13 @@ dist-deb: build ## Build a .deb package from the local binary (requires dpkg-bui
 	@rm -f litemlflow
 	@rm -rf debian
 	@echo "Done — .deb is in the parent directory."
+
+operator-build: ## Build the LiteMLflow operator binary (→ bin/litemlflow-operator)
+	@mkdir -p $(BIN_DIR)
+	cd operator && $(GO) build -o ../$(BIN_DIR)/litemlflow-operator ./
+
+operator-test: ## Run operator unit tests (pure, no cluster required)
+	cd operator && $(GO) test ./...
 
 dist-rpm: build ## Build an .rpm package from the local binary (requires rpmbuild)
 	@mkdir -p ~/rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
