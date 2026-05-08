@@ -11,8 +11,456 @@
   const $ = (sel, parent = document) => parent.querySelector(sel);
   const $$ = (sel, parent = document) => Array.from(parent.querySelectorAll(sel));
 
+  // ─── Embed mode ─────────────────────────────────────────────────────────────
+  if (new URLSearchParams(location.search).get("embed") === "1") {
+    document.body.setAttribute("data-embed", "1");
+  }
+
+  // ─── Bulk-select state (survives re-renders) ─────────────────────────────────
+  const BulkSelect = {
+    _checked: new Set(), // run_id strings
+    _expID: null,
+
+    reset(expID) {
+      if (this._expID !== expID) {
+        this._checked.clear();
+        this._expID = expID;
+      }
+    },
+
+    toggle(id) {
+      if (this._checked.has(id)) this._checked.delete(id);
+      else this._checked.add(id);
+    },
+
+    has(id) { return this._checked.has(id); },
+    list()  { return Array.from(this._checked); },
+    size()  { return this._checked.size; },
+    clear() { this._checked.clear(); },
+  };
+
+  // ─── Workspace ───────────────────────────────────────────────────────────────
+  const Workspace = {
+    _current: getCookie("lmf_workspace") || "default",
+
+    get() { return this._current; },
+
+    set(ws) {
+      this._current = ws;
+      setCookie("lmf_workspace", ws, 365);
+    },
+
+    header() {
+      return this._current && this._current !== "default"
+        ? { "X-Workspace": this._current }
+        : {};
+    },
+  };
+
+  // ─── Utilities ───────────────────────────────────────────────────────────────
+  function getCookie(name) {
+    const m = document.cookie.match(new RegExp("(?:^|; )" + name + "=([^;]*)"));
+    return m ? decodeURIComponent(m[1]) : "";
+  }
+
+  function setCookie(name, value, days) {
+    const d = new Date();
+    d.setTime(d.getTime() + days * 864e5);
+    document.cookie = `${name}=${encodeURIComponent(value)};expires=${d.toUTCString()};path=/;SameSite=Lax`;
+  }
+
+  function fetchJSON(url, init) {
+    init = init || {};
+    init.headers = Object.assign(
+      { "Content-Type": "application/json" },
+      Workspace.header(),
+      init.headers || {}
+    );
+    return fetch(url, init).then(r => {
+      if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+      return r.json();
+    });
+  }
+
+  function escapeHTML(s) {
+    return String(s).replace(/[&<>"']/g, ch => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+    })[ch]);
+  }
+
+  function formatTime(ms) {
+    if (!ms) return "—";
+    const d = new Date(ms);
+    return d.toISOString().replace("T", " ").slice(0, 19);
+  }
+
+  function formatDuration(ms) {
+    if (!ms) return "—";
+    if (ms < 1000) return ms + "ms";
+    const s = ms / 1000;
+    if (s < 60) return s.toFixed(1) + "s";
+    const m = Math.floor(s / 60), rs = s % 60;
+    return m + "m " + rs.toFixed(0) + "s";
+  }
+
+  function formatNS(ns) {
+    if (ns < 1000) return ns + "ns";
+    if (ns < 1e6) return (ns / 1000).toFixed(1) + "µs";
+    if (ns < 1e9) return (ns / 1e6).toFixed(1) + "ms";
+    return (ns / 1e9).toFixed(2) + "s";
+  }
+
+  function debounce(fn, ms) {
+    let t;
+    return function (...args) {
+      clearTimeout(t);
+      t = setTimeout(() => fn.apply(this, args), ms);
+    };
+  }
+
+  // ─── Chart ───────────────────────────────────────────────────────────────────
+  function simpleChart(key, points, downsampledFrom) {
+    if (!points.length) return "";
+    const W = 800, H = 200, pad = 30;
+    const vals = points.map(p => p.value);
+    const ts = points.map(p => p.timestamp);
+    const tmin = Math.min(...ts), tmax = Math.max(...ts);
+    const vmin = Math.min(...vals), vmax = Math.max(...vals);
+    const tspan = Math.max(tmax - tmin, 1), vspan = Math.max(vmax - vmin, Math.abs(vmax) || 1);
+    const xy = points.map(p => {
+      const x = pad + ((p.timestamp - tmin) / tspan) * (W - 2 * pad);
+      const y = H - pad - ((p.value - vmin) / vspan) * (H - 2 * pad);
+      return [x, y];
+    });
+    const d = xy.map(([x, y], i) => (i === 0 ? "M" : "L") + x.toFixed(1) + "," + y.toFixed(1)).join("");
+    let dsNote = "";
+    if (downsampledFrom != null && downsampledFrom > points.length) {
+      dsNote = ` <span style="color:var(--fg-muted);font-size:0.85em">(showing ${points.length} of ${downsampledFrom} points, LTTB)</span>`;
+    }
+    return `
+      <div class="card" style="padding:8px 12px">
+        <strong>${escapeHTML(key)}</strong>${dsNote} <span style="color:var(--fg-muted)">(min ${vmin.toPrecision(4)}, max ${vmax.toPrecision(4)})</span>
+        <div class="metric-chart">
+          <svg width="100%" height="100%" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+            <path d="${d}" fill="none" stroke="var(--accent)" stroke-width="1.5" />
+          </svg>
+        </div>
+      </div>`;
+  }
+
+  // ─── Keyboard shortcuts ───────────────────────────────────────────────────────
+  const Shortcuts = {
+    _chordFirst: null,
+    _chordTimer: null,
+
+    _isTyping() {
+      const el = document.activeElement;
+      if (!el) return false;
+      const tag = el.tagName.toLowerCase();
+      return tag === "input" || tag === "textarea" || tag === "select" || el.isContentEditable;
+    },
+
+    init() {
+      document.addEventListener("keydown", e => this._handle(e));
+    },
+
+    _handle(e) {
+      // Ignore modifier-only or when typing (except ctrl/cmd+K which we handle)
+      const mod = e.ctrlKey || e.metaKey;
+      if (mod && e.key === "k") {
+        e.preventDefault();
+        CommandPalette.open();
+        return;
+      }
+      if (this._isTyping()) return;
+
+      const key = e.key;
+
+      // Handle chord second
+      if (this._chordFirst === "g") {
+        clearTimeout(this._chordTimer);
+        this._chordFirst = null;
+        if (key === "e") { location.hash = "#/experiments"; return; }
+        if (key === "p") { location.hash = "#/prompts"; return; }
+        if (key === "h") { location.hash = "#/about"; return; }
+      }
+
+      switch (key) {
+        case "?":
+          e.preventDefault();
+          ShortcutHelp.toggle();
+          break;
+        case "g":
+          this._chordFirst = "g";
+          this._chordTimer = setTimeout(() => { this._chordFirst = null; }, 1000);
+          break;
+        case "Escape":
+          ShortcutHelp.close();
+          CommandPalette.close();
+          this._clearSelection();
+          break;
+        case "j":
+          e.preventDefault();
+          this._moveSelection(1);
+          break;
+        case "k":
+          e.preventDefault();
+          this._moveSelection(-1);
+          break;
+        case "Enter":
+          this._activateSelected();
+          break;
+        case "/":
+          e.preventDefault();
+          this._focusSearch();
+          break;
+      }
+    },
+
+    _getRows() {
+      return $$("[data-row-index]", $("#app"));
+    },
+
+    _selectedIndex() {
+      const sel = $("[data-selected]", $("#app"));
+      if (!sel) return -1;
+      return parseInt(sel.getAttribute("data-row-index"), 10);
+    },
+
+    _moveSelection(delta) {
+      const rows = this._getRows();
+      if (!rows.length) return;
+      let idx = this._selectedIndex();
+      idx = Math.max(0, Math.min(rows.length - 1, idx + delta));
+      rows.forEach(r => r.removeAttribute("data-selected"));
+      const target = rows.find(r => parseInt(r.getAttribute("data-row-index"), 10) === idx);
+      if (target) {
+        target.setAttribute("data-selected", "");
+        target.scrollIntoView({ block: "nearest" });
+      }
+    },
+
+    _activateSelected() {
+      const sel = $("[data-selected]", $("#app"));
+      if (sel) sel.click();
+    },
+
+    _clearSelection() {
+      $$("[data-selected]", $("#app")).forEach(r => r.removeAttribute("data-selected"));
+    },
+
+    _focusSearch() {
+      const inp = $("input[type=search], input[type=text]", $("#app"));
+      if (inp) inp.focus();
+    },
+  };
+
+  // ─── Shortcut help overlay ────────────────────────────────────────────────────
+  const ShortcutHelp = {
+    _el: null,
+
+    _ensure() {
+      if (this._el) return;
+      const el = document.createElement("div");
+      el.className = "shortcut-overlay";
+      el.id = "shortcut-overlay";
+      el.innerHTML = `
+        <div class="shortcut-modal">
+          <div class="shortcut-modal-header">
+            <strong>Keyboard shortcuts</strong>
+            <button class="modal-close" id="shortcut-close">✕</button>
+          </div>
+          <table class="shortcut-table">
+            <tbody>
+              <tr><td><kbd>?</kbd></td><td>Show this help</td></tr>
+              <tr><td><kbd>g</kbd> <kbd>e</kbd></td><td>Go to Experiments</td></tr>
+              <tr><td><kbd>g</kbd> <kbd>p</kbd></td><td>Go to Prompts</td></tr>
+              <tr><td><kbd>g</kbd> <kbd>h</kbd></td><td>Go to About</td></tr>
+              <tr><td><kbd>j</kbd> / <kbd>k</kbd></td><td>Move selection down / up</td></tr>
+              <tr><td><kbd>Enter</kbd></td><td>Open selected row</td></tr>
+              <tr><td><kbd>Esc</kbd></td><td>Close modal / clear selection</td></tr>
+              <tr><td><kbd>⌘K</kbd> / <kbd>Ctrl+K</kbd></td><td>Open command palette</td></tr>
+              <tr><td><kbd>/</kbd></td><td>Focus search</td></tr>
+            </tbody>
+          </table>
+        </div>`;
+      document.body.appendChild(el);
+      this._el = el;
+      el.addEventListener("click", ev => {
+        if (ev.target === el || ev.target.id === "shortcut-close") this.close();
+      });
+    },
+
+    toggle() {
+      this._ensure();
+      this._el.classList.toggle("open");
+    },
+
+    close() {
+      if (this._el) this._el.classList.remove("open");
+    },
+  };
+
+  // ─── Command palette ──────────────────────────────────────────────────────────
+  const CommandPalette = {
+    _el: null,
+    _items: [],
+    _cursor: 0,
+    _debTimer: null,
+
+    _staticCmds: [
+      { label: "Go to: experiments",   action: () => { location.hash = "#/experiments"; } },
+      { label: "Go to: prompts",        action: () => { location.hash = "#/prompts"; } },
+      { label: "Toggle theme",          action: () => { $("#theme-toggle").click(); } },
+      { label: "Open API: /metrics",    action: () => { window.open("/metrics", "_blank"); } },
+      { label: "Open API: /version",    action: () => { window.open("/version", "_blank"); } },
+      { label: "Copy: tracking URI",    action: () => { navigator.clipboard.writeText(location.origin).catch(() => {}); } },
+    ],
+
+    _ensure() {
+      if (this._el) return;
+      const el = document.createElement("div");
+      el.className = "palette-overlay";
+      el.id = "palette-overlay";
+      el.innerHTML = `
+        <div class="palette-modal">
+          <input type="text" id="palette-input" placeholder="Search commands or experiments…" autocomplete="off" />
+          <ul class="palette-list" id="palette-list"></ul>
+        </div>`;
+      document.body.appendChild(el);
+      this._el = el;
+
+      el.addEventListener("click", ev => { if (ev.target === el) this.close(); });
+
+      const input = $("#palette-input");
+      input.addEventListener("keydown", e => {
+        if (e.key === "Escape") { this.close(); return; }
+        if (e.key === "ArrowDown") { e.preventDefault(); this._moveCursor(1); return; }
+        if (e.key === "ArrowUp")   { e.preventDefault(); this._moveCursor(-1); return; }
+        if (e.key === "Enter")     { e.preventDefault(); this._activate(); return; }
+      });
+      input.addEventListener("input", () => {
+        clearTimeout(this._debTimer);
+        this._debTimer = setTimeout(() => this._search(input.value.trim()), 200);
+      });
+    },
+
+    open() {
+      this._ensure();
+      this._el.classList.add("open");
+      const input = $("#palette-input");
+      input.value = "";
+      this._search("");
+      setTimeout(() => input.focus(), 30);
+    },
+
+    close() {
+      if (this._el) this._el.classList.remove("open");
+    },
+
+    async _search(query) {
+      let items = [...this._staticCmds];
+
+      if (query) {
+        // Dynamic: search experiments by name
+        try {
+          const data = await fetchJSON("/api/2.0/mlflow/experiments/search?max_results=1000");
+          const exps = (data.experiments || []).filter(e => e.lifecycle_stage === "active");
+          const ql = query.toLowerCase();
+          const matched = exps
+            .filter(e => e.name.toLowerCase().includes(ql) || e.experiment_id.startsWith(ql))
+            .slice(0, 5)
+            .map(e => ({
+              label: `Search: ${e.name}`,
+              action: () => { location.hash = `#/experiments/${e.experiment_id}`; },
+            }));
+          items = [...matched, ...items];
+        } catch {}
+      }
+
+      // Filter static by query
+      if (query) {
+        const ql = query.toLowerCase();
+        items = items.filter(i => i.label.toLowerCase().includes(ql));
+      }
+
+      this._items = items.slice(0, 10);
+      this._cursor = 0;
+      this._render();
+    },
+
+    _render() {
+      const list = $("#palette-list");
+      if (!list) return;
+      list.innerHTML = this._items.map((item, i) =>
+        `<li class="palette-item${i === this._cursor ? " palette-item--active" : ""}" data-idx="${i}">${escapeHTML(item.label)}</li>`
+      ).join("");
+      $$(".palette-item", list).forEach(li => {
+        li.addEventListener("mouseenter", () => {
+          this._cursor = parseInt(li.dataset.idx, 10);
+          this._render();
+        });
+        li.addEventListener("click", () => {
+          this._cursor = parseInt(li.dataset.idx, 10);
+          this._activate();
+        });
+      });
+    },
+
+    _moveCursor(delta) {
+      if (!this._items.length) return;
+      this._cursor = (this._cursor + delta + this._items.length) % this._items.length;
+      this._render();
+    },
+
+    _activate() {
+      const item = this._items[this._cursor];
+      if (item) { this.close(); item.action(); }
+    },
+  };
+
+  // ─── Workspace selector ───────────────────────────────────────────────────────
+  const WorkspaceSelector = {
+    async init() {
+      let workspaces = [{ id: "default", name: "default" }];
+      try {
+        const data = await fetchJSON("/api/v1/workspaces");
+        if (Array.isArray(data.workspaces) && data.workspaces.length) {
+          workspaces = data.workspaces;
+        }
+      } catch { /* endpoint may not exist yet; graceful fallback */ }
+
+      const cur = Workspace.get();
+      const select = document.createElement("select");
+      select.id = "workspace-select";
+      select.className = "workspace-select";
+      select.title = "Active workspace";
+      select.innerHTML = workspaces.map(ws =>
+        `<option value="${escapeHTML(ws.id)}"${ws.id === cur ? " selected" : ""}>${escapeHTML(ws.name || ws.id)}</option>`
+      ).join("");
+
+      // Fallback: make sure current workspace is represented
+      if (!workspaces.find(ws => ws.id === cur)) {
+        const opt = document.createElement("option");
+        opt.value = cur;
+        opt.textContent = cur;
+        opt.selected = true;
+        select.prepend(opt);
+      }
+
+      select.addEventListener("change", () => {
+        Workspace.set(select.value);
+        App.route(); // re-render with new workspace context
+      });
+
+      $(".actions").prepend(select);
+    },
+  };
+
+  // ─── Main App ─────────────────────────────────────────────────────────────────
   const App = {
     cache: { experiments: null, runs: {}, runData: {} },
+
     init() {
       // Theme
       const stored = localStorage.getItem("litemlflow.theme");
@@ -29,6 +477,12 @@
         $("#version").textContent = v.version || "dev";
       });
 
+      // Workspace selector
+      WorkspaceSelector.init();
+
+      // Keyboard shortcuts
+      Shortcuts.init();
+
       // Hash-based router
       window.addEventListener("hashchange", () => this.route());
       this.route();
@@ -39,24 +493,25 @@
       const main = $("#app");
       main.innerHTML = '<div class="loading">Loading…</div>';
 
-      const expMatch = hash.match(/^\/experiments\/(\d+)$/);
-      const runMatch = hash.match(/^\/experiments\/(\d+)\/runs\/([0-9a-f]+)$/);
+      // Remove stale bulk bar
+      const bar = $("#bulk-action-bar");
+      if (bar) bar.remove();
 
-      if (runMatch) {
-        return this.renderRun(parseInt(runMatch[1], 10), runMatch[2]);
-      }
-      if (expMatch) {
-        return this.renderExperiment(parseInt(expMatch[1], 10));
-      }
-      if (hash.startsWith("/prompts")) {
-        return this.renderPrompts();
-      }
-      if (hash.startsWith("/about")) {
-        return this.renderAbout();
-      }
+      const expMatch   = hash.match(/^\/experiments\/(\d+)$/);
+      const runMatch   = hash.match(/^\/experiments\/(\d+)\/runs\/([0-9a-f]+)$/);
+      const cmpMatch   = hash.match(/^\/experiments\/(\d+)\/compare/);
+      const promptMatch = hash.match(/^\/prompts\/(.+)$/);
+
+      if (runMatch)   return this.renderRun(parseInt(runMatch[1], 10), runMatch[2]);
+      if (cmpMatch)   return this.renderCompare(parseInt(cmpMatch[1], 10));
+      if (expMatch)   return this.renderExperiment(parseInt(expMatch[1], 10));
+      if (promptMatch) return this.renderPromptDetail(promptMatch[1]);
+      if (hash.startsWith("/prompts")) return this.renderPrompts();
+      if (hash.startsWith("/about"))   return this.renderAbout();
       return this.renderExperiments();
     },
 
+    // ── Experiments list ─────────────────────────────────────────────────────
     async renderExperiments() {
       const main = $("#app");
       try {
@@ -73,30 +528,45 @@ mlflow.log_metric("loss", 0.42)</pre>
             </div>`;
           return;
         }
-        const rows = exps.map(e => `
-          <tr onclick="location.hash='#/experiments/${e.experiment_id}'">
+
+        const rows = exps.map((e, i) => `
+          <tr data-row-index="${i}" onclick="location.hash='#/experiments/${e.experiment_id}'">
             <td class="mono">${e.experiment_id}</td>
             <td><a href="#/experiments/${e.experiment_id}">${escapeHTML(e.name)}</a></td>
             <td>${formatTime(e.creation_time)}</td>
             <td>${formatTime(e.last_update_time)}</td>
             <td>${(e.tags || []).map(t => `<span class="tag">${escapeHTML(t.key)}=${escapeHTML(t.value)}</span>`).join(" ")}</td>
           </tr>`).join("");
+
         main.innerHTML = `
-          <h1>Experiments</h1>
+          <div class="toolbar">
+            <h1 style="margin:0">Experiments</h1>
+            <input type="search" id="exp-search" placeholder="Filter by name…" style="margin-left:auto" />
+          </div>
           <div class="card" style="padding:0">
             <table>
               <thead><tr><th>ID</th><th>Name</th><th>Created</th><th>Updated</th><th>Tags</th></tr></thead>
-              <tbody>${rows}</tbody>
+              <tbody id="exp-tbody">${rows}</tbody>
             </table>
-          </div>
-        `;
+          </div>`;
+
+        // Live filter
+        $("#exp-search").addEventListener("input", function () {
+          const q = this.value.toLowerCase();
+          $$("tr[data-row-index]", main).forEach(tr => {
+            const name = tr.querySelector("td:nth-child(2)").textContent.toLowerCase();
+            tr.style.display = (!q || name.includes(q)) ? "" : "none";
+          });
+        });
       } catch (err) {
         main.innerHTML = `<div class="empty">Failed to load: ${escapeHTML(String(err))}</div>`;
       }
     },
 
+    // ── Experiment detail (runs table + bulk select) ──────────────────────────
     async renderExperiment(expID) {
       const main = $("#app");
+      BulkSelect.reset(expID);
       try {
         const [exp, runsRes] = await Promise.all([
           fetchJSON(`/api/2.0/mlflow/experiments/get?experiment_id=${expID}`),
@@ -107,19 +577,23 @@ mlflow.log_metric("loss", 0.42)</pre>
         ]);
         const e = exp.experiment;
         const runs = runsRes.runs || [];
-        const rows = runs.map(r => {
+
+        const rows = runs.map((r, i) => {
           const info = r.info, data = r.data;
           const metrics = (data.metrics || []).map(m => `${escapeHTML(m.key)}=${m.value.toPrecision(4)}`).join(", ");
+          const checked = BulkSelect.has(info.run_id) ? "checked" : "";
           return `
-            <tr onclick="location.hash='#/experiments/${expID}/runs/${info.run_id}'">
-              <td class="mono">${info.run_id.slice(0, 8)}</td>
-              <td>${escapeHTML(info.run_name || "—")}</td>
-              <td><span class="status-pill status-${info.status}">${info.status}</span></td>
-              <td>${formatTime(info.start_time)}</td>
-              <td>${info.end_time ? formatDuration(info.end_time - info.start_time) : "—"}</td>
-              <td class="mono">${escapeHTML(metrics)}</td>
+            <tr data-row-index="${i}" data-run-id="${info.run_id}">
+              <td class="bulk-col"><input type="checkbox" class="bulk-cb" data-run-id="${info.run_id}" ${checked} /></td>
+              <td class="mono" onclick="location.hash='#/experiments/${expID}/runs/${info.run_id}'">${info.run_id.slice(0, 8)}</td>
+              <td onclick="location.hash='#/experiments/${expID}/runs/${info.run_id}'">${escapeHTML(info.run_name || "—")}</td>
+              <td onclick="location.hash='#/experiments/${expID}/runs/${info.run_id}'"><span class="status-pill status-${info.status}">${info.status}</span></td>
+              <td onclick="location.hash='#/experiments/${expID}/runs/${info.run_id}'">${formatTime(info.start_time)}</td>
+              <td onclick="location.hash='#/experiments/${expID}/runs/${info.run_id}'">${info.end_time ? formatDuration(info.end_time - info.start_time) : "—"}</td>
+              <td class="mono" onclick="location.hash='#/experiments/${expID}/runs/${info.run_id}'">${escapeHTML(metrics)}</td>
             </tr>`;
         }).join("");
+
         main.innerHTML = `
           <div class="crumbs"><a href="#/experiments">Experiments</a> / ${escapeHTML(e.name)}</div>
           <h1>${escapeHTML(e.name)}</h1>
@@ -136,16 +610,190 @@ mlflow.log_metric("loss", 0.42)</pre>
           <h2>Runs (${runs.length})</h2>
           <div class="card" style="padding:0">
             <table>
-              <thead><tr><th>ID</th><th>Name</th><th>Status</th><th>Started</th><th>Duration</th><th>Metrics</th></tr></thead>
-              <tbody>${rows || `<tr><td colspan="6" class="empty">No runs yet.</td></tr>`}</tbody>
+              <thead>
+                <tr>
+                  <th class="bulk-col"><input type="checkbox" id="bulk-all" title="Select all" /></th>
+                  <th>ID</th><th>Name</th><th>Status</th><th>Started</th><th>Duration</th><th>Metrics</th>
+                </tr>
+              </thead>
+              <tbody>${rows || `<tr><td colspan="7" class="empty">No runs yet.</td></tr>`}</tbody>
             </table>
-          </div>
-        `;
+          </div>`;
+
+        // Checkbox wiring
+        $$(".bulk-cb", main).forEach(cb => {
+          cb.addEventListener("change", () => {
+            BulkSelect.toggle(cb.dataset.runId);
+            this._updateBulkBar(expID, runs);
+          });
+        });
+        // select-all
+        const allCb = $("#bulk-all");
+        allCb.addEventListener("change", () => {
+          const toCheck = allCb.checked;
+          $$(".bulk-cb", main).forEach(cb => {
+            cb.checked = toCheck;
+            const id = cb.dataset.runId;
+            if (toCheck) BulkSelect._checked.add(id);
+            else BulkSelect._checked.delete(id);
+          });
+          this._updateBulkBar(expID, runs);
+        });
+
+        // Restore checked state (survives re-render)
+        $$(".bulk-cb", main).forEach(cb => {
+          if (BulkSelect.has(cb.dataset.runId)) cb.checked = true;
+        });
+        this._updateBulkBar(expID, runs);
+
       } catch (err) {
         main.innerHTML = `<div class="empty">Failed to load: ${escapeHTML(String(err))}</div>`;
       }
     },
 
+    _updateBulkBar(expID, runs) {
+      let bar = $("#bulk-action-bar");
+      if (BulkSelect.size() < 1) {
+        if (bar) bar.remove();
+        return;
+      }
+      if (!bar) {
+        bar = document.createElement("div");
+        bar.id = "bulk-action-bar";
+        bar.className = "bulk-action-bar";
+        document.body.appendChild(bar);
+      }
+      const n = BulkSelect.size();
+      bar.innerHTML = `
+        <span class="bulk-count">${n} run${n === 1 ? "" : "s"} selected</span>
+        <button id="bulk-compare">Compare</button>
+        <button id="bulk-delete" class="btn-danger">Delete</button>
+        <button id="bulk-export">Export JSON</button>
+        <button id="bulk-clear" class="btn-ghost">✕ Clear</button>`;
+
+      $("#bulk-compare").onclick = () => {
+        const ids = BulkSelect.list().join(",");
+        location.hash = `#/experiments/${expID}/compare?runs=${ids}`;
+      };
+
+      $("#bulk-delete").onclick = async () => {
+        if (!confirm(`Delete ${n} run(s)? This cannot be undone.`)) return;
+        const ids = BulkSelect.list();
+        await Promise.all(ids.map(id =>
+          fetchJSON("/api/2.0/mlflow/runs/delete", { method: "POST", body: JSON.stringify({ run_id: id }) })
+            .catch(() => {})
+        ));
+        BulkSelect.clear();
+        this.renderExperiment(expID);
+      };
+
+      $("#bulk-export").onclick = async () => {
+        const ids = BulkSelect.list();
+        const results = await Promise.all(ids.map(id =>
+          fetchJSON(`/api/2.0/mlflow/runs/get?run_id=${id}`).catch(err => ({ error: String(err), run_id: id }))
+        ));
+        const blob = new Blob([JSON.stringify(results, null, 2)], { type: "application/json" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `runs-export-${Date.now()}.json`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+      };
+
+      $("#bulk-clear").onclick = () => {
+        BulkSelect.clear();
+        $$(".bulk-cb", $("#app")).forEach(cb => { cb.checked = false; });
+        const allCb = $("#bulk-all");
+        if (allCb) allCb.checked = false;
+        this._updateBulkBar(expID, runs);
+      };
+    },
+
+    // ── Compare view ─────────────────────────────────────────────────────────
+    async renderCompare(expID) {
+      const main = $("#app");
+      const params = new URLSearchParams(location.hash.split("?")[1] || "");
+      const ids = (params.get("runs") || "").split(",").filter(Boolean);
+      if (ids.length < 2) {
+        main.innerHTML = `<div class="empty">Select at least 2 runs to compare.</div>`;
+        return;
+      }
+      try {
+        const runDatas = await Promise.all(ids.map(id =>
+          fetchJSON(`/api/v1/runs/${id}/data`).catch(() => null)
+        ));
+        const valid = runDatas.filter(Boolean);
+        if (!valid.length) { main.innerHTML = `<div class="empty">Could not load run data.</div>`; return; }
+
+        // Params comparison
+        const allParamKeys = [...new Set(valid.flatMap(r => (r.params || []).map(p => p.Key || p.key)))].sort();
+        const paramRows = allParamKeys.map(k => {
+          const vals = valid.map(r => {
+            const found = (r.params || []).find(p => (p.Key || p.key) === k);
+            return found ? (found.Value || found.value) : "—";
+          });
+          const differ = new Set(vals).size > 1;
+          return `<tr class="${differ ? "diff-row" : ""}"><td class="mono">${escapeHTML(k)}</td>${vals.map(v => `<td class="mono">${escapeHTML(v)}</td>`).join("")}</tr>`;
+        }).join("");
+
+        // Metrics — small sparklines per common metric
+        const allMetricKeys = [...new Set(valid.flatMap(r => (r.metrics || []).map(m => m.Key || m.key)))].sort();
+        let charts = "";
+        for (const mk of allMetricKeys) {
+          const perRun = await Promise.all(valid.map(r =>
+            fetchJSON(`/api/2.0/mlflow/metrics/get-history?run_id=${r.id}&metric_key=${encodeURIComponent(mk)}&downsample=200`)
+              .then(d => d.metrics || []).catch(() => [])
+          ));
+          const allPts = perRun.flatMap(pts => pts);
+          if (!allPts.length) continue;
+          const W = 600, H = 150, pad = 20;
+          const colors = ["var(--accent)", "var(--success)", "var(--warning)", "var(--error)"];
+          const tmin = Math.min(...allPts.map(p => p.timestamp));
+          const tmax = Math.max(...allPts.map(p => p.timestamp));
+          const vmin = Math.min(...allPts.map(p => p.value));
+          const vmax = Math.max(...allPts.map(p => p.value));
+          const tspan = Math.max(tmax - tmin, 1), vspan = Math.max(vmax - vmin, Math.abs(vmax) || 1);
+          const paths = perRun.map((pts, ci) => {
+            if (!pts.length) return "";
+            const d = pts.map((p, i) => {
+              const x = pad + ((p.timestamp - tmin) / tspan) * (W - 2 * pad);
+              const y = H - pad - ((p.value - vmin) / vspan) * (H - 2 * pad);
+              return (i === 0 ? "M" : "L") + x.toFixed(1) + "," + y.toFixed(1);
+            }).join("");
+            return `<path d="${d}" fill="none" stroke="${colors[ci % colors.length]}" stroke-width="1.5" />`;
+          }).join("");
+
+          charts += `
+            <div class="card" style="padding:8px 12px">
+              <strong>${escapeHTML(mk)}</strong>
+              <div class="metric-chart">
+                <svg width="100%" height="100%" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${paths}</svg>
+              </div>
+            </div>`;
+        }
+
+        main.innerHTML = `
+          <div class="crumbs"><a href="#/experiments">Experiments</a> / <a href="#/experiments/${expID}">exp ${expID}</a> / Compare</div>
+          <h1>Compare Runs</h1>
+          <div class="card" style="padding:0;overflow-x:auto">
+            <table>
+              <thead>
+                <tr>
+                  <th>Param</th>
+                  ${valid.map(r => `<th class="mono">${escapeHTML((r.name || r.id || "").slice(0, 12))}</th>`).join("")}
+                </tr>
+              </thead>
+              <tbody>${paramRows || `<tr><td colspan="${valid.length + 1}" class="empty">No params.</td></tr>`}</tbody>
+            </table>
+          </div>
+          <h2>Metric history</h2>
+          ${charts || `<div class="empty">No shared metrics.</div>`}`;
+      } catch (err) {
+        main.innerHTML = `<div class="empty">Failed: ${escapeHTML(String(err))}</div>`;
+      }
+    },
+
+    // ── Run detail ───────────────────────────────────────────────────────────
     async renderRun(expID, runID) {
       const main = $("#app");
       try {
@@ -231,18 +879,193 @@ mlflow.log_metric("loss", 0.42)</pre>
       return `<h2>Trace waterfall</h2><div class="card span-tree">${rows}</div>`;
     },
 
+    // ── Prompts list ─────────────────────────────────────────────────────────
     async renderPrompts() {
-      $("#app").innerHTML = `
+      const main = $("#app");
+
+      // Load known prompt names from localStorage
+      const stored = localStorage.getItem("litemlflow.knownPrompts");
+      let known = [];
+      try { known = JSON.parse(stored) || []; } catch {}
+      if (!Array.isArray(known)) known = [];
+
+      // Probe each known name
+      const results = await Promise.allSettled(
+        known.map(name =>
+          fetchJSON(`/api/v1/prompts/${encodeURIComponent(name)}`)
+            .then(data => ({ name, data }))
+        )
+      );
+      const live = results
+        .filter(r => r.status === "fulfilled")
+        .map(r => r.value);
+
+      // Remove names that 404'd from registry
+      const liveNames = new Set(live.map(l => l.name));
+      const pruned = known.filter(n => liveNames.has(n));
+      if (pruned.length !== known.length) {
+        localStorage.setItem("litemlflow.knownPrompts", JSON.stringify(pruned));
+      }
+
+      const rows = live.map((l, i) => `
+        <tr data-row-index="${i}" onclick="location.hash='#/prompts/${encodeURIComponent(l.name)}'">
+          <td><a href="#/prompts/${encodeURIComponent(l.name)}">${escapeHTML(l.name)}</a></td>
+          <td class="mono">${escapeHTML(l.data.latest_version || l.data.version || "—")}</td>
+          <td>${escapeHTML(l.data.description || "—")}</td>
+        </tr>`).join("");
+
+      main.innerHTML = `
         <h1>Prompts</h1>
-        <div class="empty card">
-          Prompts are versioned via the native API. v0.1 has no list endpoint;
-          a directory page lands in v0.2. Use:
-          <pre>POST /api/v1/prompts {"name":"foo","content":"..."}
-GET  /api/v1/prompts/foo
-GET  /api/v1/prompts/foo/versions</pre>
-        </div>`;
+        <div class="card" style="margin-bottom:16px;background:var(--bg-alt)">
+          <p style="margin:0 0 8px;color:var(--fg-muted);font-size:12px">
+            v0.4 limitation: there is no list-all endpoint yet. The UI probes names you've registered locally.
+            A <code>GET /api/v1/prompts</code> list endpoint will land in v0.5.
+          </p>
+          <div style="display:flex;gap:8px;align-items:center">
+            <input type="text" id="add-prompt-input" placeholder="Prompt name to add…" style="flex:1" />
+            <button id="add-prompt-btn" style="white-space:nowrap">+ Add</button>
+          </div>
+        </div>
+        ${live.length ? `
+        <div class="card" style="padding:0">
+          <table>
+            <thead><tr><th>Name</th><th>Latest version</th><th>Description</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>` : `<div class="empty card">No prompts registered yet. Add one above.</div>`}`;
+
+      $("#add-prompt-btn").addEventListener("click", async () => {
+        const input = $("#add-prompt-input");
+        const name = input.value.trim();
+        if (!name) return;
+        try {
+          await fetchJSON(`/api/v1/prompts/${encodeURIComponent(name)}`);
+          // Success — register and navigate
+          this._registerPrompt(name);
+          input.value = "";
+          location.hash = `#/prompts/${encodeURIComponent(name)}`;
+        } catch {
+          input.style.borderColor = "var(--error)";
+          setTimeout(() => { input.style.borderColor = ""; }, 1500);
+        }
+      });
+
+      $("#add-prompt-input").addEventListener("keydown", e => {
+        if (e.key === "Enter") $("#add-prompt-btn").click();
+      });
     },
 
+    _registerPrompt(name) {
+      const stored = localStorage.getItem("litemlflow.knownPrompts");
+      let known = [];
+      try { known = JSON.parse(stored) || []; } catch {}
+      if (!Array.isArray(known)) known = [];
+      if (!known.includes(name)) {
+        known.push(name);
+        localStorage.setItem("litemlflow.knownPrompts", JSON.stringify(known));
+      }
+    },
+
+    // ── Prompt detail ────────────────────────────────────────────────────────
+    async renderPromptDetail(name) {
+      const main = $("#app");
+      this._registerPrompt(name);
+      try {
+        const [promptData, versionsData] = await Promise.all([
+          fetchJSON(`/api/v1/prompts/${encodeURIComponent(name)}`),
+          fetchJSON(`/api/v1/prompts/${encodeURIComponent(name)}/versions`).catch(() => ({ versions: [] })),
+        ]);
+        const versions = versionsData.versions || [];
+
+        // Resolve aliases for "production" and "candidate"
+        const aliases = {};
+        await Promise.all(["production", "candidate"].map(async alias => {
+          try {
+            const d = await fetchJSON(`/api/v1/prompts/${encodeURIComponent(name)}/aliases/${alias}`);
+            aliases[alias] = d.version || null;
+          } catch { aliases[alias] = null; }
+        }));
+
+        const vOpts = versions.map(v => `<option value="${escapeHTML(v.version)}">${escapeHTML(v.version)}</option>`).join("");
+        const aliasBadges = Object.entries(aliases)
+          .filter(([, v]) => v != null)
+          .map(([a, v]) => `<span class="tag">${escapeHTML(a)}→v${escapeHTML(String(v))}</span>`)
+          .join(" ");
+
+        main.innerHTML = `
+          <div class="crumbs"><a href="#/prompts">Prompts</a> / ${escapeHTML(name)}</div>
+          <h1>${escapeHTML(name)}</h1>
+          ${aliasBadges ? `<div class="tag-list" style="margin-bottom:12px">${aliasBadges}</div>` : ""}
+          ${promptData.description ? `<p style="color:var(--fg-muted)">${escapeHTML(promptData.description)}</p>` : ""}
+
+          <h2>Version history (${versions.length})</h2>
+          <div class="card" style="padding:0;margin-bottom:16px">
+            <table>
+              <thead><tr><th>Version</th><th>Created</th><th>Author</th><th>Aliases</th></tr></thead>
+              <tbody>
+                ${versions.map(v => {
+                  const vAliases = Object.entries(aliases).filter(([, vv]) => String(vv) === String(v.version)).map(([a]) => `<span class="tag">${escapeHTML(a)}</span>`).join(" ");
+                  return `<tr>
+                    <td class="mono">v${escapeHTML(String(v.version))}</td>
+                    <td>${formatTime(v.creation_timestamp || v.created_at)}</td>
+                    <td>${escapeHTML(v.user_id || v.author || "—")}</td>
+                    <td>${vAliases || "—"}</td>
+                  </tr>`;
+                }).join("") || `<tr><td colspan="4" class="empty">No versions yet.</td></tr>`}
+              </tbody>
+            </table>
+          </div>
+
+          ${versions.length >= 2 ? `
+          <h2>Diff</h2>
+          <div class="toolbar" style="margin-bottom:8px">
+            <label>Base: <select id="diff-base">${vOpts}</select></label>
+            <label style="margin-left:16px">Compare: <select id="diff-cmp">${vOpts}</select></label>
+            <button id="diff-btn" style="margin-left:8px">Show diff</button>
+          </div>
+          <div id="diff-output" class="card diff-block"></div>
+          ` : ""}`;
+
+        if (versions.length >= 2) {
+          // Pre-select base = first, cmp = second
+          const selBase = $("#diff-base");
+          const selCmp  = $("#diff-cmp");
+          if (versions.length >= 2) {
+            selBase.value = versions[0].version;
+            selCmp.value  = versions[1].version;
+          }
+
+          const showDiff = async () => {
+            const bv = selBase.value, cv = selCmp.value;
+            if (bv === cv) {
+              $("#diff-output").innerHTML = `<div class="empty">Select two different versions.</div>`;
+              return;
+            }
+            try {
+              const [bd, cd] = await Promise.all([
+                fetchJSON(`/api/v1/prompts/${encodeURIComponent(name)}/versions`).then(d => {
+                  const v = (d.versions || []).find(v => String(v.version) === String(bv));
+                  return v ? (v.content || v.template || "") : "";
+                }),
+                fetchJSON(`/api/v1/prompts/${encodeURIComponent(name)}/versions`).then(d => {
+                  const v = (d.versions || []).find(v => String(v.version) === String(cv));
+                  return v ? (v.content || v.template || "") : "";
+                }),
+              ]);
+              $("#diff-output").innerHTML = renderLineDiff(bd, cd);
+            } catch (err) {
+              $("#diff-output").innerHTML = `<div class="empty">Diff error: ${escapeHTML(String(err))}</div>`;
+            }
+          };
+
+          $("#diff-btn").addEventListener("click", showDiff);
+        }
+      } catch (err) {
+        main.innerHTML = `<div class="empty">Failed to load prompt: ${escapeHTML(String(err))}</div>`;
+      }
+    },
+
+    // ── About ────────────────────────────────────────────────────────────────
     renderAbout() {
       $("#app").innerHTML = `
         <h1>About LiteMLflow</h1>
@@ -254,83 +1077,53 @@ GET  /api/v1/prompts/foo/versions</pre>
             <li>License: Apache 2.0</li>
             <li>Source: see <code>NOTICE</code></li>
           </ul>
+          <h2 style="margin-top:16px">Keyboard shortcuts</h2>
+          <p>Press <kbd>?</kbd> to see all shortcuts, or <kbd>⌘K</kbd>/<kbd>Ctrl+K</kbd> to open the command palette.</p>
         </div>`;
     },
   };
 
-  function fetchJSON(url, init) {
-    init = init || {};
-    init.headers = Object.assign({ "Content-Type": "application/json" }, init.headers || {});
-    return fetch(url, init).then(r => {
-      if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
-      return r.json();
-    });
-  }
-
-  function escapeHTML(s) {
-    return String(s).replace(/[&<>"']/g, ch => ({
-      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
-    })[ch]);
-  }
-
-  function formatTime(ms) {
-    if (!ms) return "—";
-    const d = new Date(ms);
-    return d.toISOString().replace("T", " ").slice(0, 19);
-  }
-
-  function formatDuration(ms) {
-    if (!ms) return "—";
-    if (ms < 1000) return ms + "ms";
-    const s = ms / 1000;
-    if (s < 60) return s.toFixed(1) + "s";
-    const m = Math.floor(s / 60), rs = s % 60;
-    return m + "m " + rs.toFixed(0) + "s";
-  }
-
-  function formatNS(ns) {
-    if (ns < 1000) return ns + "ns";
-    if (ns < 1e6) return (ns / 1000).toFixed(1) + "µs";
-    if (ns < 1e9) return (ns / 1e6).toFixed(1) + "ms";
-    return (ns / 1e9).toFixed(2) + "s";
-  }
-
-  // simpleChart renders an SVG sparkline using server-side LTTB-downsampled
-  // data. When the server indicates downsampling occurred via downsampledFrom,
-  // a note is shown next to the chart title.
-  //
-  // downsampledFrom: the total raw point count returned in "downsampled_from"
-  // by the server, or undefined/null when no downsampling happened.
-  function simpleChart(key, points, downsampledFrom) {
-    if (!points.length) return "";
-    const W = 800, H = 200, pad = 30;
-    const vals = points.map(p => p.value);
-    const ts = points.map(p => p.timestamp);
-    const tmin = Math.min(...ts), tmax = Math.max(...ts);
-    const vmin = Math.min(...vals), vmax = Math.max(...vals);
-    const tspan = Math.max(tmax - tmin, 1), vspan = Math.max(vmax - vmin, Math.abs(vmax) || 1);
-    const xy = points.map(p => {
-      const x = pad + ((p.timestamp - tmin) / tspan) * (W - 2 * pad);
-      const y = H - pad - ((p.value - vmin) / vspan) * (H - 2 * pad);
-      return [x, y];
-    });
-    const d = xy.map(([x, y], i) => (i === 0 ? "M" : "L") + x.toFixed(1) + "," + y.toFixed(1)).join("");
-
-    // Build the downsampling annotation when the server signals it.
-    let dsNote = "";
-    if (downsampledFrom != null && downsampledFrom > points.length) {
-      dsNote = ` <span style="color:var(--fg-muted);font-size:0.85em">(showing ${points.length} of ${downsampledFrom} points, LTTB)</span>`;
+  // ─── Line diff helper ─────────────────────────────────────────────────────────
+  function renderLineDiff(textA, textB) {
+    const linesA = textA.split("\n");
+    const linesB = textB.split("\n");
+    // Simple LCS-based unified diff
+    const lcs = computeLCS(linesA, linesB);
+    const out = [];
+    let ia = 0, ib = 0, il = 0;
+    while (ia < linesA.length || ib < linesB.length) {
+      if (il < lcs.length && ia === lcs[il][0] && ib === lcs[il][1]) {
+        out.push(`<div class="diff-ctx">&nbsp;${escapeHTML(linesA[ia])}</div>`);
+        ia++; ib++; il++;
+      } else if (ib < linesB.length && (il >= lcs.length || ib < lcs[il][1])) {
+        out.push(`<div class="diff-add">+${escapeHTML(linesB[ib])}</div>`);
+        ib++;
+      } else {
+        out.push(`<div class="diff-del">-${escapeHTML(linesA[ia])}</div>`);
+        ia++;
+      }
     }
+    return out.join("") || `<div class="empty">No differences.</div>`;
+  }
 
-    return `
-      <div class="card" style="padding:8px 12px">
-        <strong>${escapeHTML(key)}</strong>${dsNote} <span style="color:var(--fg-muted)">(min ${vmin.toPrecision(4)}, max ${vmax.toPrecision(4)})</span>
-        <div class="metric-chart">
-          <svg width="100%" height="100%" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
-            <path d="${d}" fill="none" stroke="var(--accent)" stroke-width="1.5" />
-          </svg>
-        </div>
-      </div>`;
+  function computeLCS(a, b) {
+    // DP table — keeps track of (ia, ib) pairs in the LCS
+    const m = a.length, n = b.length;
+    const dp = Array.from({ length: m + 1 }, () => new Int32Array(n + 1));
+    for (let i = m - 1; i >= 0; i--) {
+      for (let j = n - 1; j >= 0; j--) {
+        if (a[i] === b[j]) dp[i][j] = 1 + dp[i + 1][j + 1];
+        else dp[i][j] = Math.max(dp[i + 1][j], dp[i][j + 1]);
+      }
+    }
+    const pairs = [];
+    let i = 0, j = 0;
+    while (i < m && j < n) {
+      if (a[i] === b[j]) { pairs.push([i, j]); i++; j++; }
+      else if (dp[i + 1][j] >= dp[i][j + 1]) i++;
+      else j++;
+    }
+    return pairs;
   }
 
   document.addEventListener("DOMContentLoaded", () => App.init());
