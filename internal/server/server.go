@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -14,6 +15,7 @@ import (
 	"github.com/litemlflow/litemlflow/internal/api/mlflow"
 	"github.com/litemlflow/litemlflow/internal/api/native"
 	"github.com/litemlflow/litemlflow/internal/artifact"
+	"github.com/litemlflow/litemlflow/internal/auth"
 	"github.com/litemlflow/litemlflow/internal/config"
 	"github.com/litemlflow/litemlflow/internal/store"
 	"github.com/litemlflow/litemlflow/ui"
@@ -106,12 +108,32 @@ func buildRouter(cfg config.Config, logger *slog.Logger, st store.Store, art art
 	// Body limit applies to all non-artifact endpoints; artifact subrouter
 	// re-applies its own (larger) limit.
 	r.Use(bodyLimitMiddleware(cfg.MaxRequestSize))
-	r.Use(authMiddleware(cfg))
+
+	// AUTH-OIDC: wire the session-aware auth middleware. The SQLiteStore
+	// implements SessionLookup via the methods in store/sessions.go.
+	var sessions SessionLookup
+	if sqlSt, ok := st.(*store.SQLiteStore); ok {
+		sessions = sqlSt
+	}
+	r.Use(authMiddlewareWithSessions(cfg, sessions))
 
 	// Mount API surfaces.
 	mlh := &mlflow.Handler{Store: st, Artifacts: art}
 	mlh.Mount(r)
-	nat := &native.Handler{Store: st}
+
+	// AUTH-OIDC: build native handler with full auth wiring.
+	nat := &native.Handler{Store: st, Cfg: cfg, SessionStore: nil}
+	if sqlSt, ok := st.(*store.SQLiteStore); ok {
+		nat.SessionStore = sqlSt
+	}
+	// Wire OIDC provider when configured.
+	if cfg.Auth == "oidc" && cfg.OIDCIssuer != "" && cfg.OIDCClientID != "" {
+		scopes := strings.Fields(cfg.OIDCScopes)
+		nat.OIDCProvider = auth.NewProvider(
+			cfg.OIDCIssuer, cfg.OIDCClientID, cfg.OIDCClientSecret,
+			cfg.OIDCRedirectURL, scopes,
+		)
+	}
 	nat.Mount(r)
 
 	// UI (and root redirect).

@@ -71,6 +71,8 @@ func usage(w io.Writer) {
 
 Usage:
   litemlflow up       [--data DIR] [--addr HOST:PORT] [--auth MODE] [--basic-user USER --basic-pass-hash HASH] [--dev]
+                      [--oidc-issuer URL] [--oidc-client-id ID] [--oidc-client-secret SECRET]
+                      [--oidc-redirect-url URL] [--session-ttl DURATION]
   litemlflow migrate  [--data DIR]
   litemlflow rollback [--data DIR]
   litemlflow backup   [--data DIR] [--out FILE]
@@ -79,12 +81,18 @@ Usage:
 
 Environment variables override defaults; flags override env vars.
 
-  LITEMLFLOW_DATA              the data directory (required)
-  LITEMLFLOW_ADDR              listen address, e.g., :5000
-  LITEMLFLOW_AUTH              one of: none|basic|oidc
-  LITEMLFLOW_BASIC_USER        basic auth username
-  LITEMLFLOW_BASIC_PASS_HASH   basic auth password (hex SHA-256)
-  LITEMLFLOW_DEV=1             dev-mode logs and verbose errors
+  LITEMLFLOW_DATA                the data directory (required)
+  LITEMLFLOW_ADDR                listen address, e.g., :5000
+  LITEMLFLOW_AUTH                one of: none|basic|oidc
+  LITEMLFLOW_BASIC_USER          basic auth username
+  LITEMLFLOW_BASIC_PASS_HASH     basic auth password (hex SHA-256)
+  LITEMLFLOW_OIDC_ISSUER         OIDC issuer URL (required for auth=oidc)
+  LITEMLFLOW_OIDC_CLIENT_ID      OIDC client ID (required for auth=oidc)
+  LITEMLFLOW_OIDC_CLIENT_SECRET  OIDC client secret (optional; omit for public clients)
+  LITEMLFLOW_OIDC_REDIRECT_URL   OIDC redirect URL (required for auth=oidc)
+  LITEMLFLOW_OIDC_SCOPES         space-separated scopes (default: openid email profile)
+  LITEMLFLOW_SESSION_TTL         session duration, e.g. 168h (default 168h = 7 days)
+  LITEMLFLOW_DEV=1               dev-mode logs and verbose errors
 `)
 }
 
@@ -96,16 +104,27 @@ func runUp(args []string) error {
 	basicUser := fs.String("basic-user", "", "basic auth username")
 	basicPassHash := fs.String("basic-pass-hash", "", "basic auth password (hex SHA-256)")
 	dev := fs.Bool("dev", false, "enable dev mode")
+	// AUTH-OIDC: OIDC / session flags
+	oidcIssuer := fs.String("oidc-issuer", "", "OIDC issuer URL (required when --auth=oidc)")
+	oidcClientID := fs.String("oidc-client-id", "", "OIDC client ID")
+	oidcClientSecret := fs.String("oidc-client-secret", "", "OIDC client secret (optional for public clients)")
+	oidcRedirectURL := fs.String("oidc-redirect-url", "", "OIDC redirect URL")
+	sessionTTL := fs.Duration("session-ttl", 0, "session lifetime, e.g. 168h (default 7 days)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	cfg, err := config.FromEnv(config.Config{
-		DataDir:       *dataDir,
-		Addr:          *addr,
-		Auth:          *auth,
-		BasicUser:     *basicUser,
-		BasicPassHash: *basicPassHash,
-		DevMode:       *dev,
+		DataDir:          *dataDir,
+		Addr:             *addr,
+		Auth:             *auth,
+		BasicUser:        *basicUser,
+		BasicPassHash:    *basicPassHash,
+		DevMode:          *dev,
+		OIDCIssuer:       *oidcIssuer,
+		OIDCClientID:     *oidcClientID,
+		OIDCClientSecret: *oidcClientSecret,
+		OIDCRedirectURL:  *oidcRedirectURL,
+		SessionTTL:       *sessionTTL,
 	})
 	if err != nil {
 		return err

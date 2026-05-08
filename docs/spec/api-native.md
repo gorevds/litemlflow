@@ -120,10 +120,37 @@ For v0.1, all data lives in a single workspace. The scaffolding is in place for 
 
 ## Auth introspection
 
+All auth endpoints below are public (no authentication required to reach them,
+though their behaviour varies by the server's `--auth` mode).
+
+### Session cookie
+
+After a successful login or OIDC callback the server sets a cookie named
+`lmf_session` (HttpOnly, SameSite=Lax). All subsequent requests that present
+this cookie are authenticated as the owning user regardless of the server's
+`--auth` mode. Sessions expire after `--session-ttl` (default 7 days). The
+`GarbageCollectSessions` background job removes expired rows.
+
+### Endpoints
+
 | Endpoint | Method | Description |
 |---|---|---|
-| `/api/v1/auth/whoami` | GET | returns `{user, mode, scopes}` |
-| `/api/v1/auth/login` | POST | basic auth login (returns session cookie) |
-| `/api/v1/auth/logout` | POST | terminates session |
-| `/api/v1/auth/oidc/start` | GET | OIDC redirect initiator |
-| `/api/v1/auth/oidc/callback` | GET | OIDC callback |
+| `GET /api/v1/auth/whoami` | GET | Returns `{user, auth_method}`. `auth_method` is `"basic"`, `"oidc"`, `"none"`, or `"anonymous"`. |
+| `POST /api/v1/auth/login` | POST | Basic-auth login. Body: `{"user":"…","pass":"…"}`. Returns `{ok, session_expires_at}` and sets `lmf_session` cookie. Returns 400 when `auth=oidc`. |
+| `POST /api/v1/auth/logout` | POST | Deletes the server-side session row and clears the cookie. Always returns 200 (idempotent). |
+| `GET /api/v1/auth/oidc/start` | GET | Generates PKCE verifier + anti-CSRF state, stashes them in `lmf_oidc_state` cookie, and 302-redirects to the IdP. Optional `?return_to=<path>` for post-login redirect. |
+| `GET /api/v1/auth/oidc/callback` | GET | Validates CSRF state, exchanges code for ID token (RS256, verified against JWKS), mints a session, and redirects to `return_to` or `/ui/`. |
+
+### OIDC configuration
+
+Set `--auth=oidc` and provide:
+- `--oidc-issuer` / `LITEMLFLOW_OIDC_ISSUER` — the IdP issuer URL (e.g. `https://accounts.google.com`). The discovery document is loaded from `<issuer>/.well-known/openid-configuration`.
+- `--oidc-client-id` / `LITEMLFLOW_OIDC_CLIENT_ID` — required.
+- `--oidc-client-secret` / `LITEMLFLOW_OIDC_CLIENT_SECRET` — optional for public clients (PKCE-only flows).
+- `--oidc-redirect-url` / `LITEMLFLOW_OIDC_REDIRECT_URL` — must match the IdP callback allowlist.
+- `--oidc-scopes` / `LITEMLFLOW_OIDC_SCOPES` — space-separated; defaults to `openid email profile`.
+- `--session-ttl` / `LITEMLFLOW_SESSION_TTL` — e.g. `168h` (7 days, the default).
+
+**JWT verification:** v1 supports RS256 only. The JWKS is fetched once at startup and cached; rotate keys by restarting the server. ES256 / EdDSA support is planned for v0.3.
+
+**Security notes:** The PKCE `code_challenge` uses S256 (SHA-256). The anti-CSRF `state` is 24 bytes of `crypto/rand`. The `lmf_oidc_state` cookie is short-lived (10 minutes) and HttpOnly. Session IDs are 32 bytes of `crypto/rand` hex-encoded.

@@ -5,22 +5,49 @@
 package native
 
 import (
+	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/litemlflow/litemlflow/internal/auth"
+	"github.com/litemlflow/litemlflow/internal/config"
 	"github.com/litemlflow/litemlflow/internal/model"
 	"github.com/litemlflow/litemlflow/internal/store"
 	"github.com/litemlflow/litemlflow/pkg/version"
 )
 
 // Handler bundles dependencies for the native API.
+// AUTH-OIDC: Config and SessionStore added to support auth endpoints.
 type Handler struct {
-	Store store.Store
+	Store        store.Store
+	Cfg          config.Config
+	SessionStore SessionStore
+	OIDCProvider OIDCProvider // nil when auth != "oidc"
+}
+
+// SessionStore is the session-persistence interface used by auth handlers.
+// *store.SQLiteStore satisfies this interface (methods in store/sessions.go).
+type SessionStore interface {
+	CreateSession(ctx context.Context, sess *model.Session) error
+	GetSession(ctx context.Context, id string) (*model.Session, error)
+	DeleteSession(ctx context.Context, id string) error
+	TouchSession(ctx context.Context, id string, lastSeen int64) error
+}
+
+// OIDCProvider is the minimal interface the handler needs from auth.Provider.
+type OIDCProvider interface {
+	BeginPKCE(ctx context.Context, state, verifier string) (string, error)
+	Exchange(ctx context.Context, code, verifier string) (string, map[string]any, error)
 }
 
 // Mount registers the native API on the given router.
@@ -48,8 +75,12 @@ func (h *Handler) Mount(r chi.Router) {
 	r.Post("/api/v1/evals", h.CreateEval)
 	r.Get("/api/v1/evals/{runID}", h.GetEval)
 
-	// Auth introspection (placeholder for v0.2 OIDC)
+	// AUTH-OIDC: real auth endpoints (were placeholder stubs in v0.1)
 	r.Get("/api/v1/auth/whoami", h.Whoami)
+	r.Post("/api/v1/auth/login", h.Login)
+	r.Post("/api/v1/auth/logout", h.Logout)
+	r.Get("/api/v1/auth/oidc/start", h.OIDCStart)
+	r.Get("/api/v1/auth/oidc/callback", h.OIDCCallback)
 }
 
 // ---- health -----------------------------------------------------------------
@@ -530,21 +561,243 @@ func (h *Handler) GetEval(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, e)
 }
 
-// ---- whoami -----------------------------------------------------------------
+// ---- auth -------------------------------------------------------------------
 
-// Whoami returns information about the calling user. v0.1 returns "anonymous"
-// when auth is "none".
+// Whoami returns information about the calling user.
 //
-// We read the user from the standard X-LiteMLflow-User header that the auth
-// middleware sets on every authenticated request, rather than poking into
-// context with a duplicated typed key. This keeps the API package free of a
-// circular dependency on internal/server's middleware key types.
+// AUTH-OIDC: now also reports auth_method from the session cookie (when
+// present). We read the user from X-LiteMLflow-User set by authMiddleware,
+// keeping the native package free of a dependency on server's ctxKey types.
 func (h *Handler) Whoami(w http.ResponseWriter, r *http.Request) {
 	user := r.Header.Get("X-LiteMLflow-User")
 	if user == "" {
 		user = "anonymous"
 	}
-	writeJSON(w, map[string]string{"user": user})
+	authMethod := r.Header.Get("X-LiteMLflow-Auth-Method")
+	if authMethod == "" {
+		authMethod = "none"
+	}
+	writeJSON(w, map[string]string{
+		"user":        user,
+		"auth_method": authMethod,
+	})
+}
+
+// loginReq is the body of POST /api/v1/auth/login.
+type loginReq struct {
+	User string `json:"user"`
+	Pass string `json:"pass"`
+}
+
+// Login handles POST /api/v1/auth/login.
+//
+// When auth=basic it validates user+pass and mints a session cookie.
+// When auth=oidc it returns 400 (use the /oidc/start flow).
+// When auth=none it still mints a cookie for "anonymous" — useful for
+// testing / scenarios where the UI wants to persist identity.
+func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
+	if h.SessionStore == nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "session store not configured")
+		return
+	}
+
+	switch h.Cfg.Auth {
+	case "oidc":
+		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE",
+			"auth=oidc: use GET /api/v1/auth/oidc/start to log in")
+		return
+	case "basic":
+		var req loginReq
+		if err := decodeJSON(r, &req); err != nil {
+			writeBadRequest(w, err)
+			return
+		}
+		if !verifyBasicCreds(h.Cfg, req.User, req.Pass) {
+			writeError(w, http.StatusUnauthorized, "UNAUTHENTICATED", "invalid credentials")
+			return
+		}
+		sess, err := mintSession(r.Context(), h.SessionStore, req.User, req.User, "", "basic", h.Cfg.SessionTTL)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+			return
+		}
+		auth.SetSessionCookieInsecure(w, sess.ID, time.UnixMilli(sess.ExpiresAt))
+		writeJSON(w, map[string]any{"ok": true, "session_expires_at": sess.ExpiresAt})
+	case "none":
+		// In "none" mode we still support sessions so the UI can carry identity.
+		sess, err := mintSession(r.Context(), h.SessionStore, "anonymous", "anonymous", "", "none", h.Cfg.SessionTTL)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+			return
+		}
+		auth.SetSessionCookieInsecure(w, sess.ID, time.UnixMilli(sess.ExpiresAt))
+		writeJSON(w, map[string]any{"ok": true, "session_expires_at": sess.ExpiresAt})
+	default:
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "unknown auth mode")
+	}
+}
+
+// Logout handles POST /api/v1/auth/logout. Always returns 200.
+func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
+	sessID, err := auth.GetSessionID(r)
+	if err == nil && h.SessionStore != nil {
+		// Best-effort delete; ignore ErrNotFound.
+		_ = h.SessionStore.DeleteSession(r.Context(), sessID)
+	}
+	auth.ClearSessionCookie(w)
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// OIDCStart handles GET /api/v1/auth/oidc/start.
+// It generates a PKCE verifier + anti-CSRF state, stashes them in a short-lived
+// cookie, and redirects the browser to the IdP.
+func (h *Handler) OIDCStart(w http.ResponseWriter, r *http.Request) {
+	if h.OIDCProvider == nil {
+		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE",
+			"OIDC is not configured; set auth=oidc and provide oidc-issuer/client-id")
+		return
+	}
+
+	state, err := auth.NewOIDCState()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate state")
+		return
+	}
+	verifier, err := auth.NewPKCEVerifier()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate PKCE verifier")
+		return
+	}
+
+	returnTo := r.URL.Query().Get("return_to")
+	pkceState := auth.PKCEState{State: state, CodeVerifier: verifier, ReturnTo: returnTo}
+	if err := auth.SetOIDCStateCookieInsecure(w, pkceState); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to set state cookie")
+		return
+	}
+
+	authURL, err := h.OIDCProvider.BeginPKCE(r.Context(), state, verifier)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "OIDC discovery failed: "+err.Error())
+		return
+	}
+
+	http.Redirect(w, r, authURL, http.StatusFound)
+}
+
+// OIDCCallback handles GET /api/v1/auth/oidc/callback.
+// It validates the CSRF state, exchanges the code for tokens, verifies the ID
+// token, mints a session cookie, and redirects the user back to the UI.
+func (h *Handler) OIDCCallback(w http.ResponseWriter, r *http.Request) {
+	if h.OIDCProvider == nil || h.SessionStore == nil {
+		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "OIDC not configured")
+		return
+	}
+
+	// Validate error from IdP first.
+	if errParam := r.URL.Query().Get("error"); errParam != "" {
+		desc := r.URL.Query().Get("error_description")
+		writeError(w, http.StatusBadRequest, "OIDC_ERROR", errParam+": "+desc)
+		return
+	}
+
+	// Read PKCE state cookie.
+	pkceState, err := auth.GetOIDCState(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "missing or invalid OIDC state cookie")
+		return
+	}
+
+	// Validate anti-CSRF state.
+	incomingState := r.URL.Query().Get("state")
+	if incomingState != pkceState.State {
+		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "CSRF state mismatch")
+		return
+	}
+
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "missing code parameter")
+		return
+	}
+
+	_, claims, err := h.OIDCProvider.Exchange(r.Context(), code, pkceState.CodeVerifier)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "OIDC_ERROR", "token exchange failed: "+err.Error())
+		return
+	}
+
+	// Extract identity from claims.
+	sub, _ := claims["sub"].(string)
+	email, _ := claims["email"].(string)
+	name, _ := claims["name"].(string)
+	userID := sub
+	if userID == "" {
+		userID = email
+	}
+
+	sess, err := mintSession(r.Context(), h.SessionStore, userID, email, name, "oidc", h.Cfg.SessionTTL)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		return
+	}
+
+	// Clear the PKCE state cookie — it's single-use.
+	auth.ClearOIDCStateCookie(w)
+	auth.SetSessionCookieInsecure(w, sess.ID, time.UnixMilli(sess.ExpiresAt))
+
+	returnTo := pkceState.ReturnTo
+	if returnTo == "" || !strings.HasPrefix(returnTo, "/") {
+		returnTo = "/ui/"
+	}
+	http.Redirect(w, r, returnTo, http.StatusFound)
+}
+
+// mintSession creates a new session in the store and returns it.
+func mintSession(ctx context.Context, ss SessionStore, userID, email, name, method string, ttl time.Duration) (*model.Session, error) {
+	id, err := auth.NewSessionID()
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UnixMilli()
+	sess := &model.Session{
+		ID:         id,
+		UserID:     userID,
+		UserEmail:  email,
+		UserName:   name,
+		AuthMethod: method,
+		CreatedAt:  now,
+		ExpiresAt:  now + ttl.Milliseconds(),
+		LastSeen:   now,
+	}
+	if err := ss.CreateSession(ctx, sess); err != nil {
+		return nil, err
+	}
+	return sess, nil
+}
+
+// verifyBasicCreds validates user/pass against the config.
+//
+// AUTH-OIDC: this duplicates the logic in server/middleware.go by design —
+// keeping the native API package independent of internal/server avoids an
+// import cycle. Both use crypto/sha256 + subtle compare; the canonical
+// implementation is the one in middleware.go.
+func verifyBasicCreds(cfg config.Config, user, pass string) bool {
+	return verifyPassHash(cfg.BasicUser, cfg.BasicPassHash, user, pass)
+}
+
+// verifyPassHash checks that user==wantUser and SHA-256(pass)==hex(wantHash).
+// Uses constant-time comparison to resist timing side-channels.
+func verifyPassHash(wantUser, wantHashHex, user, pass string) bool {
+	if subtle.ConstantTimeCompare([]byte(user), []byte(wantUser)) != 1 {
+		return false
+	}
+	got := sha256.Sum256([]byte(pass))
+	want, err := hex.DecodeString(wantHashHex)
+	if err != nil || len(want) != len(got) {
+		return false
+	}
+	return subtle.ConstantTimeCompare(got[:], want) == 1
 }
 
 // ---- shared helpers --------------------------------------------------------
