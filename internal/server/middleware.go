@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/litemlflow/litemlflow/internal/auth"
 	"github.com/litemlflow/litemlflow/internal/config"
 	"github.com/litemlflow/litemlflow/internal/model"
+	"github.com/litemlflow/litemlflow/internal/store"
 )
 
 type ctxKey int
@@ -22,6 +24,8 @@ const (
 	ctxKeyUser
 	// AUTH-OIDC: session carried in context so handlers can access it.
 	ctxKeySession
+	// TENANCY: workspace id carried in context for downstream scoping.
+	ctxKeyWorkspace
 )
 
 // requestIDMiddleware attaches a short request id to context and response.
@@ -260,4 +264,58 @@ func shortHash(seed int64) string {
 	h.Write([]byte{byte(seed), byte(seed >> 8), byte(seed >> 16), byte(seed >> 24),
 		byte(seed >> 32), byte(seed >> 40), byte(seed >> 48), byte(seed >> 56)})
 	return hex.EncodeToString(h.Sum(nil))[:12]
+}
+
+// workspaceMiddleware resolves the current workspace from the request and
+// injects it into the context. Resolution order:
+//  1. X-Workspace HTTP header
+//  2. lmf_workspace cookie
+//  3. "default" fallback
+//
+// If the requested workspace is unknown, a 400 is returned. This middleware
+// must run after authMiddleware.
+//
+// The resolved workspace id is also set as the X-LiteMLflow-Workspace request
+// header so downstream handlers that cannot import this package can read it
+// without needing access to the unexported ctxKeyWorkspace.
+func workspaceMiddleware(st store.Store) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			wsID := r.Header.Get("X-Workspace")
+			if wsID == "" {
+				if c, err := r.Cookie("lmf_workspace"); err == nil {
+					wsID = c.Value
+				}
+			}
+			if wsID == "" {
+				wsID = "default"
+			}
+			// Validate the workspace exists to prevent spoofing arbitrary IDs.
+			if wsID != "default" {
+				if _, err := st.GetWorkspace(r.Context(), wsID); err != nil {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusBadRequest)
+					_ = json.NewEncoder(w).Encode(map[string]string{
+						"error_code": "INVALID_PARAMETER_VALUE",
+						"message":    "unknown workspace: " + wsID,
+					})
+					return
+				}
+			}
+			ctx := context.WithValue(r.Context(), ctxKeyWorkspace, wsID)
+			// Set header so downstream handlers in other packages can read it
+			// without importing the server package (avoids circular deps).
+			r.Header.Set("X-LiteMLflow-Workspace", wsID)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+// CurrentWorkspace extracts the current workspace ID from the request context.
+// Falls back to "default" if not set (e.g., in tests that bypass the middleware).
+func CurrentWorkspace(r *http.Request) string {
+	if ws, ok := r.Context().Value(ctxKeyWorkspace).(string); ok && ws != "" {
+		return ws
+	}
+	return "default"
 }

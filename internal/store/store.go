@@ -29,6 +29,7 @@ type SearchOptions struct {
 	OrderBy        []string // e.g., ["attributes.start_time DESC"]
 	MaxResults     int      // capped by impl (default 100, max 50000)
 	PageToken      string   // opaque cursor from previous response
+	WorkspaceID    string   // if set, scope experiments to this workspace (default "default")
 }
 
 // SearchResult is a generic paginated result.
@@ -114,4 +115,20 @@ type Store interface {
 	TransitionModelStage(ctx context.Context, name string, version int64, stage string, archiveExisting bool) (*model.ModelVersion, error)
 	SetModelVersionTag(ctx context.Context, name string, version int64, key, value string) error
 	DeleteModelVersionTag(ctx context.Context, name string, version int64, key string) error
+
+	// Workspaces.
+	CreateWorkspace(ctx context.Context, w *model.Workspace) error
+	GetWorkspace(ctx context.Context, id string) (*model.Workspace, error)
+	ListWorkspaces(ctx context.Context) ([]*model.Workspace, error)
+	UpdateWorkspace(ctx context.Context, id string, name *string, description *string) error
+	DeleteWorkspace(ctx context.Context, id string) error
+
+	// Workspace members.
+	AddMember(ctx context.Context, workspaceID, userID, role string) error
+	RemoveMember(ctx context.Context, workspaceID, userID string) error
+	ListMembers(ctx context.Context, workspaceID string) ([]*model.WorkspaceMember, error)
+	GetMemberRole(ctx context.Context, workspaceID, userID string) (string, error)
+
+	// Scoped experiment lookup.
+	GetExperimentByNameInWorkspace(ctx context.Context, workspaceID, name string) (*model.Experiment, error)
 }

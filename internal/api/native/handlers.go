@@ -81,6 +81,9 @@ func (h *Handler) Mount(r chi.Router) {
 	r.Post("/api/v1/auth/logout", h.Logout)
 	r.Get("/api/v1/auth/oidc/start", h.OIDCStart)
 	r.Get("/api/v1/auth/oidc/callback", h.OIDCCallback)
+
+	// TENANCY: workspace endpoints
+	h.mountWorkspaceRoutes(r)
 }
 
 // ---- health -----------------------------------------------------------------
@@ -823,6 +826,8 @@ func writeStoreErr(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "RESOURCE_DOES_NOT_EXIST", err.Error())
 	case errors.Is(err, store.ErrAlreadyExists):
 		writeError(w, http.StatusBadRequest, "RESOURCE_ALREADY_EXISTS", err.Error())
+	case errors.Is(err, store.ErrConflict):
+		writeError(w, http.StatusConflict, "RESOURCE_CONFLICT", err.Error())
 	default:
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
 	}
