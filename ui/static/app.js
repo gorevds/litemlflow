@@ -1025,9 +1025,15 @@ mlflow.log_metric("loss", 0.42)</pre>
             wrap.innerHTML = `<div class="empty card">No runs yet.</div>`;
             return;
           }
-          // Find time bounds across all runs.
+          // Find time bounds across all runs. Guard against degenerate
+          // inputs (no positive start times, all-equal times) so the bar
+          // computations never produce Infinity / NaN.
           const now = Date.now();
           const sts = runs.map(r => r.info.start_time).filter(t => t > 0);
+          if (sts.length === 0) {
+            wrap.innerHTML = `<div class="empty card">Runs have no start_time set yet.</div>`;
+            return;
+          }
           const ets = runs.map(r => r.info.end_time || now);
           const minT = Math.min(...sts);
           const maxT = Math.max(...ets);
@@ -2992,8 +2998,14 @@ c.create_prompt("rag.system", "You are a helpful assistant.", description="seed 
             }
             const w0 = 280, h0 = 100, pad = 8;
             const xs = points.map(p => p.x), ys = points.map(p => p.y);
+            // Filter NaN/Infinity defensively — log_metric is float so a
+            // bad row from a custom client could otherwise blow up the SVG.
+            const finiteYs = ys.filter(Number.isFinite);
+            if (finiteYs.length === 0) {
+              return `<div class="widget-row" style="color:var(--fg-muted)">All values are non-finite.</div>`;
+            }
             const xMin = Math.min(...xs), xMax = Math.max(...xs);
-            const yMin = Math.min(...ys), yMax = Math.max(...ys);
+            const yMin = Math.min(...finiteYs), yMax = Math.max(...finiteYs);
             const xSpan = Math.max(1, xMax - xMin);
             const ySpan = Math.max(1e-9, yMax - yMin);
             const sx = x => pad + ((x - xMin) / xSpan) * (w0 - 2 * pad);
@@ -3080,7 +3092,9 @@ c.create_prompt("rag.system", "You are a helpful assistant.", description="seed 
         try {
           await fetchJSON(`/api/v1/dashboards/${encodeURIComponent(project)}`, {
             method: "PUT",
-            body: JSON.stringify({ widgets: JSON.stringify(widgets) }),
+            // The server stores `widgets` as a JSON array (text column), so we
+            // pass the array directly and let the server preserve it verbatim.
+            body: JSON.stringify({ widgets }),
           });
           showToast("Dashboard saved");
         } catch (err) {

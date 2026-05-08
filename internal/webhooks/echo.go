@@ -78,6 +78,12 @@ func (l *EchoLog) List(max int) []EchoEntry {
 }
 
 // IsEchoURL reports whether url is the special in-process echo target.
+// Accept the bare prefix (lmf://echo) or the prefix followed by a path
+// separator (lmf://echo/...). This rejects names like lmf://echofoo or
+// lmf://echo@evil that share the literal prefix but mean something else.
 func IsEchoURL(url string) bool {
-	return strings.HasPrefix(url, EchoSchemePrefix)
+	if url == EchoSchemePrefix {
+		return true
+	}
+	return strings.HasPrefix(url, EchoSchemePrefix+"/")
 }
