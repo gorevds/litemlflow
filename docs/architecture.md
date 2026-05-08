@@ -111,8 +111,19 @@ interface as `FilesystemStore`, making it fully transparent to all API handlers.
 | `search_runs` (100 results, indexed) | < 20 ms | < 60 ms | < 150 ms |
 | First paint (UI list, 5k runs) | < 300 ms (cold) | < 500 ms | < 800 ms |
 | Cold start (binary up) | < 200 ms | < 500 ms | — |
+| `get-history?downsample=N` (50k pts → 500) | < 300 ms | < 500 ms | — |
 
 These are tested by the perf-regression CI; >5% regression on any line blocks merge.
+
+### Metric downsampling
+
+The UI fetches metric history with `?downsample=1000` so that large series never block page rendering. The server applies the **LTTB (Largest-Triangle-Three-Buckets)** algorithm in `internal/store/downsample.go`:
+
+1. The full history is loaded from SQLite in one query (the index on `(run_id, key, timestamp, step)` makes this a sequential scan of only the relevant rows).
+2. The in-memory LTTB pass is O(N) in the raw point count and O(target) in allocations.
+3. The compressed response is typically 10–200× smaller than the raw series, so network transfer and JSON parsing on the client are proportionally faster.
+
+The paginated path (`?max_results=N&page_token=...`) is unchanged and is used by programmatic callers (e.g., the MLflow Python client) that need the complete data.
 
 ## Security boundaries
 

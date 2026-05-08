@@ -754,12 +754,19 @@ func (h *Handler) LogInputs(w http.ResponseWriter, r *http.Request) {
 }
 
 type getMetricHistoryResp struct {
-	Metrics       []metricDTO `json:"metrics"`
-	NextPageToken string      `json:"next_page_token,omitempty"`
+	Metrics          []metricDTO `json:"metrics"`
+	NextPageToken    string      `json:"next_page_token,omitempty"`
+	DownsampledFrom  *int64      `json:"downsampled_from,omitempty"`
 }
 
 // GetMetricHistory handles GET .../metrics/get-history.
-// Supports optional ?max_results=N and ?page_token=... query params.
+// Supports optional ?max_results=N and ?page_token=... query params for
+// paginated access, and ?downsample=N for server-side LTTB downsampling.
+//
+// When ?downsample=N is supplied, the server reduces the full history to at
+// most N representative points using the LTTB algorithm and includes
+// "downsampled_from" in the response with the total raw point count.
+// The paginated path (?max_results / ?page_token) is unchanged.
 func (h *Handler) GetMetricHistory(w http.ResponseWriter, r *http.Request) {
 	runID := r.URL.Query().Get("run_id")
 	if runID == "" {
@@ -770,6 +777,26 @@ func (h *Handler) GetMetricHistory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "run_id and metric_key are required")
 		return
 	}
+
+	// ?downsample=N — LTTB path; mutually exclusive with pagination.
+	if ds := r.URL.Query().Get("downsample"); ds != "" {
+		target, err := strconv.Atoi(ds)
+		if err != nil || target < 0 {
+			writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "downsample must be a non-negative integer")
+			return
+		}
+		pts, total, err := h.Store.GetMetricHistoryDownsampled(r.Context(), runID, key, target)
+		if err != nil {
+			writeStoreErr(w, err)
+			return
+		}
+		resp := getMetricHistoryResp{Metrics: metricsToDTO(pts)}
+		resp.DownsampledFrom = &total
+		writeJSON(w, resp)
+		return
+	}
+
+	// Standard paginated path.
 	var maxResults int
 	if v := r.URL.Query().Get("max_results"); v != "" {
 		n, err := strconv.Atoi(v)

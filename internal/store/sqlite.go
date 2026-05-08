@@ -1099,6 +1099,19 @@ func decodeMetricPageToken(tok string) (ts, step int64, err error) {
 	return ts, step, err
 }
 
+// GetMetricHistoryDownsampled fetches all metric points for (runID, key) and
+// reduces them to at most target points using the LTTB algorithm.
+// Returns (downsampled, totalRawCount, error).
+func (s *SQLiteStore) GetMetricHistoryDownsampled(ctx context.Context, runID, key string, target int) ([]model.Metric, int64, error) {
+	// Fetch all points (no pagination; we need the full series for LTTB).
+	all, _, err := s.GetMetricHistory(ctx, runID, key, MetricHistoryOptions{})
+	if err != nil {
+		return nil, 0, err
+	}
+	total := int64(len(all))
+	return DownsampleLTTB(all, target), total, nil
+}
+
 // GetLatestMetrics returns the most recent value of every metric for a run.
 func (s *SQLiteStore) GetLatestMetrics(ctx context.Context, runID string) ([]model.Metric, error) {
 	rows, err := s.db.QueryContext(ctx, `
