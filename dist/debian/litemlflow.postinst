@@ -1,0 +1,34 @@
+#!/bin/sh
+# postinst — runs after package files are unpacked.
+set -e
+
+case "$1" in
+    configure)
+        # Create the litemlflow system user if it does not already exist.
+        if ! getent passwd litemlflow >/dev/null 2>&1; then
+            adduser \
+                --system \
+                --group \
+                --no-create-home \
+                --home /var/lib/litemlflow \
+                --shell /usr/sbin/nologin \
+                --disabled-password \
+                --gecos "LiteMLflow daemon" \
+                litemlflow
+        fi
+
+        # Create the data directory with tight permissions.
+        mkdir -p /var/lib/litemlflow
+        chown litemlflow:litemlflow /var/lib/litemlflow
+        chmod 0750 /var/lib/litemlflow
+
+        # Reload systemd and enable the unit so it survives reboots.
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload
+            systemctl enable litemlflow.service || true
+        fi
+        ;;
+esac
+
+#DEBHELPER#
+exit 0

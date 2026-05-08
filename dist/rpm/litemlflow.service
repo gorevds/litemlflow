@@ -1,0 +1,37 @@
+[Unit]
+Description=LiteMLflow experiment tracker
+Documentation=https://litemlflow.dev
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=litemlflow
+Group=litemlflow
+ExecStart=/usr/bin/litemlflow up --data /var/lib/litemlflow --addr :5000
+Restart=on-failure
+RestartSec=2s
+
+# Sandboxing
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/litemlflow
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+
+# Resources
+LimitNOFILE=65536
+
+# Logging via journald
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

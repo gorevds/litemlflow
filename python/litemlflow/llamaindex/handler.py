@@ -304,16 +304,33 @@ class _LiteMLflowEventHandlerImpl:
 
     # ----------------------------------------------------------- event dispatch
 
+    # _unknown_event_warned is a per-instance set so we log at most one
+    # warning per unrecognized event class name. Keeps tracing observable when
+    # llama-index-core renames events in a new release without filling logs.
     def handle(self, event: Any) -> None:  # type: ignore[override]
         """Dispatch a LlamaIndex event to the appropriate handler method."""
         cls_name = type(event).__name__
         handler_name = f"_on_{cls_name}"
         handler = getattr(self, handler_name, None)
-        if handler is not None:
-            try:
-                handler(event)
-            except Exception:
-                pass  # Best-effort; never crash the pipeline.
+        if handler is None:
+            warned = getattr(self, "_unknown_event_warned", None)
+            if warned is None:
+                warned = set()
+                self._unknown_event_warned = warned
+            if cls_name not in warned:
+                warned.add(cls_name)
+                import logging
+                logging.getLogger(__name__).warning(
+                    "litemlflow.llamaindex: no handler for event class %r — "
+                    "spans for this event type will be silently dropped. "
+                    "This usually indicates a llama-index-core version mismatch.",
+                    cls_name,
+                )
+            return
+        try:
+            handler(event)
+        except Exception:
+            pass  # Best-effort; never crash the pipeline.
 
     # ------------------------------------------------------------------ query
 

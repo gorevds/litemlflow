@@ -1,0 +1,18 @@
+Source: litemlflow
+Section: utils
+Priority: optional
+Maintainer: LiteMLflow Maintainers <maintainers@litemlflow.dev>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.2
+Homepage: https://litemlflow.dev
+Rules-Requires-Root: no
+
+Package: litemlflow
+Architecture: any
+Depends: ${misc:Depends}, libc6
+Description: Single-binary experiment tracker, MLflow-compatible, with LLM trace support
+ LiteMLflow is a lightweight, self-hosted experiment tracker for solo ML
+ engineers and small teams. Single binary, MLflow-API-compatible, with
+ first-class LLM trace support.
+ .
+ No database to install. No object store to configure. No reverse proxy.

@@ -1,0 +1,130 @@
+# Default values for litemlflow.
+# This is a YAML-formatted file.
+
+replicaCount: 1
+
+image:
+  repository: litemlflow/litemlflow
+  tag: "v0.4.0-rc1"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # Whether to create a ServiceAccount for the pod.
+  create: true
+  annotations: {}
+  name: ""
+
+# Litemlflow server configuration.
+config:
+  # Listening address inside the container.
+  addr: ":5000"
+  # Auth mode: none | basic
+  # Set to "basic" and provide auth.user / auth.passHash to enable basic auth.
+  authMode: "none"
+
+auth:
+  # Username for basic auth (authMode=basic).
+  user: ""
+  # SHA-256 hex of the password. Generate with:
+  #   printf 'yourpassword' | sha256sum | awk '{print $1}'
+  # Stored in a Kubernetes Secret; not echoed in pod env directly.
+  passHash: ""
+
+service:
+  type: ClusterIP
+  port: 5000
+  # Annotations for the Service object (e.g. for cloud load-balancer config).
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+    # kubernetes.io/ingress.class: nginx
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: litemlflow.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  #  - secretName: litemlflow-tls
+  #    hosts:
+  #      - litemlflow.example.com
+
+persistence:
+  # Whether to use a PersistentVolumeClaim for data storage.
+  enabled: true
+  # Storage class. Leave empty to use the cluster default.
+  storageClass: ""
+  accessMode: ReadWriteOnce
+  size: 10Gi
+  # Annotations for the PVC.
+  annotations: {}
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 64Mi
+
+# Prometheus metrics integration.
+metrics:
+  serviceMonitor:
+    # Set to true if you have the Prometheus Operator installed.
+    enabled: false
+    # The namespace where the ServiceMonitor object will be created.
+    # Defaults to the release namespace.
+    namespace: ""
+    # Additional labels for the ServiceMonitor (must match Prometheus operator selector).
+    additionalLabels: {}
+    interval: 30s
+    scrapeTimeout: 10s
+    # Metrics are exposed on /metrics (same port as the API).
+    path: /metrics
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 30
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  failureThreshold: 3
+
+# Pod-level node scheduling.
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Extra environment variables injected into the container.
+# Useful for advanced config without modifying the chart.
+extraEnv: []
+# - name: LITEMLFLOW_LOG_LEVEL
+#   value: debug
+
+podAnnotations: {}
+podSecurityContext:
+  fsGroup: 65532
+  runAsNonRoot: true
+  runAsUser: 65532
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL

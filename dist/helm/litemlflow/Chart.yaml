@@ -1,0 +1,17 @@
+apiVersion: v2
+name: litemlflow
+description: Single-binary MLflow-compatible experiment tracker with first-class LLM tracing
+type: application
+version: 0.1.0
+appVersion: "0.4.0-rc1"
+home: https://litemlflow.dev
+sources:
+  - https://github.com/litemlflow/litemlflow
+maintainers:
+  - name: LiteMLflow Maintainers
+    email: maintainers@litemlflow.dev
+keywords:
+  - mlflow
+  - experiment-tracking
+  - llm
+  - observability

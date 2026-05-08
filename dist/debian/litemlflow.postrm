@@ -1,0 +1,27 @@
+#!/bin/sh
+# postrm — runs after package files are removed.
+set -e
+
+case "$1" in
+    purge)
+        # Remove the system user and its home directory on purge only.
+        # On plain remove we leave the user so the data dir survives.
+        if getent passwd litemlflow >/dev/null 2>&1; then
+            deluser --system litemlflow || true
+        fi
+        if getent group litemlflow >/dev/null 2>&1; then
+            delgroup --system litemlflow || true
+        fi
+        # Remove the data directory on purge (admin has been warned via debconf).
+        rm -rf /var/lib/litemlflow
+        ;;
+
+    remove)
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload || true
+        fi
+        ;;
+esac
+
+#DEBHELPER#
+exit 0

@@ -1,0 +1,18 @@
+#!/usr/bin/make -f
+# Minimal debhelper rules file.
+# The binary is pre-built by the release pipeline and dropped into the
+# package tree before dpkg-buildpackage is invoked; no Go compilation here.
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	# Nothing to compile — binary is pre-built.
+
+override_dh_auto_test:
+	# Skip tests during packaging.
+
+override_dh_auto_install:
+	install -D -m 0755 litemlflow debian/litemlflow/usr/bin/litemlflow
+	install -D -m 0644 debian/litemlflow.service \
+		debian/litemlflow/lib/systemd/system/litemlflow.service

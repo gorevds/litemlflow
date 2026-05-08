@@ -3,7 +3,7 @@
 **Date:** 2026-05-08  
 **Harness:** `tests/integration/bench.py --runs 1000 --out bench-v04.json`  
 **Both servers ran on local loopback** (same machine, idle). LiteMLflow uses its
-embedded bbolt store; MLflow uses SQLite + filesystem artifacts (`--workers 1`).
+embedded SQLite (modernc.org/sqlite, pure Go) store; MLflow uses SQLite + filesystem artifacts (`--workers 1`).
 
 ## Results
 
@@ -30,13 +30,13 @@ the benchmark correctly skips that comparison.*
   interpreter startup, no SQLAlchemy ORM initialisation, no SQLite schema
   migration. This matters for CI pipelines and ephemeral environments.
 - **`log_metric` latency (15× p50):** Each metric write goes through an
-  in-process bbolt transaction without HTTP → Python → SQL overhead. The p99
+  in-process SQLite (pure-Go modernc.org/sqlite) transaction without HTTP → Python → SQL overhead. The p99
   (2.4 ms vs 51.5 ms) gap is even wider because MLflow's SQLite path shows a
   long tail under occasional lock contention.
 - **`log_batch` throughput (3.1×):** LiteMLflow handles batch inserts as a
   single bolt transaction; MLflow must fan out to multiple SQLAlchemy INSERT
   statements with per-row column widths.
-- **Population speed (17×):** The same bbolt advantage compounds over 1 000 runs.
+- **Population speed (17×):** The same SQLite (modernc.org/sqlite, pure Go) advantage compounds over 1 000 runs.
 
 **Where MLflow wins or ties:**
 
@@ -48,7 +48,7 @@ the benchmark correctly skips that comparison.*
 - **Raw metric-history fetch (MLflow wins on this size):** For the downsample
   benchmark, MLflow returns 50 000 raw metric points in 2.6 ms p50 vs
   LiteMLflow's 124 ms. MLflow's SQLite column-scan is faster for this specific
-  sequential read pattern; LiteMLflow reads from bbolt buckets which involve
+  sequential read pattern; LiteMLflow reads from SQLite indexed lookups which involve
   more random-access seeks. LiteMLflow's LTTB downsample path (119 ms) only
   returns 500 representative points, which is the correct operational choice
   for chart rendering, but the raw baseline is slower.

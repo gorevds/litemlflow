@@ -1,6 +1,7 @@
 # Build artifacts
 /bin/
-/dist/
+# NOTE: do NOT ignore /dist/ — that's the package recipes (homebrew/, debian/, rpm/, snap/, helm/).
+# Python build artifacts are scoped to python/ below.
 /build/
 /tmp/
 *.exe
@@ -27,8 +28,8 @@ __pycache__/
 venv/
 env/
 .python-version
-build/
-dist/
+python/build/
+python/dist/
 *.whl
 .coverage
 htmlcov/

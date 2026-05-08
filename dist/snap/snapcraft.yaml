@@ -1,0 +1,25 @@
+name: litemlflow
+version: '0.4.0-rc1'
+summary: Single-binary MLflow-compatible experiment tracker
+description: |
+  LiteMLflow is a lightweight, self-hosted experiment tracker for solo ML
+  engineers and small teams. Single binary, MLflow-API-compatible, with
+  first-class LLM trace support.
+
+  No database to install. No object store to configure. No reverse proxy.
+base: core22
+confinement: strict
+grade: stable
+
+parts:
+  litemlflow:
+    plugin: dump
+    source: https://github.com/litemlflow/litemlflow/releases/download/v0.4.0-rc1/litemlflow-v0.4.0-rc1-linux-amd64
+    source-type: file
+    organize:
+      'litemlflow-*': bin/litemlflow
+
+apps:
+  litemlflow:
+    command: bin/litemlflow
+    plugs: [network, network-bind, home]
