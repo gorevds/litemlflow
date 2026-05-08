@@ -62,6 +62,14 @@ type Config struct {
 	S3AccessKey string
 	S3SecretKey string
 	S3Prefix    string // optional key prefix, e.g. "litemlflow/"
+	// S3MultipartThreshold is the minimum upload size (bytes) that triggers
+	// multipart upload. Default 100 MiB (100 << 20). Set to 0 to keep the
+	// compiled-in default.
+	S3MultipartThreshold int64
+
+	// OTLPGRPCAddr is the listen address for the OTLP/gRPC receiver, e.g.
+	// "127.0.0.1:4317". Empty (the default) disables the gRPC listener.
+	OTLPGRPCAddr string
 }
 
 // FromEnv returns a Config populated from environment variables, then
@@ -79,15 +87,16 @@ func FromEnv(explicit Config) (Config, error) {
 
 func defaults() Config {
 	return Config{
-		Addr:            ":5000",
-		Auth:            "none",
-		OIDCScopes:      "openid email profile",
-		SessionTTL:      7 * 24 * time.Hour,
-		MaxArtifactSize: 5 << 30,
-		MaxRequestSize:  100 << 20,
-		ReadTimeout:     30 * time.Second,
-		WriteTimeout:    30 * time.Second,
-		IdleTimeout:     120 * time.Second,
+		Addr:                 ":5000",
+		Auth:                 "none",
+		OIDCScopes:           "openid email profile",
+		SessionTTL:           7 * 24 * time.Hour,
+		MaxArtifactSize:      5 << 30,
+		MaxRequestSize:       100 << 20,
+		ReadTimeout:          30 * time.Second,
+		WriteTimeout:         30 * time.Second,
+		IdleTimeout:          120 * time.Second,
+		S3MultipartThreshold: 100 << 20, // 100 MiB
 	}
 }
 
@@ -156,6 +165,14 @@ func overlayFromEnv(c Config) Config {
 	}
 	if v := os.Getenv("LITEMLFLOW_S3_PREFIX"); v != "" {
 		c.S3Prefix = v
+	}
+	if v := os.Getenv("LITEMLFLOW_S3_MULTIPART_THRESHOLD"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			c.S3MultipartThreshold = n
+		}
+	}
+	if v := os.Getenv("LITEMLFLOW_OTLP_GRPC_ADDR"); v != "" {
+		c.OTLPGRPCAddr = v
 	}
 	return c
 }
@@ -239,6 +256,12 @@ func overlay(base, explicit Config) Config {
 	}
 	if explicit.S3Prefix != "" {
 		base.S3Prefix = explicit.S3Prefix
+	}
+	if explicit.S3MultipartThreshold != 0 {
+		base.S3MultipartThreshold = explicit.S3MultipartThreshold
+	}
+	if explicit.OTLPGRPCAddr != "" {
+		base.OTLPGRPCAddr = explicit.OTLPGRPCAddr
 	}
 	return base
 }

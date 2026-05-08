@@ -187,6 +187,24 @@ func newTestStore(t *testing.T, srv *httptest.Server) *artifact.S3Store {
 	return s
 }
 
+// newTestStoreWithThreshold creates an S3Store with a custom multipart threshold.
+func newTestStoreWithThreshold(t *testing.T, srv *httptest.Server, threshold int64) *artifact.S3Store {
+	t.Helper()
+	s, err := artifact.NewS3Store(artifact.S3Config{
+		Endpoint:           srv.URL,
+		Bucket:             "testbucket",
+		Region:             "us-east-1",
+		AccessKey:          "AKIAIOSFODNN7EXAMPLE",
+		SecretKey:          "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+		MultipartThreshold: threshold,
+		HTTP:               srv.Client(),
+	})
+	if err != nil {
+		t.Fatalf("NewS3Store: %v", err)
+	}
+	return s
+}
+
 // ---- tests ------------------------------------------------------------------
 
 func TestS3UploadAndOpen(t *testing.T) {
@@ -432,6 +450,335 @@ func TestS3RealMinIO(t *testing.T) {
 	// Delete.
 	if err := s.Delete(runID, "integ/file.txt"); err != nil {
 		t.Fatalf("Delete: %v", err)
+	}
+}
+
+// ---- multipart upload tests -------------------------------------------------
+
+// mockMultipartS3 is a specialised mock that tracks the sequence of S3
+// multipart API calls so tests can verify ordering and query parameters.
+type mockMultipartS3 struct {
+	mu sync.Mutex
+
+	// Recorded operations in order of receipt.
+	ops []string // "initiate", "part:N", "complete", "abort"
+
+	// Assembled object data, keyed by key.
+	objects map[string][]byte
+
+	// In-progress multipart: parts collected keyed by uploadID.
+	parts map[string]map[int][]byte
+
+	// failPartNumber, when > 0, causes uploadPart to return 500 for that part.
+	failPartNumber int
+}
+
+func newMockMultipartS3() *mockMultipartS3 {
+	return &mockMultipartS3{
+		objects: make(map[string][]byte),
+		parts:   make(map[string]map[int][]byte),
+	}
+}
+
+func (m *mockMultipartS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/")
+	parts := strings.SplitN(path, "/", 2)
+	key := ""
+	if len(parts) == 2 {
+		key = parts[1]
+	}
+	q := r.URL.Query()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	switch {
+	// Initiate multipart: POST /{bucket}/{key}?uploads
+	case r.Method == http.MethodPost && q.Get("uploads") == "" && q.Has("uploads"):
+		// S3 sends ?uploads= (empty value), url.Values parses it with key "uploads" and value ""
+		uploadID := fmt.Sprintf("upload-%d", len(m.parts)+1)
+		m.parts[uploadID] = make(map[int][]byte)
+		m.ops = append(m.ops, "initiate")
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprintf(w,
+			`<?xml version="1.0" encoding="UTF-8"?>`+
+				`<InitiateMultipartUploadResult><Bucket>testbucket</Bucket><Key>%s</Key><UploadId>%s</UploadId></InitiateMultipartUploadResult>`,
+			key, uploadID)
+
+	// Upload part: PUT /{bucket}/{key}?partNumber=N&uploadId=<id>
+	case r.Method == http.MethodPut && q.Get("partNumber") != "" && q.Get("uploadId") != "":
+		uploadID := q.Get("uploadId")
+		partNum := 0
+		_, _ = fmt.Sscanf(q.Get("partNumber"), "%d", &partNum)
+		if m.failPartNumber > 0 && partNum == m.failPartNumber {
+			m.ops = append(m.ops, fmt.Sprintf("part:%d:fail", partNum))
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte("injected failure"))
+			return
+		}
+		data, _ := io.ReadAll(r.Body)
+		if m.parts[uploadID] == nil {
+			m.parts[uploadID] = make(map[int][]byte)
+		}
+		m.parts[uploadID][partNum] = data
+		m.ops = append(m.ops, fmt.Sprintf("part:%d", partNum))
+		etag := fmt.Sprintf(`"etag-part-%d"`, partNum)
+		w.Header().Set("ETag", etag)
+		w.WriteHeader(http.StatusOK)
+
+	// Complete multipart: POST /{bucket}/{key}?uploadId=<id>
+	case r.Method == http.MethodPost && q.Get("uploadId") != "" && !q.Has("uploads"):
+		uploadID := q.Get("uploadId")
+		// Assemble parts in order.
+		partMap := m.parts[uploadID]
+		var assembled []byte
+		for i := 1; i <= len(partMap); i++ {
+			assembled = append(assembled, partMap[i]...)
+		}
+		m.objects[key] = assembled
+		delete(m.parts, uploadID)
+		m.ops = append(m.ops, "complete")
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w,
+			`<?xml version="1.0" encoding="UTF-8"?>`+
+				`<CompleteMultipartUploadResult><Key>`+key+`</Key></CompleteMultipartUploadResult>`)
+
+	// Abort multipart: DELETE /{bucket}/{key}?uploadId=<id>
+	case r.Method == http.MethodDelete && q.Get("uploadId") != "":
+		uploadID := q.Get("uploadId")
+		delete(m.parts, uploadID)
+		m.ops = append(m.ops, "abort")
+		w.WriteHeader(http.StatusNoContent)
+
+	// Regular single PUT
+	case r.Method == http.MethodPut:
+		data, _ := io.ReadAll(r.Body)
+		m.objects[key] = data
+		m.ops = append(m.ops, "single-put")
+		w.WriteHeader(http.StatusOK)
+
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+// TestS3MultipartLargeUpload verifies that uploads over the threshold trigger
+// the multipart API in the correct order (initiate → parts → complete).
+func TestS3MultipartLargeUpload(t *testing.T) {
+	t.Parallel()
+
+	// Threshold of 1 KiB makes this test fast; we send 2.5 KiB → 3 parts.
+	const threshold = 1024
+	payload := bytes.Repeat([]byte("M"), 2*threshold+threshold/2) // 2560 bytes → 3 parts
+
+	mock := newMockMultipartS3()
+	srv := httptest.NewServer(mock)
+	defer srv.Close()
+
+	s := newTestStoreWithThreshold(t, srv, threshold)
+
+	if err := s.Upload("runX", "big/file.bin", bytes.NewReader(payload), 0); err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+
+	mock.mu.Lock()
+	ops := append([]string(nil), mock.ops...)
+	assembled := append([]byte(nil), mock.objects["artifacts/runX/big/file.bin"]...)
+	mock.mu.Unlock()
+
+	// Verify operation sequence: initiate → part:1 → part:2 → part:3 → complete
+	wantOps := []string{"initiate", "part:1", "part:2", "part:3", "complete"}
+	if len(ops) != len(wantOps) {
+		t.Fatalf("want ops %v, got %v", wantOps, ops)
+	}
+	for i, op := range wantOps {
+		if ops[i] != op {
+			t.Errorf("op[%d]: want %q got %q", i, op, ops[i])
+		}
+	}
+
+	// Verify data integrity.
+	if !bytes.Equal(assembled, payload) {
+		t.Fatalf("assembled data mismatch: len want %d got %d", len(payload), len(assembled))
+	}
+}
+
+// TestS3SinglePutBelowThreshold verifies that uploads below the threshold
+// use a plain single PUT (no multipart API calls).
+func TestS3SinglePutBelowThreshold(t *testing.T) {
+	t.Parallel()
+
+	const threshold = 1024
+	payload := bytes.Repeat([]byte("S"), threshold-1) // 1 byte below threshold
+
+	mock := newMockMultipartS3()
+	srv := httptest.NewServer(mock)
+	defer srv.Close()
+
+	s := newTestStoreWithThreshold(t, srv, threshold)
+
+	if err := s.Upload("runY", "small.txt", bytes.NewReader(payload), 0); err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+
+	mock.mu.Lock()
+	ops := append([]string(nil), mock.ops...)
+	mock.mu.Unlock()
+
+	if len(ops) != 1 || ops[0] != "single-put" {
+		t.Fatalf("expected single-put, got %v", ops)
+	}
+}
+
+// TestS3MultipartAbortOnPartFailure verifies that when a part upload fails,
+// abortMultipart is called so orphaned parts are cleaned up.
+func TestS3MultipartAbortOnPartFailure(t *testing.T) {
+	t.Parallel()
+
+	const threshold = 512
+	payload := bytes.Repeat([]byte("A"), 3*threshold) // 3 parts; part 2 will fail
+
+	mock := newMockMultipartS3()
+	mock.failPartNumber = 2
+	srv := httptest.NewServer(mock)
+	defer srv.Close()
+
+	s := newTestStoreWithThreshold(t, srv, threshold)
+
+	err := s.Upload("runZ", "fail.bin", bytes.NewReader(payload), 0)
+	if err == nil {
+		t.Fatal("expected an error from the failing part, got nil")
+	}
+
+	mock.mu.Lock()
+	ops := append([]string(nil), mock.ops...)
+	mock.mu.Unlock()
+
+	// Must see: initiate, part:1, part:2:fail, abort — in that order.
+	if len(ops) < 4 {
+		t.Fatalf("expected at least 4 ops (initiate/part1/part2fail/abort), got %v", ops)
+	}
+	if ops[0] != "initiate" {
+		t.Errorf("first op: want initiate, got %q", ops[0])
+	}
+	if ops[len(ops)-1] != "abort" {
+		t.Errorf("last op: want abort, got %q", ops[len(ops)-1])
+	}
+}
+
+// TestS3MultipartCompleteXMLFormat verifies the CompleteMultipartUpload XML
+// body sent by the client has the required shape:
+//
+//	<CompleteMultipartUpload>
+//	  <Part><PartNumber>1</PartNumber><ETag>"abc..."</ETag></Part>
+//	  ...
+//	</CompleteMultipartUpload>
+func TestS3MultipartCompleteXMLFormat(t *testing.T) {
+	t.Parallel()
+
+	const threshold = 512
+	payload := bytes.Repeat([]byte("X"), 2*threshold) // exactly 2 parts
+
+	// Capture the raw CompleteMultipartUpload request body.
+	var (
+		capturedBody string
+		capturedMu   sync.Mutex
+	)
+
+	// We need a real multipart mock that also captures the complete body.
+	type xmlPart struct {
+		PartNumber int    `xml:"PartNumber"`
+		ETag       string `xml:"ETag"`
+	}
+	type xmlComplete struct {
+		XMLName xml.Name  `xml:"CompleteMultipartUpload"`
+		Parts   []xmlPart `xml:"Part"`
+	}
+
+	uploadID := "test-upload-id-xml"
+	partETags := map[int]string{}
+	var partETagsMu sync.Mutex
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/")
+		parts := strings.SplitN(path, "/", 2)
+		key := ""
+		if len(parts) == 2 {
+			key = parts[1]
+		}
+		q := r.URL.Query()
+		_ = key
+
+		switch {
+		case r.Method == http.MethodPost && q.Has("uploads"):
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprintf(w,
+				`<?xml version="1.0" encoding="UTF-8"?>`+
+					`<InitiateMultipartUploadResult><UploadId>%s</UploadId></InitiateMultipartUploadResult>`,
+				uploadID)
+
+		case r.Method == http.MethodPut && q.Get("partNumber") != "":
+			pn := 0
+			_, _ = fmt.Sscanf(q.Get("partNumber"), "%d", &pn)
+			_, _ = io.ReadAll(r.Body)
+			etag := fmt.Sprintf(`"etag-%d-abcdef"`, pn)
+			partETagsMu.Lock()
+			partETags[pn] = etag
+			partETagsMu.Unlock()
+			w.Header().Set("ETag", etag)
+			w.WriteHeader(http.StatusOK)
+
+		case r.Method == http.MethodPost && q.Get("uploadId") != "":
+			body, _ := io.ReadAll(r.Body)
+			capturedMu.Lock()
+			capturedBody = string(body)
+			capturedMu.Unlock()
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprint(w,
+				`<?xml version="1.0" encoding="UTF-8"?>`+
+					`<CompleteMultipartUploadResult><Key>k</Key></CompleteMultipartUploadResult>`)
+
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	defer srv.Close()
+
+	s := newTestStoreWithThreshold(t, srv, threshold)
+	if err := s.Upload("runXML", "data.bin", bytes.NewReader(payload), 0); err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+
+	capturedMu.Lock()
+	body := capturedBody
+	capturedMu.Unlock()
+
+	if body == "" {
+		t.Fatal("complete request body was empty")
+	}
+
+	var parsed xmlComplete
+	if err := xml.Unmarshal([]byte(body), &parsed); err != nil {
+		t.Fatalf("parse CompleteMultipartUpload XML: %v\nbody: %s", err, body)
+	}
+	if len(parsed.Parts) != 2 {
+		t.Fatalf("want 2 parts in XML, got %d\nbody: %s", len(parsed.Parts), body)
+	}
+	for i, p := range parsed.Parts {
+		wantNum := i + 1
+		if p.PartNumber != wantNum {
+			t.Errorf("part[%d]: PartNumber want %d got %d", i, wantNum, p.PartNumber)
+		}
+		partETagsMu.Lock()
+		wantETag := partETags[wantNum]
+		partETagsMu.Unlock()
+		if p.ETag != wantETag {
+			t.Errorf("part[%d]: ETag want %q got %q", i, wantETag, p.ETag)
+		}
 	}
 }
 

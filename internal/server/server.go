@@ -18,6 +18,7 @@ import (
 	"github.com/litemlflow/litemlflow/internal/artifact"
 	"github.com/litemlflow/litemlflow/internal/auth"
 	"github.com/litemlflow/litemlflow/internal/config"
+	"github.com/litemlflow/litemlflow/internal/grpcotlp"
 	"github.com/litemlflow/litemlflow/internal/metrics"
 	"github.com/litemlflow/litemlflow/internal/store"
 	"github.com/litemlflow/litemlflow/ui"
@@ -30,6 +31,7 @@ type Server struct {
 	store     *store.SQLiteStore
 	artifacts artifact.Store
 	httpd     *http.Server
+	grpcSrv   *grpcotlp.Server // nil when OTLPGRPCAddr is not configured
 }
 
 // New constructs a server, opening the store and preparing the router.
@@ -53,12 +55,13 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Server, 
 		art, err = artifact.NewFilesystemStore(cfg.ArtifactsDir)
 	case "s3":
 		art, err = artifact.NewS3Store(artifact.S3Config{
-			Endpoint:  cfg.S3Endpoint,
-			Bucket:    cfg.S3Bucket,
-			Region:    cfg.S3Region,
-			AccessKey: cfg.S3AccessKey,
-			SecretKey: cfg.S3SecretKey,
-			Prefix:    cfg.S3Prefix,
+			Endpoint:           cfg.S3Endpoint,
+			Bucket:             cfg.S3Bucket,
+			Region:             cfg.S3Region,
+			AccessKey:          cfg.S3AccessKey,
+			SecretKey:          cfg.S3SecretKey,
+			Prefix:             cfg.S3Prefix,
+			MultipartThreshold: cfg.S3MultipartThreshold,
 		})
 	default:
 		err = fmt.Errorf("unknown artifact backend %q", cfg.ArtifactBackend)
@@ -74,7 +77,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Server, 
 	}
 	router := buildRouter(cfg, logger, st, art, uiFS)
 
-	srv := &http.Server{
+	httpSrv := &http.Server{
 		Addr:              cfg.Addr,
 		Handler:           router,
 		ReadTimeout:       cfg.ReadTimeout,
@@ -83,27 +86,56 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Server, 
 		IdleTimeout:       cfg.IdleTimeout,
 		MaxHeaderBytes:    1 << 20,
 	}
-	return &Server{cfg: cfg, logger: logger, store: st, artifacts: art, httpd: srv}, nil
+
+	// GRPC-OTLP: optionally start a gRPC OTLP receiver on a separate port.
+	var grpcSrv *grpcotlp.Server
+	if cfg.OTLPGRPCAddr != "" {
+		grpcSrv, err = grpcotlp.New(cfg.OTLPGRPCAddr, st)
+		if err != nil {
+			_ = st.Close()
+			return nil, fmt.Errorf("grpc otlp: %w", err)
+		}
+	}
+
+	return &Server{cfg: cfg, logger: logger, store: st, artifacts: art, httpd: httpSrv, grpcSrv: grpcSrv}, nil
 }
 
 // Run starts serving until ctx is canceled or an error occurs.
 func (s *Server) Run(ctx context.Context) error {
-	errCh := make(chan error, 1)
+	errCh := make(chan error, 2)
+
+	// Start HTTP server.
 	go func() {
 		s.logger.Info("listening", slog.String("addr", s.cfg.Addr), slog.String("data", s.cfg.DataDir))
 		if err := s.httpd.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
-		close(errCh)
 	}()
+
+	// Optionally start the gRPC OTLP server on a separate goroutine.
+	if s.grpcSrv != nil {
+		go func() {
+			s.logger.Info("grpc otlp listening", slog.String("addr", s.cfg.OTLPGRPCAddr))
+			if err := s.grpcSrv.Serve(); err != nil {
+				errCh <- fmt.Errorf("grpc otlp: %w", err)
+			}
+		}()
+	}
+
 	select {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = s.httpd.Shutdown(shutdownCtx)
+		if s.grpcSrv != nil {
+			s.grpcSrv.Stop()
+		}
 		_ = s.store.Close()
 		return nil
 	case err := <-errCh:
+		if s.grpcSrv != nil {
+			s.grpcSrv.Stop()
+		}
 		_ = s.store.Close()
 		return err
 	}

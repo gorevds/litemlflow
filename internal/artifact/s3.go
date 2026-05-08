@@ -23,6 +23,11 @@ import (
 	"time"
 )
 
+// DefaultMultipartThreshold is the upload size threshold (in bytes) above
+// which multipart upload is used instead of a single PUT. Individual parts
+// are also this size (except the final part, which may be smaller).
+const DefaultMultipartThreshold = int64(100) << 20 // 100 MiB
+
 // S3Config is the configuration for NewS3Store.
 type S3Config struct {
 	Endpoint  string // e.g. "https://s3.amazonaws.com" or "http://minio:9000"
@@ -31,20 +36,24 @@ type S3Config struct {
 	Prefix    string // optional, e.g. "litemlflow/"
 	AccessKey string
 	SecretKey string
+	// MultipartThreshold is the minimum upload size that triggers multipart
+	// upload. 0 means use DefaultMultipartThreshold.
+	MultipartThreshold int64
 	// HTTP is optional; a default client is used when nil.
 	HTTP *http.Client
 }
 
 // S3Store implements the Store interface backed by an S3-compatible object store.
 type S3Store struct {
-	endpoint  string // base URL, no trailing slash
-	bucket    string
-	region    string
-	prefix    string
-	accessKey string
-	secretKey string
-	pathStyle bool // true → path-style, false → virtual-hosted
-	http      *http.Client
+	endpoint           string // base URL, no trailing slash
+	bucket             string
+	region             string
+	prefix             string
+	accessKey          string
+	secretKey          string
+	pathStyle          bool // true → path-style, false → virtual-hosted
+	multipartThreshold int64
+	http               *http.Client
 }
 
 // NewS3Store validates cfg and returns a ready S3Store.
@@ -85,15 +94,21 @@ func NewS3Store(cfg S3Config) (*S3Store, error) {
 		client = &http.Client{Timeout: 60 * time.Second}
 	}
 
+	threshold := cfg.MultipartThreshold
+	if threshold <= 0 {
+		threshold = DefaultMultipartThreshold
+	}
+
 	return &S3Store{
-		endpoint:  ep,
-		bucket:    cfg.Bucket,
-		region:    cfg.Region,
-		prefix:    cfg.Prefix,
-		accessKey: cfg.AccessKey,
-		secretKey: cfg.SecretKey,
-		pathStyle: pathStyle,
-		http:      client,
+		endpoint:           ep,
+		bucket:             cfg.Bucket,
+		region:             cfg.Region,
+		prefix:             cfg.Prefix,
+		accessKey:          cfg.AccessKey,
+		secretKey:          cfg.SecretKey,
+		pathStyle:          pathStyle,
+		multipartThreshold: threshold,
+		http:               client,
 	}, nil
 }
 
@@ -107,6 +122,12 @@ const defaultUploadCap = int64(5) << 30 // 5 GiB
 
 // Upload stores r at runID/relPath, enforcing maxSize when > 0. When
 // maxSize <= 0, defaultUploadCap (5 GiB) is applied as a safety belt.
+//
+// When the upload is larger than s.multipartThreshold, a multipart upload is
+// used (CreateMultipartUpload → UploadPart × N → CompleteMultipartUpload).
+// On any error during the part-upload loop, AbortMultipartUpload is called to
+// clean up the in-progress upload and prevent orphaned parts from accumulating
+// storage costs.
 func (s *S3Store) Upload(runID, relPath string, r io.Reader, maxSize int64) error {
 	if err := validateRunID(runID); err != nil {
 		return err
@@ -128,10 +149,15 @@ func (s *S3Store) Upload(runID, relPath string, r io.Reader, maxSize int64) erro
 	if n > maxSize {
 		return ErrPayloadTooBig
 	}
-	body := io.Reader(buf)
-	contentLength := n
+	data := buf.Bytes()
 
-	req, err := s.newRequest(http.MethodPut, key, body, contentLength, nil)
+	// Dispatch to multipart when the payload exceeds the threshold.
+	if int64(len(data)) > s.multipartThreshold {
+		return s.uploadMultipart(key, data)
+	}
+
+	body := bytes.NewReader(data)
+	req, err := s.newRequest(http.MethodPut, key, body, n, nil)
 	if err != nil {
 		return fmt.Errorf("s3 upload: %w", err)
 	}
@@ -143,6 +169,183 @@ func (s *S3Store) Upload(runID, relPath string, r io.Reader, maxSize int64) erro
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("s3 upload: status %d: %s", resp.StatusCode, msg)
+	}
+	return nil
+}
+
+// ---- multipart upload helpers -----------------------------------------------
+
+// multipartPart records the part number and ETag for CompleteMultipartUpload.
+type multipartPart struct {
+	Number int
+	ETag   string
+}
+
+// uploadMultipart sends body using the S3 multipart upload API:
+//
+//  1. POST /{bucket}/{key}?uploads           → UploadId
+//  2. PUT  /{bucket}/{key}?partNumber=N&uploadId=<id>  (for each chunk)
+//  3. POST /{bucket}/{key}?uploadId=<id>    (complete)
+//
+// On any error after step 1, AbortMultipartUpload is called so that S3 does
+// not retain orphaned parts.
+func (s *S3Store) uploadMultipart(key string, body []byte) error {
+	uploadID, err := s.initiateMultipart(key)
+	if err != nil {
+		return fmt.Errorf("s3 multipart initiate: %w", err)
+	}
+
+	// Split body into chunks of multipartThreshold bytes each.
+	var parts []multipartPart
+	partNum := 1
+	offset := 0
+	for offset < len(body) {
+		end := offset + int(s.multipartThreshold)
+		if end > len(body) {
+			end = len(body)
+		}
+		chunk := body[offset:end]
+		etag, uploadErr := s.uploadPart(key, uploadID, partNum, chunk)
+		if uploadErr != nil {
+			// Guarantee cleanup of the in-progress multipart upload so orphaned
+			// parts are not retained by S3/MinIO (which would incur storage cost
+			// and leak information about the failed upload).
+			_ = s.abortMultipart(key, uploadID)
+			return fmt.Errorf("s3 multipart part %d: %w", partNum, uploadErr)
+		}
+		parts = append(parts, multipartPart{Number: partNum, ETag: etag})
+		partNum++
+		offset = end
+	}
+
+	if err := s.completeMultipart(key, uploadID, parts); err != nil {
+		_ = s.abortMultipart(key, uploadID)
+		return fmt.Errorf("s3 multipart complete: %w", err)
+	}
+	return nil
+}
+
+// initiateMultipart sends POST /{bucket}/{key}?uploads and returns the UploadId.
+func (s *S3Store) initiateMultipart(key string) (string, error) {
+	params := url.Values{}
+	params.Set("uploads", "")
+
+	req, err := s.newRequest(http.MethodPost, key, nil, 0, params)
+	if err != nil {
+		return "", err
+	}
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 16384))
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("status %d: %s", resp.StatusCode, respBody)
+	}
+
+	// Parse the XML response: <InitiateMultipartUploadResult><UploadId>…</UploadId>
+	var result struct {
+		XMLName  xml.Name `xml:"InitiateMultipartUploadResult"`
+		UploadID string   `xml:"UploadId"`
+	}
+	if err := xml.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("parse initiate response: %w", err)
+	}
+	if result.UploadID == "" {
+		return "", fmt.Errorf("empty UploadId in initiate response")
+	}
+	return result.UploadID, nil
+}
+
+// uploadPart sends one part of a multipart upload and returns the ETag.
+func (s *S3Store) uploadPart(key, uploadID string, partNum int, body []byte) (string, error) {
+	params := url.Values{}
+	params.Set("partNumber", fmt.Sprintf("%d", partNum))
+	params.Set("uploadId", uploadID)
+
+	bodyReader := bytes.NewReader(body)
+	req, err := s.newRequest(http.MethodPut, key, bodyReader, int64(len(body)), params)
+	if err != nil {
+		return "", err
+	}
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", fmt.Errorf("status %d: %s", resp.StatusCode, msg)
+	}
+	etag := resp.Header.Get("ETag")
+	if etag == "" {
+		etag = resp.Header.Get("Etag")
+	}
+	return etag, nil
+}
+
+// completeMultipart sends the CompleteMultipartUpload XML request.
+func (s *S3Store) completeMultipart(key, uploadID string, parts []multipartPart) error {
+	params := url.Values{}
+	params.Set("uploadId", uploadID)
+
+	// Build the XML body.
+	type xmlPart struct {
+		PartNumber int    `xml:"PartNumber"`
+		ETag       string `xml:"ETag"`
+	}
+	type xmlComplete struct {
+		XMLName xml.Name  `xml:"CompleteMultipartUpload"`
+		Parts   []xmlPart `xml:"Part"`
+	}
+	xmlParts := make([]xmlPart, len(parts))
+	for i, p := range parts {
+		xmlParts[i] = xmlPart{PartNumber: p.Number, ETag: p.ETag}
+	}
+	xmlBody, err := xml.Marshal(xmlComplete{Parts: xmlParts})
+	if err != nil {
+		return fmt.Errorf("marshal complete XML: %w", err)
+	}
+
+	bodyReader := bytes.NewReader(xmlBody)
+	req, err := s.newRequest(http.MethodPost, key, bodyReader, int64(len(xmlBody)), params)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/xml")
+
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("status %d: %s", resp.StatusCode, respBody)
+	}
+	return nil
+}
+
+// abortMultipart sends DELETE /{bucket}/{key}?uploadId=<id> to cancel an
+// in-progress multipart upload and free any already-uploaded parts on the
+// server side.
+func (s *S3Store) abortMultipart(key, uploadID string) error {
+	params := url.Values{}
+	params.Set("uploadId", uploadID)
+
+	req, err := s.newRequest(http.MethodDelete, key, nil, 0, params)
+	if err != nil {
+		return err
+	}
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("abort multipart: status %d: %s", resp.StatusCode, msg)
 	}
 	return nil
 }

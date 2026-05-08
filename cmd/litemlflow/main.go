@@ -82,6 +82,8 @@ Usage:
                           [--artifact-backend fs|s3]
                           [--s3-endpoint URL] [--s3-bucket BUCKET] [--s3-region REGION]
                           [--s3-access-key KEY] [--s3-secret-key SECRET] [--s3-prefix PREFIX]
+                          [--s3-multipart-threshold BYTES]
+                          [--otlp-grpc-addr HOST:PORT]
   litemlflow migrate      [--data DIR]
   litemlflow rollback     [--data DIR]
   litemlflow backup       [--data DIR] [--out FILE]
@@ -135,28 +137,33 @@ func runUp(args []string) error {
 	s3AccessKey := fs.String("s3-access-key", "", "S3 access key ID")
 	s3SecretKey := fs.String("s3-secret-key", "", "S3 secret access key")
 	s3Prefix := fs.String("s3-prefix", "", "optional S3 key prefix, e.g. litemlflow/")
+	s3MultipartThreshold := fs.Int64("s3-multipart-threshold", 0, "min upload size (bytes) for multipart S3 upload; default 100 MiB")
+	// GRPC-OTLP: optional gRPC OTLP receiver
+	otlpGRPCAddr := fs.String("otlp-grpc-addr", "", "listen address for OTLP/gRPC receiver, e.g. 127.0.0.1:4317 (disabled by default)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	cfg, err := config.FromEnv(config.Config{
-		DataDir:          *dataDir,
-		Addr:             *addr,
-		Auth:             *auth,
-		BasicUser:        *basicUser,
-		BasicPassHash:    *basicPassHash,
-		DevMode:          *dev,
-		OIDCIssuer:       *oidcIssuer,
-		OIDCClientID:     *oidcClientID,
-		OIDCClientSecret: *oidcClientSecret,
-		OIDCRedirectURL:  *oidcRedirectURL,
-		SessionTTL:       *sessionTTL,
-		ArtifactBackend:  *artifactBackend,
-		S3Endpoint:       *s3Endpoint,
-		S3Bucket:         *s3Bucket,
-		S3Region:         *s3Region,
-		S3AccessKey:      *s3AccessKey,
-		S3SecretKey:      *s3SecretKey,
-		S3Prefix:         *s3Prefix,
+		DataDir:              *dataDir,
+		Addr:                 *addr,
+		Auth:                 *auth,
+		BasicUser:            *basicUser,
+		BasicPassHash:        *basicPassHash,
+		DevMode:              *dev,
+		OIDCIssuer:           *oidcIssuer,
+		OIDCClientID:         *oidcClientID,
+		OIDCClientSecret:     *oidcClientSecret,
+		OIDCRedirectURL:      *oidcRedirectURL,
+		SessionTTL:           *sessionTTL,
+		ArtifactBackend:      *artifactBackend,
+		S3Endpoint:           *s3Endpoint,
+		S3Bucket:             *s3Bucket,
+		S3Region:             *s3Region,
+		S3AccessKey:          *s3AccessKey,
+		S3SecretKey:          *s3SecretKey,
+		S3Prefix:             *s3Prefix,
+		S3MultipartThreshold: *s3MultipartThreshold,
+		OTLPGRPCAddr:         *otlpGRPCAddr,
 	})
 	if err != nil {
 		return err
