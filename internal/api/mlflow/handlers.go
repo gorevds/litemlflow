@@ -36,8 +36,10 @@ func (h *Handler) Mount(r chi.Router) {
 	r.Post("/api/2.0/mlflow/experiments/create", h.CreateExperiment)
 	r.Get("/api/2.0/mlflow/experiments/get", h.GetExperiment)
 	r.Get("/api/2.0/mlflow/experiments/get-by-name", h.GetExperimentByName)
-	r.Post("/api/2.0/mlflow/experiments/list", h.SearchExperiments) // legacy
-	r.Get("/api/2.0/mlflow/experiments/list", h.SearchExperiments)  // legacy
+	// Legacy aliases — to be removed in v2.0. Wrapped with deprecation
+	// headers (RFC 8594) so clients that still call them get a heads-up.
+	r.Post("/api/2.0/mlflow/experiments/list", deprecated(h.SearchExperiments, "v2.0"))
+	r.Get("/api/2.0/mlflow/experiments/list", deprecated(h.SearchExperiments, "v2.0"))
 	r.Post("/api/2.0/mlflow/experiments/search", h.SearchExperiments)
 	r.Get("/api/2.0/mlflow/experiments/search", h.SearchExperiments)
 	r.Post("/api/2.0/mlflow/experiments/delete", h.DeleteExperiment)
@@ -1065,6 +1067,28 @@ func writeError(w http.ResponseWriter, status int, code, msg string) {
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// deprecated wraps a handler with RFC 8594 deprecation headers. Clients
+// that still call the legacy alias get a heads-up via:
+//
+//	Deprecation: true
+//	Sunset: <RFC 7231 date — set to v2.0 GA>
+//	Link: <docs URL>; rel="deprecation"
+//
+// We don't change the response body so the wire contract is unchanged
+// for the client — only headers are added.
+func deprecated(next http.HandlerFunc, removeAt string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Deprecation", "true")
+		// Sunset is the RFC 7231 IMF-fixdate when the endpoint will be
+		// removed. We don't have a hard date for v2.0 yet; per RFC 8594
+		// it's optional. We omit Sunset and use a free-form Link header.
+		w.Header().Set("Link",
+			`</docs/upgrade-to-v2.md>; rel="deprecation"; type="text/markdown"`)
+		w.Header().Set("X-LiteMLflow-Removed-At", removeAt)
+		next.ServeHTTP(w, r)
+	}
 }
 
 // statusToWebhookEvent maps a run status to the webhook event name for terminal

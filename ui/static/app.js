@@ -565,9 +565,32 @@
     },
   };
 
+  // ─── Server features (T4.22 multi-tenant gate, future flags) ────────────
+  // Read once from /version and cached on window for the lifetime of the
+  // page. Front-end falls back to "all flags off" if /version hasn't
+  // resolved yet — UI degrades gracefully instead of blocking on a fetch.
+  const Features = {
+    _cache: { multi_tenant: false },
+    async init() {
+      try {
+        const data = await fetch("/version").then(r => r.json());
+        if (data && typeof data.features === "object") {
+          Object.assign(this._cache, data.features);
+        }
+      } catch {}
+    },
+    multiTenant() { return !!this._cache.multi_tenant; },
+  };
+
   // ─── Workspace selector ───────────────────────────────────────────────────────
   const WorkspaceSelector = {
     async init() {
+      // T4.22: skip entirely if the server hasn't enabled the multi-tenant
+      // UI surface. The engine still runs (RBAC + workspace middleware
+      // are inert for solo MLE) — this just hides the selector + member
+      // pages that would otherwise add visual noise for the hero user.
+      if (!Features.multiTenant()) return;
+
       let workspaces = [];
       try {
         const data = await fetchJSON("/api/v1/workspaces");
@@ -860,12 +883,18 @@
         }
       });
 
-      // Version pill
+      // Version pill — also pulls feature flags (T4.22 multi_tenant).
       fetch("/version").then(r => r.json()).then(v => {
         $("#version").textContent = v.version || "dev";
+        if (v && typeof v.features === "object") {
+          Object.assign(Features._cache, v.features);
+          // Re-evaluate workspace nav visibility now that flags are known.
+          const wsLink = $('header nav a[href="#/workspaces"]');
+          if (wsLink && !Features.multiTenant()) wsLink.style.display = "none";
+        }
       });
 
-      // Workspace selector
+      // Workspace selector (gated on multi_tenant feature inside init).
       WorkspaceSelector.init();
 
       // Keyboard shortcuts
@@ -2654,6 +2683,19 @@ c.create_prompt("rag.system", "You are a helpful assistant.", description="seed 
     // ── Workspaces list ──────────────────────────────────────────────────────
     async renderWorkspaces() {
       const main = $("#app");
+      // T4.22: workspace UI is gated on the multi_tenant feature flag. Solo
+      // MLE deploys (the hero use case) get this hidden by default; flip on
+      // via --enable-multi-tenant when a real ≥2-workspace setup arrives.
+      if (!Features.multiTenant()) {
+        main.innerHTML = `
+          <h1>Workspaces</h1>
+          <div class="empty card">
+            <p>The workspace UI is disabled on this deployment.</p>
+            <p class="u-muted-sm">Re-run the server with <code>--enable-multi-tenant</code> (or
+            <code>LITEMLFLOW_ENABLE_MULTI_TENANT=1</code>) to manage workspaces and members.</p>
+          </div>`;
+        return;
+      }
       try {
         const data = await fetchJSON("/api/v1/workspaces");
         const workspaces = data.workspaces || [];

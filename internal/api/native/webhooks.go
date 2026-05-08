@@ -134,7 +134,43 @@ func (h *Handler) ListWebhooks(w http.ResponseWriter, r *http.Request) {
 	if whs == nil {
 		whs = []*model.Webhook{}
 	}
-	writeJSON(w, map[string]any{"webhooks": whs})
+	out := make([]webhookDTO, 0, len(whs))
+	for _, wh := range whs {
+		out = append(out, webhookToDTO(wh))
+	}
+	writeJSON(w, map[string]any{"webhooks": out})
+}
+
+// ---- webhookDTO (T4.21) -----------------------------------------------------
+//
+// Why an explicit DTO: the previous code returned `*model.Webhook` directly
+// via writeJSON, leaking internal field names + future schema changes onto
+// the API surface. Locking down the wire shape before v2.0 freeze.
+
+type webhookDTO struct {
+	ID            int64  `json:"id"`
+	Name          string `json:"name"`
+	URL           string `json:"url"`
+	Events        string `json:"events"`
+	ExperimentID  *int64 `json:"experiment_id,omitempty"`
+	WorkspaceID   string `json:"workspace_id"`
+	HasSecret     bool   `json:"has_secret"`
+	CreatedAt     int64  `json:"created_at"`
+	LastStatus    *int   `json:"last_status,omitempty"`
+	LastAttempt   *int64 `json:"last_attempt,omitempty"`
+	Enabled       bool   `json:"enabled"`
+}
+
+func webhookToDTO(wh *model.Webhook) webhookDTO {
+	return webhookDTO{
+		ID: wh.ID, Name: wh.Name, URL: wh.URL, Events: wh.Events,
+		ExperimentID: wh.ExperimentID, WorkspaceID: wh.WorkspaceID,
+		HasSecret:   wh.Secret != "",
+		CreatedAt:   wh.CreatedAt,
+		LastStatus:  wh.LastStatus,
+		LastAttempt: wh.LastAttempt,
+		Enabled:     wh.Enabled,
+	}
 }
 
 // CreateWebhook handles POST /api/v1/webhooks.
@@ -172,7 +208,7 @@ func (h *Handler) CreateWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	wh.ID = id
-	writeJSON(w, wh)
+	writeJSON(w, webhookToDTO(wh))
 }
 
 // UpdateWebhook handles PATCH /api/v1/webhooks/{id}.
@@ -218,7 +254,7 @@ func (h *Handler) UpdateWebhook(w http.ResponseWriter, r *http.Request) {
 		writeStoreErr(w, err)
 		return
 	}
-	writeJSON(w, existing)
+	writeJSON(w, webhookToDTO(existing))
 }
 
 // DeleteWebhook handles DELETE /api/v1/webhooks/{id}.

@@ -141,6 +141,10 @@ func runUp(args []string) error {
 	s3MultipartThreshold := fs.Int64("s3-multipart-threshold", 0, "min upload size (bytes) for multipart S3 upload; default 100 MiB")
 	// GRPC-OTLP: optional gRPC OTLP receiver
 	otlpGRPCAddr := fs.String("otlp-grpc-addr", "", "listen address for OTLP/gRPC receiver, e.g. 127.0.0.1:4317 (disabled by default)")
+	// T4.22 multi-tenant UI surface (engine always on; this only flips
+	// the workspace selector + member-management pages in the front-end).
+	enableMultiTenant := fs.Bool("enable-multi-tenant", false,
+		"expose workspace selector + member-management UI (default off; engine always runs)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -165,6 +169,7 @@ func runUp(args []string) error {
 		S3Prefix:             *s3Prefix,
 		S3MultipartThreshold: *s3MultipartThreshold,
 		OTLPGRPCAddr:         *otlpGRPCAddr,
+		EnableMultiTenant:    *enableMultiTenant,
 	})
 	if err != nil {
 		return err

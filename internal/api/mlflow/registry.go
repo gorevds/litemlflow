@@ -19,8 +19,9 @@ func (h *Handler) mountRegistry(r chi.Router) {
 	r.Post("/api/2.0/mlflow/registered-models/rename", h.RenameRegisteredModel)
 	r.Post("/api/2.0/mlflow/registered-models/update", h.UpdateRegisteredModel)
 	r.Post("/api/2.0/mlflow/registered-models/delete", h.DeleteRegisteredModel)
+	// Legacy DELETE-verb alias; clients should POST.
 	// MLflow client uses DELETE method on this endpoint at runtime.
-	r.Delete("/api/2.0/mlflow/registered-models/delete", h.DeleteRegisteredModel)
+	r.Delete("/api/2.0/mlflow/registered-models/delete", deprecated(h.DeleteRegisteredModel, "v2.0"))
 	r.Post("/api/2.0/mlflow/registered-models/search", h.SearchRegisteredModels)
 	r.Get("/api/2.0/mlflow/registered-models/search", h.SearchRegisteredModels)
 	r.Post("/api/2.0/mlflow/registered-models/get-latest-versions", h.GetLatestModelVersions)
@@ -36,7 +37,7 @@ func (h *Handler) mountRegistry(r chi.Router) {
 	r.Get("/api/2.0/mlflow/model-versions/get", h.GetModelVersion)
 	r.Post("/api/2.0/mlflow/model-versions/update", h.UpdateModelVersion)
 	r.Post("/api/2.0/mlflow/model-versions/delete", h.DeleteModelVersion)
-	r.Delete("/api/2.0/mlflow/model-versions/delete", h.DeleteModelVersion)
+	r.Delete("/api/2.0/mlflow/model-versions/delete", deprecated(h.DeleteModelVersion, "v2.0"))
 	r.Post("/api/2.0/mlflow/model-versions/search", h.SearchModelVersions)
 	r.Get("/api/2.0/mlflow/model-versions/search", h.SearchModelVersions)
 	r.Get("/api/2.0/mlflow/model-versions/get-download-uri", h.GetModelVersionDownloadURI)

@@ -52,6 +52,14 @@ type Config struct {
 	// DevMode enables verbose error responses and pretty logs.
 	DevMode bool
 
+	// EnableMultiTenant exposes the workspace selector + member-management
+	// UI in the front-end (T4.22). The RBAC engine + workspace middleware
+	// always run — they're inert for solo MLE — but the UI surface is
+	// hidden by default to keep the experience clean for the hero user.
+	// Flip on when you actually have ≥2 workspaces or members. Env var:
+	// LITEMLFLOW_ENABLE_MULTI_TENANT=1.
+	EnableMultiTenant bool
+
 	// ArtifactBackend selects the artifact storage backend: "fs" (default) or "s3".
 	ArtifactBackend string
 
@@ -186,6 +194,9 @@ func overlayFromEnv(c Config) Config {
 	}
 	if v := os.Getenv("LITEMLFLOW_OTLP_GRPC_ADDR"); v != "" {
 		c.OTLPGRPCAddr = v
+	}
+	if v := os.Getenv("LITEMLFLOW_ENABLE_MULTI_TENANT"); v == "1" || v == "true" {
+		c.EnableMultiTenant = true
 	}
 	if v := os.Getenv("LITEMLFLOW_JANITOR_ENABLED"); v == "0" || v == "false" {
 		c.JanitorEnabled = false

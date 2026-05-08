@@ -374,10 +374,17 @@ func (h *Handler) Readyz(w http.ResponseWriter, r *http.Request) {
 
 // Version returns build information.
 func (h *Handler) Version(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]string{
+	// "features" advertises optional UI surfaces the front-end conditionally
+	// renders (T4.22). The map shape stays additive — the front-end reads
+	// individual keys with default-false. The classic version/commit/date
+	// fields are unchanged for compat with /version monitors.
+	writeJSON(w, map[string]any{
 		"version": version.Version,
 		"commit":  version.Commit,
 		"date":    version.Date,
+		"features": map[string]bool{
+			"multi_tenant": h.Cfg.EnableMultiTenant,
+		},
 	})
 }
 

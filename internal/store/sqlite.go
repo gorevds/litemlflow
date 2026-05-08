@@ -1701,11 +1701,26 @@ func (s *SQLiteStore) LogInputs(ctx context.Context, runID string, inputs []mode
 		//
 		// Workspace is taken from the experiment that owns the run — same
 		// rule the analytics layer uses.
-		if err := mirrorIntoDatasetsV2(ctx, tx, runID, ds.Name, ds.Digest); err != nil {
-			return fmt.Errorf("mirror to datasets_v2: %w", err)
+		//
+		// T4.17 (soft): operators can disable the mirror via the env var
+		// LITEMLFLOW_DISABLE_DATASETS_V03_MIRROR=1 (e.g. when migrating
+		// off the v0.3 dataset_inputs path ahead of the v2.0 removal).
+		// When the mirror is disabled, log_input continues to write to
+		// the v0.3 tables only.
+		if !datasetsV03MirrorDisabled() {
+			if err := mirrorIntoDatasetsV2(ctx, tx, runID, ds.Name, ds.Digest); err != nil {
+				return fmt.Errorf("mirror to datasets_v2: %w", err)
+			}
 		}
 	}
 	return tx.Commit()
+}
+
+// datasetsV03MirrorDisabled reports whether the operator opted out of the
+// v0.3 → v1.2 datasets mirror via env. T4.17 escape hatch.
+func datasetsV03MirrorDisabled() bool {
+	v := os.Getenv("LITEMLFLOW_DISABLE_DATASETS_V03_MIRROR")
+	return v == "1" || v == "true"
 }
 
 // mirrorIntoDatasetsV2 inserts a row into datasets_v2 if one with the same
