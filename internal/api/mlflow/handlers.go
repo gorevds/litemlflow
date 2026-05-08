@@ -57,6 +57,16 @@ func (h *Handler) Mount(r chi.Router) {
 	r.Mount("/api/2.0/mlflow-artifacts/artifacts", artifactsRouter(h))
 }
 
+// currentWorkspace returns the workspace id resolved by workspaceMiddleware
+// (exposed via the X-LiteMLflow-Workspace request header). Falls back to
+// "default" when the middleware has not run (e.g., in unit tests).
+func currentWorkspace(r *http.Request) string {
+	if ws := r.Header.Get("X-LiteMLflow-Workspace"); ws != "" {
+		return ws
+	}
+	return "default"
+}
+
 // ---- experiments ------------------------------------------------------------
 
 type createExperimentReq struct {
@@ -84,10 +94,12 @@ func (h *Handler) CreateExperiment(w http.ResponseWriter, r *http.Request) {
 	for _, t := range req.Tags {
 		tags = append(tags, model.KV{Key: t.Key, Value: t.Value})
 	}
+	// TENANCY: scope to workspace
 	id, err := h.Store.CreateExperiment(r.Context(), &model.Experiment{
 		Name:             req.Name,
 		ArtifactLocation: req.ArtifactLocation,
 		Tags:             tags,
+		WorkspaceID:      currentWorkspace(r),
 	})
 	if err != nil {
 		writeStoreErr(w, err)
@@ -122,7 +134,8 @@ func (h *Handler) GetExperimentByName(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "experiment_name is required")
 		return
 	}
-	e, err := h.Store.GetExperimentByName(r.Context(), name)
+	// TENANCY: scope to workspace
+	e, err := h.Store.GetExperimentByNameInWorkspace(r.Context(), currentWorkspace(r), name)
 	if err != nil {
 		writeStoreErr(w, err)
 		return
@@ -158,11 +171,13 @@ func (h *Handler) SearchExperiments(w http.ResponseWriter, r *http.Request) {
 		req.Filter = r.URL.Query().Get("filter")
 	}
 	stage := mapViewType(req.ViewType)
+	// TENANCY: scope to workspace
 	res, err := h.Store.SearchExperiments(r.Context(), store.SearchOptions{
 		MaxResults:     req.MaxResults,
 		PageToken:      req.PageToken,
 		Filter:         req.Filter,
 		LifecycleStage: stage,
+		WorkspaceID:    currentWorkspace(r),
 	})
 	if err != nil {
 		writeStoreErr(w, err)

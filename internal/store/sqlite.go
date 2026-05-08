@@ -71,6 +71,7 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 
 // CreateExperiment inserts a new experiment and returns its assigned ID.
 // Returns ErrAlreadyExists when the name is already used.
+// If e.WorkspaceID is empty, it defaults to "default".
 func (s *SQLiteStore) CreateExperiment(ctx context.Context, e *model.Experiment) (int64, error) {
 	if err := model.ValidName(e.Name, 250); err != nil {
 		return 0, err
@@ -85,11 +86,14 @@ func (s *SQLiteStore) CreateExperiment(ctx context.Context, e *model.Experiment)
 	if e.LifecycleStage == "" {
 		e.LifecycleStage = model.LifecycleActive
 	}
+	if e.WorkspaceID == "" {
+		e.WorkspaceID = "default"
+	}
 
 	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO experiments(name, artifact_location, lifecycle_stage, creation_time, last_update_time)
-		VALUES (?, ?, ?, ?, ?)
-	`, e.Name, e.ArtifactLocation, e.LifecycleStage, e.CreationTime, e.LastUpdateTime)
+		INSERT INTO experiments(name, artifact_location, lifecycle_stage, creation_time, last_update_time, workspace_id)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, e.Name, e.ArtifactLocation, e.LifecycleStage, e.CreationTime, e.LastUpdateTime, e.WorkspaceID)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return 0, ErrAlreadyExists
@@ -124,24 +128,35 @@ func (s *SQLiteStore) CreateExperiment(ctx context.Context, e *model.Experiment)
 // GetExperiment returns the experiment with the given ID.
 func (s *SQLiteStore) GetExperiment(ctx context.Context, id int64) (*model.Experiment, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, name, artifact_location, lifecycle_stage, creation_time, last_update_time
+		SELECT id, name, artifact_location, lifecycle_stage, creation_time, last_update_time, workspace_id
 		FROM experiments WHERE id = ?
 	`, id)
 	return s.scanExperiment(ctx, row, true)
 }
 
-// GetExperimentByName returns the experiment with the given name.
+// GetExperimentByName returns the experiment with the given name scoped to the
+// "default" workspace. Preserved for backward compatibility; new code should use
+// GetExperimentByNameInWorkspace.
 func (s *SQLiteStore) GetExperimentByName(ctx context.Context, name string) (*model.Experiment, error) {
+	return s.GetExperimentByNameInWorkspace(ctx, "default", name)
+}
+
+// GetExperimentByNameInWorkspace returns the experiment with the given name
+// within the specified workspace.
+func (s *SQLiteStore) GetExperimentByNameInWorkspace(ctx context.Context, workspaceID, name string) (*model.Experiment, error) {
+	if workspaceID == "" {
+		workspaceID = "default"
+	}
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, name, artifact_location, lifecycle_stage, creation_time, last_update_time
-		FROM experiments WHERE name = ?
-	`, name)
+		SELECT id, name, artifact_location, lifecycle_stage, creation_time, last_update_time, workspace_id
+		FROM experiments WHERE name = ? AND workspace_id = ?
+	`, name, workspaceID)
 	return s.scanExperiment(ctx, row, true)
 }
 
 func (s *SQLiteStore) scanExperiment(ctx context.Context, row *sql.Row, withTags bool) (*model.Experiment, error) {
 	var e model.Experiment
-	if err := row.Scan(&e.ID, &e.Name, &e.ArtifactLocation, &e.LifecycleStage, &e.CreationTime, &e.LastUpdateTime); err != nil {
+	if err := row.Scan(&e.ID, &e.Name, &e.ArtifactLocation, &e.LifecycleStage, &e.CreationTime, &e.LastUpdateTime, &e.WorkspaceID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -231,6 +246,7 @@ func (s *SQLiteStore) SetExperimentTag(ctx context.Context, id int64, key, value
 // SearchExperiments returns experiments matching opt. Supports a tiny subset
 // of MLflow filter syntax in v0.1: an empty filter, or `name = '...'` /
 // `name LIKE '...'`.
+// If opt.WorkspaceID is empty, results are scoped to "default".
 func (s *SQLiteStore) SearchExperiments(ctx context.Context, opt SearchOptions) (SearchResult[*model.Experiment], error) {
 	if opt.MaxResults <= 0 {
 		opt.MaxResults = 1000
@@ -242,8 +258,15 @@ func (s *SQLiteStore) SearchExperiments(ctx context.Context, opt SearchOptions) 
 	if stage == "" {
 		stage = model.LifecycleActive
 	}
+	wsID := opt.WorkspaceID
+	if wsID == "" {
+		wsID = "default"
+	}
 	args := []any{}
 	where := []string{}
+	// TENANCY: scope to workspace
+	where = append(where, "workspace_id = ?")
+	args = append(args, wsID)
 	if stage != "all" {
 		where = append(where, "lifecycle_stage = ?")
 		args = append(args, stage)
@@ -256,7 +279,7 @@ func (s *SQLiteStore) SearchExperiments(ctx context.Context, opt SearchOptions) 
 		where = append(where, clause)
 		args = append(args, fargs...)
 	}
-	q := `SELECT id, name, artifact_location, lifecycle_stage, creation_time, last_update_time FROM experiments`
+	q := `SELECT id, name, artifact_location, lifecycle_stage, creation_time, last_update_time, workspace_id FROM experiments`
 	if len(where) > 0 {
 		q += " WHERE " + strings.Join(where, " AND ")
 	}
@@ -271,7 +294,7 @@ func (s *SQLiteStore) SearchExperiments(ctx context.Context, opt SearchOptions) 
 	var out []*model.Experiment
 	for rows.Next() {
 		var e model.Experiment
-		if err := rows.Scan(&e.ID, &e.Name, &e.ArtifactLocation, &e.LifecycleStage, &e.CreationTime, &e.LastUpdateTime); err != nil {
+		if err := rows.Scan(&e.ID, &e.Name, &e.ArtifactLocation, &e.LifecycleStage, &e.CreationTime, &e.LastUpdateTime, &e.WorkspaceID); err != nil {
 			return SearchResult[*model.Experiment]{}, err
 		}
 		out = append(out, &e)

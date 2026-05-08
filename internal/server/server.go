@@ -107,6 +107,10 @@ func buildRouter(cfg config.Config, logger *slog.Logger, st store.Store, art art
 	// re-applies its own (larger) limit.
 	r.Use(bodyLimitMiddleware(cfg.MaxRequestSize))
 	r.Use(authMiddleware(cfg))
+	// workspaceMiddleware runs after auth so the workspace is available to all
+	// downstream handlers. It validates the X-Workspace header / lmf_workspace
+	// cookie against the store and falls back to "default".
+	r.Use(workspaceMiddleware(st))
 
 	// Mount API surfaces.
 	mlh := &mlflow.Handler{Store: st, Artifacts: art}

@@ -37,6 +37,22 @@ const (
 	KindEval    = "eval"
 )
 
+// Workspace is a tenant boundary that groups experiments and runs.
+type Workspace struct {
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	Description    string `json:"description,omitempty"`
+	CreationTime   int64  `json:"creation_time"`
+	LastUpdateTime int64  `json:"last_update_time"`
+}
+
+// WorkspaceMember links a user to a workspace with a role.
+type WorkspaceMember struct {
+	WorkspaceID string `json:"workspace_id"`
+	UserID      string `json:"user_id"`
+	Role        string `json:"role"` // viewer|editor|admin
+}
+
 // Experiment represents an MLflow experiment.
 type Experiment struct {
 	ID               int64  `json:"id"`
@@ -45,6 +61,7 @@ type Experiment struct {
 	LifecycleStage   string `json:"lifecycle_stage"`
 	CreationTime     int64  `json:"creation_time"`
 	LastUpdateTime   int64  `json:"last_update_time"`
+	WorkspaceID      string `json:"workspace_id,omitempty"`
 	Tags             []KV   `json:"tags,omitempty"`
 }
 

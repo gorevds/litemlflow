@@ -167,6 +167,100 @@ litemlflow restore --data /var/lib/litemlflow/data --in /tmp/backup.tar.gz
 litemlflow up --data /var/lib/litemlflow/data
 ```
 
+## 9. Multiple workspaces for a small team
+
+LiteMLflow supports multi-tenancy through workspaces. Each workspace is an isolated namespace for experiments and runs. A single `default` workspace exists out of the box so solo users and existing MLflow clients need no changes.
+
+### Step 1 — create workspaces
+
+```bash
+# API token / basic-auth header omitted for brevity; add -u user:pass if needed.
+
+curl -s -X POST http://localhost:5000/api/v1/workspaces \
+  -H 'Content-Type: application/json' \
+  -d '{"id": "team-nlp", "name": "NLP Team", "description": "Sentence embeddings and RAG work"}'
+
+curl -s -X POST http://localhost:5000/api/v1/workspaces \
+  -H 'Content-Type: application/json' \
+  -d '{"id": "team-cv", "name": "CV Team", "description": "Vision models"}'
+```
+
+### Step 2 — assign members
+
+```bash
+# Give alice admin rights on team-nlp, bob read-only access.
+curl -s -X PUT http://localhost:5000/api/v1/workspaces/team-nlp/members/alice \
+  -H 'Content-Type: application/json' -d '{"role": "admin"}'
+
+curl -s -X PUT http://localhost:5000/api/v1/workspaces/team-nlp/members/bob \
+  -H 'Content-Type: application/json' -d '{"role": "viewer"}'
+```
+
+### Step 3 — log experiments in a workspace
+
+**Python (MLflow client)**
+
+```python
+import mlflow
+
+mlflow.set_tracking_uri("http://localhost:5000")
+
+# All API calls below target "team-nlp".
+# The MLflow client passes arbitrary headers since v2.x via the tracking client.
+from mlflow.tracking import MlflowClient
+client = MlflowClient(
+    tracking_uri="http://localhost:5000",
+)
+# Set the workspace header on the underlying session.
+client._tracking_client.store.get_host_creds().token  # dummy access to init
+import requests
+session = requests.Session()
+session.headers.update({"X-Workspace": "team-nlp"})
+# Or simpler: use the native Python SDK (python/litemlflow/).
+
+mlflow.set_experiment("rag-v2")  # created in team-nlp if X-Workspace is forwarded
+with mlflow.start_run():
+    mlflow.log_param("model", "bge-small-en")
+    mlflow.log_metric("recall@5", 0.87)
+```
+
+**curl**
+
+```bash
+curl -s -X POST http://localhost:5000/api/2.0/mlflow/experiments/create \
+  -H 'Content-Type: application/json' \
+  -H 'X-Workspace: team-nlp' \
+  -d '{"name": "rag-v2"}'
+```
+
+### Step 4 — verify isolation
+
+```bash
+# List experiments in team-nlp — sees rag-v2.
+curl -s -X POST http://localhost:5000/api/2.0/mlflow/experiments/search \
+  -H 'X-Workspace: team-nlp' \
+  -d '{}' | python3 -m json.tool
+
+# List experiments in default — does NOT see rag-v2.
+curl -s -X POST http://localhost:5000/api/2.0/mlflow/experiments/search \
+  -d '{}' | python3 -m json.tool
+```
+
+### Step 5 — find your current workspace
+
+```bash
+curl -s http://localhost:5000/api/v1/workspaces/current \
+  -H 'X-Workspace: team-nlp'
+# → {"workspace": {"id": "team-nlp", ...}, "user": "alice", "role": "admin"}
+```
+
+### Notes
+
+- The `default` workspace cannot be deleted and requires no `X-Workspace` header; existing MLflow clients continue to work unchanged.
+- Workspace IDs are slugs (`[a-z0-9-]{1,64}`), immutable after creation.
+- A workspace with experiments cannot be deleted until all experiments are removed or moved (there is no move API yet — delete the experiments first).
+- Member roles (`viewer`, `editor`, `admin`) are stored but not yet enforced by the API layer; enforcement is planned for v0.2 once OIDC lands.
+
 ## 8. Run as a systemd service
 
 `/etc/systemd/system/litemlflow.service`:

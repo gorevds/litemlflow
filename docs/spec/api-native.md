@@ -109,14 +109,71 @@ Accepts the OTLP `ExportTraceServiceRequest` shape. Spans are mapped to LiteMLfl
 
 A future v0.2 will add OTLP/gRPC.
 
-## Workspace (multi-tenant scaffolding)
+## Workspaces (multi-tenancy)
 
-For v0.1, all data lives in a single workspace. The scaffolding is in place for v0.2:
+Workspaces are the tenant boundary in LiteMLflow. Every experiment belongs to exactly one workspace. Clients select a workspace by sending the `X-Workspace` HTTP header (API/SDK) or the `lmf_workspace` cookie (UI). When neither is present, the request operates on the `default` workspace, which is seeded automatically on first startup and cannot be deleted.
 
-| Endpoint | Method | Description |
+### Workspace resolution (middleware)
+
+Resolution order per request:
+
+1. `X-Workspace` HTTP header — e.g. `X-Workspace: team-foo`
+2. `lmf_workspace` cookie — set by the UI after workspace selection
+3. Fallback: `"default"`
+
+If the requested workspace id does not exist in the database, the middleware returns **400 INVALID_PARAMETER_VALUE** before any handler runs.
+
+### Endpoints
+
+| Method | Path | Description |
 |---|---|---|
-| `/api/v1/workspaces` | GET | list (returns `[{id: "default"}]` in v0.1) |
-| `/api/v1/workspaces` | POST | create (returns 501 in v0.1) |
+| `GET` | `/api/v1/workspaces` | List all workspaces |
+| `POST` | `/api/v1/workspaces` | Create a workspace |
+| `GET` | `/api/v1/workspaces/current` | Return the workspace active for this request + caller's role |
+| `GET` | `/api/v1/workspaces/{id}` | Get a single workspace |
+| `PATCH` | `/api/v1/workspaces/{id}` | Update name and/or description |
+| `DELETE` | `/api/v1/workspaces/{id}` | Delete (refused for `default` or workspaces with experiments) |
+| `GET` | `/api/v1/workspaces/{id}/members` | List workspace members |
+| `PUT` | `/api/v1/workspaces/{id}/members/{user_id}` | Set or update a member's role (`viewer`\|`editor`\|`admin`) |
+| `DELETE` | `/api/v1/workspaces/{id}/members/{user_id}` | Revoke membership |
+
+### Request / response shapes
+
+**POST /api/v1/workspaces**
+```json
+{ "id": "team-foo", "name": "Team Foo", "description": "optional" }
+```
+Returns the created workspace object with server-set timestamps. HTTP 201.
+
+**PATCH /api/v1/workspaces/{id}**
+```json
+{ "name": "New Name", "description": "New description" }
+```
+Both fields are optional; omit to leave unchanged. Returns the updated workspace.
+
+**PUT /api/v1/workspaces/{id}/members/{user_id}**
+```json
+{ "role": "editor" }
+```
+Valid roles: `viewer`, `editor`, `admin`. Upserts — calling again changes the role.
+
+**GET /api/v1/workspaces/current**
+```json
+{
+  "workspace": { "id": "team-foo", "name": "Team Foo", ... },
+  "user": "alice",
+  "role": "admin"
+}
+```
+`role` is empty for anonymous users or users not explicitly listed as members.
+
+### Workspace IDs
+
+Workspace IDs are slugs: lowercase letters, digits, and hyphens; max 64 characters. They are immutable after creation. The `default` workspace is seeded by migration 005 and may not be deleted.
+
+### MLflow compat layer
+
+The MLflow API endpoints (`/api/2.0/mlflow/experiments/...`) are workspace-aware: `CreateExperiment`, `SearchExperiments`, and `GetExperimentByName` all operate within the workspace resolved from the request. Existing MLflow Python clients that send no `X-Workspace` header continue to use the `default` workspace unchanged.
 
 ## Auth introspection
 
