@@ -1,16 +1,24 @@
 # Quickstart
 
-## Install
+## Install via package manager
 
-For now, build from source:
+```bash
+brew install litemlflow/tap/litemlflow            # macOS / Linux brew
+sudo apt install litemlflow                       # Debian/Ubuntu (after adding apt repo)
+sudo dnf install litemlflow                       # Fedora/RHEL (after adding rpm repo)
+sudo snap install litemlflow                      # Snap
+helm install lmf oci://ghcr.io/litemlflow/charts/litemlflow --version 0.1.0   # Kubernetes
+```
+
+## Install from source
+
+Build from source (requires Go 1.22+):
 
 ```bash
 git clone https://github.com/litemlflow/litemlflow
 cd litemlflow
 make build
 ```
-
-Binary release tarballs and Homebrew/apt packages will land alongside v0.1.0.
 
 ## Run the server
 

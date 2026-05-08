@@ -9,7 +9,7 @@ LDFLAGS    := -X github.com/litemlflow/litemlflow/pkg/version.Version=$(shell gi
               -X github.com/litemlflow/litemlflow/pkg/version.Commit=$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown) \
               -X github.com/litemlflow/litemlflow/pkg/version.Date=$(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
-.PHONY: help build run dev test test-go test-py test-integration lint fmt vet clean docker compat-test py-install py-build
+.PHONY: help build run dev test test-go test-py test-integration lint fmt vet clean docker compat-test py-install py-build dist-helm-lint dist-helm-template dist-deb dist-rpm
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -60,3 +60,32 @@ clean: ## Remove build artifacts
 
 docker: ## Build the Docker image
 	docker build -t litemlflow:dev -f Dockerfile .
+
+# ── Distribution packaging ──────────────────────────────────────────────────
+
+DIST_BINARY ?= $(BINARY)
+DIST_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+
+dist-helm-lint: ## Lint the Helm chart
+	helm lint dist/helm/litemlflow/
+
+dist-helm-template: ## Dry-run render Helm chart to /tmp/render.yaml
+	helm template lmf dist/helm/litemlflow/ > /tmp/render.yaml
+	@echo "Rendered to /tmp/render.yaml"
+
+dist-deb: build ## Build a .deb package from the local binary (requires dpkg-buildpackage)
+	@echo "Copying binary $(DIST_BINARY) -> litemlflow (for dpkg-buildpackage)"
+	@cp "$(DIST_BINARY)" litemlflow
+	@cp -r dist/debian debian
+	@dpkg-buildpackage -b -us -uc
+	@rm -f litemlflow
+	@rm -rf debian
+	@echo "Done — .deb is in the parent directory."
+
+dist-rpm: build ## Build an .rpm package from the local binary (requires rpmbuild)
+	@mkdir -p ~/rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+	@cp "$(DIST_BINARY)" ~/rpmbuild/SOURCES/litemlflow-$(DIST_VERSION)-linux-x86_64
+	@cp dist/rpm/litemlflow.service ~/rpmbuild/SOURCES/litemlflow.service
+	@cp dist/rpm/litemlflow.spec ~/rpmbuild/SPECS/litemlflow.spec
+	@rpmbuild -bb ~/rpmbuild/SPECS/litemlflow.spec
+	@echo "Done — .rpm is in ~/rpmbuild/RPMS/"
