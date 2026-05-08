@@ -162,6 +162,136 @@ def _run_compat(url: str) -> None:
 
     print("\nAll MLflow compat checks passed.")
 
+    # Run Model Registry compat checks.
+    _run_registry_compat(url)
+
+
+def _run_registry_compat(url: str) -> None:
+    """Drive MLflow Model Registry API against LiteMLflow. Raises on failure."""
+    import mlflow
+    from mlflow.tracking import MlflowClient
+
+    client = MlflowClient(tracking_uri=url)
+    mlflow.set_tracking_uri(url)
+
+    suffix = str(int(time.time() * 1000))
+    model_name = f"compat-registry-{suffix}"
+
+    # 1. Create a registered model.
+    rm = client.create_registered_model(model_name, description="compat test model")
+    assert rm.name == model_name, f"expected {model_name!r}, got {rm.name!r}"
+    print(f"[ok] registry: create_registered_model -> {model_name}")
+
+    # 2. Create a run and log an artifact as the model source.
+    eid = mlflow.create_experiment(f"reg-compat-{suffix}")
+    with mlflow.start_run(experiment_id=eid, run_name="reg-run") as active:
+        run_id = active.info.run_id
+        mlflow.log_param("epochs", 10)
+        # Simulate logging a model artifact.
+        artifact_dir = tempfile.mkdtemp(prefix="lmf-reg-art-")
+        model_path = Path(artifact_dir) / "model.pkl"
+        model_path.write_bytes(b"serialised-model-weights")
+        mlflow.log_artifact(str(model_path), artifact_path="model")
+    artifact_uri = f"mlflow-artifacts:/{run_id}/model"
+
+    # 3. Create a model version pointing to the artifact URI.
+    mv = client.create_model_version(
+        name=model_name,
+        source=artifact_uri,
+        run_id=run_id,
+        description="v1 from compat test",
+    )
+    assert mv.name == model_name
+    assert mv.version == "1", f"expected version='1', got {mv.version!r}"
+    assert mv.source == artifact_uri
+    print(f"[ok] registry: create_model_version -> version={mv.version}")
+
+    # 4. Get the version back.
+    mv_got = client.get_model_version(model_name, "1")
+    assert mv_got.version == "1"
+    assert mv_got.run_id == run_id
+    print(f"[ok] registry: get_model_version")
+
+    # 5. Search registered models.
+    results = client.search_registered_models(filter_string=f"name = '{model_name}'")
+    assert len(results) >= 1, f"expected at least 1, got {len(results)}"
+    assert results[0].name == model_name
+    print(f"[ok] registry: search_registered_models ({len(results)} result(s))")
+
+    # 6. Search model versions.
+    mv_results = client.search_model_versions(filter_string=f"name = '{model_name}'")
+    assert len(mv_results) >= 1
+    print(f"[ok] registry: search_model_versions ({len(mv_results)} version(s))")
+
+    # 7. Transition stage.
+    client.transition_model_version_stage(
+        name=model_name,
+        version="1",
+        stage="Staging",
+        archive_existing_versions=False,
+    )
+    mv_staged = client.get_model_version(model_name, "1")
+    assert mv_staged.current_stage == "Staging", f"expected Staging, got {mv_staged.current_stage}"
+    print(f"[ok] registry: transition_model_version_stage -> Staging")
+
+    # 8. Set a tag on the model and on the version.
+    client.set_registered_model_tag(model_name, "team", "mlops")
+    client.set_model_version_tag(model_name, "1", "env", "staging")
+
+    rm_tagged = client.get_registered_model(model_name)
+    tag_keys = {t.key for t in rm_tagged.tags}
+    assert "team" in tag_keys, f"model tag not found; tags={rm_tagged.tags}"
+    print(f"[ok] registry: set_registered_model_tag")
+
+    mv_tagged = client.get_model_version(model_name, "1")
+    vtag_keys = {t.key for t in mv_tagged.tags}
+    assert "env" in vtag_keys, f"version tag not found; tags={mv_tagged.tags}"
+    print(f"[ok] registry: set_model_version_tag")
+
+    # 9. Set and resolve an alias.
+    client.set_registered_model_alias(model_name, "champion", "1")
+    mv_alias = client.get_model_version_by_alias(model_name, "champion")
+    assert mv_alias.version == "1", f"alias resolved to wrong version: {mv_alias.version}"
+    print(f"[ok] registry: set_registered_model_alias + get_model_version_by_alias")
+
+    # 10. Create a second version and verify get-latest-versions.
+    mv2 = client.create_model_version(
+        name=model_name,
+        source=artifact_uri,
+        run_id=run_id,
+    )
+    assert mv2.version == "2", f"expected version='2', got {mv2.version!r}"
+
+    client.transition_model_version_stage(
+        name=model_name, version="2", stage="Production",
+        archive_existing_versions=True,
+    )
+    latest = client.get_latest_versions(model_name, stages=["Production"])
+    assert len(latest) == 1 and latest[0].version == "2", (
+        f"expected latest Production=2, got {[(v.version, v.current_stage) for v in latest]}"
+    )
+    print(f"[ok] registry: get_latest_versions -> Production=v2")
+
+    # 11. Rename the model.
+    new_model_name = model_name + "-renamed"
+    client.rename_registered_model(model_name, new_model_name)
+    rm_renamed = client.get_registered_model(new_model_name)
+    assert rm_renamed.name == new_model_name
+    print(f"[ok] registry: rename_registered_model -> {new_model_name}")
+
+    # 12. Delete a version, then the model.
+    client.delete_model_version(new_model_name, "1")
+    client.delete_registered_model(new_model_name)
+    try:
+        client.get_registered_model(new_model_name)
+        raise AssertionError("expected ResourceDoesNotExist after delete")
+    except Exception as exc:
+        if "RESOURCE_DOES_NOT_EXIST" not in str(exc) and "404" not in str(exc):
+            raise
+    print(f"[ok] registry: delete_model_version + delete_registered_model")
+
+    print("\nAll registry compat checks passed.")
+
 
 def main() -> int:
     parser = argparse.ArgumentParser()
