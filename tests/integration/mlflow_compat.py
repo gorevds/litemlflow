@@ -238,14 +238,15 @@ def _run_registry_compat(url: str) -> None:
     client.set_registered_model_tag(model_name, "team", "mlops")
     client.set_model_version_tag(model_name, "1", "env", "staging")
 
+    # MLflow client returns tags as a dict {key: value}, not a list of objects.
     rm_tagged = client.get_registered_model(model_name)
-    tag_keys = {t.key for t in rm_tagged.tags}
-    assert "team" in tag_keys, f"model tag not found; tags={rm_tagged.tags}"
+    assert "team" in rm_tagged.tags, f"model tag not found; tags={rm_tagged.tags}"
+    assert rm_tagged.tags["team"] == "mlops"
     print(f"[ok] registry: set_registered_model_tag")
 
     mv_tagged = client.get_model_version(model_name, "1")
-    vtag_keys = {t.key for t in mv_tagged.tags}
-    assert "env" in vtag_keys, f"version tag not found; tags={mv_tagged.tags}"
+    assert "env" in mv_tagged.tags, f"version tag not found; tags={mv_tagged.tags}"
+    assert mv_tagged.tags["env"] == "staging"
     print(f"[ok] registry: set_model_version_tag")
 
     # 9. Set and resolve an alias.

@@ -18,6 +18,8 @@ func (h *Handler) mountRegistry(r chi.Router) {
 	r.Post("/api/2.0/mlflow/registered-models/rename", h.RenameRegisteredModel)
 	r.Post("/api/2.0/mlflow/registered-models/update", h.UpdateRegisteredModel)
 	r.Post("/api/2.0/mlflow/registered-models/delete", h.DeleteRegisteredModel)
+	// MLflow client uses DELETE method on this endpoint at runtime.
+	r.Delete("/api/2.0/mlflow/registered-models/delete", h.DeleteRegisteredModel)
 	r.Post("/api/2.0/mlflow/registered-models/search", h.SearchRegisteredModels)
 	r.Get("/api/2.0/mlflow/registered-models/search", h.SearchRegisteredModels)
 	r.Post("/api/2.0/mlflow/registered-models/get-latest-versions", h.GetLatestModelVersions)
@@ -33,6 +35,7 @@ func (h *Handler) mountRegistry(r chi.Router) {
 	r.Get("/api/2.0/mlflow/model-versions/get", h.GetModelVersion)
 	r.Post("/api/2.0/mlflow/model-versions/update", h.UpdateModelVersion)
 	r.Post("/api/2.0/mlflow/model-versions/delete", h.DeleteModelVersion)
+	r.Delete("/api/2.0/mlflow/model-versions/delete", h.DeleteModelVersion)
 	r.Post("/api/2.0/mlflow/model-versions/search", h.SearchModelVersions)
 	r.Get("/api/2.0/mlflow/model-versions/search", h.SearchModelVersions)
 	r.Get("/api/2.0/mlflow/model-versions/get-download-uri", h.GetModelVersionDownloadURI)
@@ -155,12 +158,16 @@ type deleteRegisteredModelReq struct {
 	Name string `json:"name"`
 }
 
-// DeleteRegisteredModel handles POST /api/2.0/mlflow/registered-models/delete.
+// DeleteRegisteredModel handles POST and DELETE /api/2.0/mlflow/registered-models/delete.
+//
+// MLflow's Python client (3.x) uses an HTTP DELETE with the name in the query
+// string for this endpoint; older versions use POST with a JSON body. We
+// accept both shapes: try JSON body first, then fall back to query string.
 func (h *Handler) DeleteRegisteredModel(w http.ResponseWriter, r *http.Request) {
 	var req deleteRegisteredModelReq
-	if err := decodeJSON(r, &req); err != nil {
-		writeBadRequest(w, err)
-		return
+	_ = decodeJSON(r, &req)
+	if req.Name == "" {
+		req.Name = r.URL.Query().Get("name")
 	}
 	if req.Name == "" {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "name is required")
@@ -476,12 +483,17 @@ type deleteModelVersionReq struct {
 	Version string `json:"version"`
 }
 
-// DeleteModelVersion handles POST /api/2.0/mlflow/model-versions/delete.
+// DeleteModelVersion handles POST and DELETE /api/2.0/mlflow/model-versions/delete.
+// MLflow client uses DELETE with query parameters; we also accept POST + JSON
+// body for backwards compatibility.
 func (h *Handler) DeleteModelVersion(w http.ResponseWriter, r *http.Request) {
 	var req deleteModelVersionReq
-	if err := decodeJSON(r, &req); err != nil {
-		writeBadRequest(w, err)
-		return
+	_ = decodeJSON(r, &req)
+	if req.Name == "" {
+		req.Name = r.URL.Query().Get("name")
+	}
+	if req.Version == "" {
+		req.Version = r.URL.Query().Get("version")
 	}
 	if req.Name == "" || req.Version == "" {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "name and version are required")

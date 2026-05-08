@@ -257,7 +257,14 @@ func (s *SQLiteStore) SearchRegisteredModels(ctx context.Context, filter string,
 //	name = 'foo'
 //	name LIKE 'foo%'
 //	tags.X = 'value'
+//
+// MLflow 3.x auto-appends `AND tag.\`mlflow.prompt.is_prompt\` != 'true'` to
+// every search to exclude its "prompt" objects from the registry result. We
+// don't store prompts as registered models, so that condition is always
+// satisfied; strip it before parsing so we don't have to support AND + tag.X
+// + != + backticks.
 func parseRegistryFilter(f string) (string, []any, error) {
+	f = stripPromptExclusion(f)
 	// tags.X = 'value'
 	if strings.HasPrefix(strings.ToLower(f), "tags.") {
 		idx := strings.Index(f, "=")
@@ -280,6 +287,31 @@ func parseRegistryFilter(f string) (string, []any, error) {
 		return "name " + op + " ?", []any{val}, nil
 	}
 	return "", nil, fmt.Errorf("unsupported registry filter %q (supports: name = / name LIKE / tags.X = '...')", f)
+}
+
+// stripPromptExclusion removes the "AND tag.`mlflow.prompt.is_prompt` != 'true'"
+// clause that MLflow 3.x clients append to every registry search. Returns the
+// remainder of the filter (or empty string if that was the only clause).
+//
+// We use a tolerant scan rather than a strict regex because MLflow may shift
+// quoting (single vs double, with/without backticks). The pattern we look for:
+// "AND" + something containing "mlflow.prompt.is_prompt" + comparison + value.
+func stripPromptExclusion(f string) string {
+	upper := strings.ToUpper(f)
+	idx := strings.Index(upper, " AND ")
+	if idx < 0 {
+		// Possibly the entire filter is just the prompt-exclusion (when MLflow
+		// is asked for "everything"). Handle that, too.
+		if strings.Contains(strings.ToLower(f), "mlflow.prompt.is_prompt") {
+			return ""
+		}
+		return f
+	}
+	tail := f[idx+5:]
+	if strings.Contains(strings.ToLower(tail), "mlflow.prompt.is_prompt") {
+		return strings.TrimSpace(f[:idx])
+	}
+	return f
 }
 
 // GetLatestModelVersions returns the highest-versioned model version per stage.
@@ -579,6 +611,7 @@ func (s *SQLiteStore) SearchModelVersions(ctx context.Context, filter string, ma
 }
 
 func parseModelVersionFilter(f string) (string, []any, error) {
+	f = stripPromptExclusion(f)
 	// tags.X = 'value'
 	if strings.HasPrefix(strings.ToLower(f), "tags.") {
 		idx := strings.Index(f, "=")
