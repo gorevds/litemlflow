@@ -240,6 +240,28 @@ func (s *stubStore) ListProjects(_ context.Context, _ string) ([]store.ProjectSu
 	return nil, nil
 }
 
+func (s *stubStore) GetRunLineage(_ context.Context, _ string) (*store.RunLineage, error) {
+	return nil, store.ErrNotFound
+}
+func (s *stubStore) ArchiveStaleRuns(_ context.Context, _ int64) (int, error)  { return 0, nil }
+func (s *stubStore) CreateWebhook(_ context.Context, _ *model.Webhook) (int64, error) {
+	return 0, nil
+}
+func (s *stubStore) ListWebhooks(_ context.Context, _ string, _ *int64) ([]*model.Webhook, error) {
+	return nil, nil
+}
+func (s *stubStore) GetWebhook(_ context.Context, _ int64) (*model.Webhook, error) {
+	return nil, store.ErrNotFound
+}
+func (s *stubStore) UpdateWebhook(_ context.Context, _ *model.Webhook) error { return nil }
+func (s *stubStore) DeleteWebhook(_ context.Context, _ int64) error          { return nil }
+func (s *stubStore) RecordWebhookAttempt(_ context.Context, _ int64, _ int, _ int64) error {
+	return nil
+}
+func (s *stubStore) CloneExperiment(_ context.Context, _ int64, _, _ string) (*model.Experiment, error) {
+	return nil, store.ErrNotFound
+}
+
 // --- fuzz setup ---
 
 func newTestHandler() *native.Handler {

@@ -516,6 +516,28 @@ func (s *inMemStore) ListProjects(_ context.Context, _ string) ([]store.ProjectS
 	return nil, nil
 }
 
+func (s *inMemStore) GetRunLineage(_ context.Context, _ string) (*store.RunLineage, error) {
+	return nil, store.ErrNotFound
+}
+func (s *inMemStore) ArchiveStaleRuns(_ context.Context, _ int64) (int, error)  { return 0, nil }
+func (s *inMemStore) CreateWebhook(_ context.Context, _ *model.Webhook) (int64, error) {
+	return 0, nil
+}
+func (s *inMemStore) ListWebhooks(_ context.Context, _ string, _ *int64) ([]*model.Webhook, error) {
+	return nil, nil
+}
+func (s *inMemStore) GetWebhook(_ context.Context, _ int64) (*model.Webhook, error) {
+	return nil, store.ErrNotFound
+}
+func (s *inMemStore) UpdateWebhook(_ context.Context, _ *model.Webhook) error { return nil }
+func (s *inMemStore) DeleteWebhook(_ context.Context, _ int64) error          { return nil }
+func (s *inMemStore) RecordWebhookAttempt(_ context.Context, _ int64, _ int, _ int64) error {
+	return nil
+}
+func (s *inMemStore) CloneExperiment(_ context.Context, _ int64, _, _ string) (*model.Experiment, error) {
+	return nil, store.ErrNotFound
+}
+
 // inMemArtifactStore records uploaded artifacts.
 type inMemArtifactStore struct {
 	files map[string][]byte

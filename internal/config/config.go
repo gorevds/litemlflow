@@ -70,6 +70,16 @@ type Config struct {
 	// OTLPGRPCAddr is the listen address for the OTLP/gRPC receiver, e.g.
 	// "127.0.0.1:4317". Empty (the default) disables the gRPC listener.
 	OTLPGRPCAddr string
+
+	// Janitor controls the background stale-run archiver.
+	// JanitorEnabled toggles the janitor goroutine (default true).
+	JanitorEnabled bool
+	// JanitorInterval is how often the janitor scans for stale runs (default 5min).
+	JanitorInterval time.Duration
+	// RunStaleAfter is the maximum age of a RUNNING run; older ones are archived
+	// to FAILED with the tag lmf.auto_archived=stale (default 24h).
+	// Configure via LITEMLFLOW_RUN_STALE_AFTER env var or --run-stale-after flag.
+	RunStaleAfter time.Duration
 }
 
 // FromEnv returns a Config populated from environment variables, then
@@ -97,6 +107,9 @@ func defaults() Config {
 		WriteTimeout:         30 * time.Second,
 		IdleTimeout:          120 * time.Second,
 		S3MultipartThreshold: 100 << 20, // 100 MiB
+		JanitorEnabled:       true,
+		JanitorInterval:      5 * time.Minute,
+		RunStaleAfter:        24 * time.Hour,
 	}
 }
 
@@ -173,6 +186,19 @@ func overlayFromEnv(c Config) Config {
 	}
 	if v := os.Getenv("LITEMLFLOW_OTLP_GRPC_ADDR"); v != "" {
 		c.OTLPGRPCAddr = v
+	}
+	if v := os.Getenv("LITEMLFLOW_JANITOR_ENABLED"); v == "0" || v == "false" {
+		c.JanitorEnabled = false
+	}
+	if v := os.Getenv("LITEMLFLOW_JANITOR_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			c.JanitorInterval = d
+		}
+	}
+	if v := os.Getenv("LITEMLFLOW_RUN_STALE_AFTER"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			c.RunStaleAfter = d
+		}
 	}
 	return c
 }
@@ -262,6 +288,15 @@ func overlay(base, explicit Config) Config {
 	}
 	if explicit.OTLPGRPCAddr != "" {
 		base.OTLPGRPCAddr = explicit.OTLPGRPCAddr
+	}
+	if explicit.JanitorEnabled {
+		base.JanitorEnabled = explicit.JanitorEnabled
+	}
+	if explicit.JanitorInterval != 0 {
+		base.JanitorInterval = explicit.JanitorInterval
+	}
+	if explicit.RunStaleAfter != 0 {
+		base.RunStaleAfter = explicit.RunStaleAfter
 	}
 	return base
 }

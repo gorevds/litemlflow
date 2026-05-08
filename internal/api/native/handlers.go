@@ -87,6 +87,9 @@ func (h *Handler) Mount(r chi.Router) {
 
 	// PROJECTS: list distinct lmf.project tag values in the current workspace.
 	r.Get("/api/v1/projects", h.ListProjects)
+
+	// Webhooks, lineage, and experiment clone.
+	h.mountWebhookRoutes(r)
 }
 
 // projectDTO is one row in the projects-list response.

@@ -21,6 +21,7 @@ import (
 	"github.com/gorevds/litemlflow/internal/grpcotlp"
 	"github.com/gorevds/litemlflow/internal/metrics"
 	"github.com/gorevds/litemlflow/internal/store"
+	"github.com/gorevds/litemlflow/internal/webhooks"
 	"github.com/gorevds/litemlflow/ui"
 )
 
@@ -75,7 +76,9 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Server, 
 		_ = st.Close()
 		return nil, err
 	}
-	router := buildRouter(cfg, logger, st, art, uiFS)
+	// Create webhook dispatcher (started lazily in buildRouter).
+	dispatcher := webhooks.New(ctx, st, logger)
+	router := buildRouter(cfg, logger, st, art, uiFS, dispatcher)
 
 	httpSrv := &http.Server{
 		Addr:              cfg.Addr,
@@ -103,6 +106,11 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Server, 
 // Run starts serving until ctx is canceled or an error occurs.
 func (s *Server) Run(ctx context.Context) error {
 	errCh := make(chan error, 2)
+
+	// Start the background janitor if enabled.
+	if s.cfg.JanitorEnabled {
+		StartJanitor(ctx, s.store, s.cfg.JanitorInterval, s.cfg.RunStaleAfter, s.logger)
+	}
 
 	// Start HTTP server.
 	go func() {
@@ -150,7 +158,7 @@ func (s *Server) Close() error {
 	return s.store.Close()
 }
 
-func buildRouter(cfg config.Config, logger *slog.Logger, st store.Store, art artifact.Store, uiFS fs.FS) http.Handler {
+func buildRouter(cfg config.Config, logger *slog.Logger, st store.Store, art artifact.Store, uiFS fs.FS, dispatcher *webhooks.Dispatcher) http.Handler {
 	// Build the metrics registry before anything else so we can mount /metrics
 	// BEFORE the auth middleware (Prometheus scrapers don't send credentials).
 	reg := metrics.NewRegistry()
@@ -191,7 +199,7 @@ func buildRouter(cfg config.Config, logger *slog.Logger, st store.Store, art art
 	})
 
 	// Mount API surfaces.
-	mlh := &mlflow.Handler{Store: st, Artifacts: art}
+	mlh := &mlflow.Handler{Store: st, Artifacts: art, Dispatcher: dispatcher}
 	mlh.Mount(r)
 
 	// AUTH-OIDC: build native handler with full auth wiring.

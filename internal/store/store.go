@@ -61,6 +61,13 @@ type MetricHistoryOptions struct {
 	PageToken  string // opaque: "timestamp:step" encoded as base64
 }
 
+// RunLineage is the response type for GET /api/v1/runs/{id}/lineage.
+type RunLineage struct {
+	Run         *model.Run   `json:"run"`
+	Ancestors   []*model.Run `json:"ancestors"`
+	Descendants []*model.Run `json:"descendants"`
+}
+
 // Store is the persistence interface.
 type Store interface {
 	// Lifecycle.
@@ -151,6 +158,23 @@ type Store interface {
 	TransitionModelStage(ctx context.Context, name string, version int64, stage string, archiveExisting bool) (*model.ModelVersion, error)
 	SetModelVersionTag(ctx context.Context, name string, version int64, key, value string) error
 	DeleteModelVersionTag(ctx context.Context, name string, version int64, key string) error
+
+	// Run lineage.
+	GetRunLineage(ctx context.Context, runID string) (*RunLineage, error)
+
+	// Janitor.
+	ArchiveStaleRuns(ctx context.Context, staleBefore int64) (int, error)
+
+	// Webhooks.
+	CreateWebhook(ctx context.Context, w *model.Webhook) (int64, error)
+	ListWebhooks(ctx context.Context, workspaceID string, expID *int64) ([]*model.Webhook, error)
+	GetWebhook(ctx context.Context, id int64) (*model.Webhook, error)
+	UpdateWebhook(ctx context.Context, w *model.Webhook) error
+	DeleteWebhook(ctx context.Context, id int64) error
+	RecordWebhookAttempt(ctx context.Context, id int64, status int, attempt int64) error
+
+	// Experiment clone.
+	CloneExperiment(ctx context.Context, srcID int64, newName, workspaceID string) (*model.Experiment, error)
 
 	// Workspaces.
 	CreateWorkspace(ctx context.Context, w *model.Workspace) error
