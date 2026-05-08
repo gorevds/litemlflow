@@ -424,6 +424,10 @@ func (s *inMemStore) LogInputs(_ context.Context, _ string, _ []model.DatasetInp
 func (s *inMemStore) GetRunDatasets(_ context.Context, _ string) ([]model.DatasetInput, error) {
 	return nil, nil
 }
+func (s *inMemStore) SetRunNote(_ context.Context, _, _, _ string) error { return nil }
+func (s *inMemStore) GetRunNote(_ context.Context, _ string) (string, string, int64, error) {
+	return "", "", 0, store.ErrNotFound
+}
 func (s *inMemStore) InsertSpans(_ context.Context, _ []model.Span) error { return nil }
 func (s *inMemStore) GetSpansByRun(_ context.Context, _ string) ([]model.Span, error) {
 	return nil, nil

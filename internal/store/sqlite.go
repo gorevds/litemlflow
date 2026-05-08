@@ -1470,6 +1470,40 @@ func (s *SQLiteStore) GetEval(ctx context.Context, runID string) (*model.Eval, e
 	return &e, nil
 }
 
+// ----- run notes -----
+
+// SetRunNote upserts a markdown note for a run.
+// If content is empty the note row is deleted (no-op if it doesn't exist).
+func (s *SQLiteStore) SetRunNote(ctx context.Context, runID, content, user string) error {
+	if err := assertRunExists(ctx, s.db, runID); err != nil {
+		return err
+	}
+	if content == "" {
+		_, err := s.db.ExecContext(ctx, `DELETE FROM run_notes WHERE run_id = ?`, runID)
+		return err
+	}
+	now := time.Now().UnixMilli()
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO run_notes(run_id, content, updated_at, updated_by) VALUES (?, ?, ?, ?)
+		ON CONFLICT(run_id) DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at, updated_by = excluded.updated_by
+	`, runID, content, now, nilIfEmpty(user))
+	return err
+}
+
+// GetRunNote returns the note for a run. Returns ErrNotFound if absent.
+func (s *SQLiteStore) GetRunNote(ctx context.Context, runID string) (content, updatedBy string, updatedAt int64, err error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT content, COALESCE(updated_by,''), updated_at FROM run_notes WHERE run_id = ?
+	`, runID)
+	if scanErr := row.Scan(&content, &updatedBy, &updatedAt); scanErr != nil {
+		if errors.Is(scanErr, sql.ErrNoRows) {
+			return "", "", 0, ErrNotFound
+		}
+		return "", "", 0, scanErr
+	}
+	return content, updatedBy, updatedAt, nil
+}
+
 // ----- datasets / log_inputs -----
 
 // LogInputs records dataset linkages for a run. Each dataset is upserted

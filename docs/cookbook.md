@@ -1085,3 +1085,68 @@ watch -n 5 'curl -s http://localhost:5000/metrics | grep litemlflow_http_request
 | Slow p95 latency | `histogram_quantile(0.95, rate(litemlflow_http_request_duration_seconds_bucket[5m])) > 0.5` | 95th-percentile latency above 500 ms |
 | DB growth | `litemlflow_db_size_bytes > 5e9` | Database is larger than 5 GiB |
 | Process restarted | `increase(litemlflow_build_info[5m]) > 0` | Build-info gauge resets on restart |
+
+## Annotate runs with notes and stars
+
+LiteMLflow v1.0 adds two first-class solo-MLE ergonomics: **markdown notes** per
+run and **starred** runs surfaced at the top of the experiment list.
+
+### Leaving a note on a run (Python)
+
+```python
+import requests
+
+BASE = "http://localhost:5000"
+run_id = "abc123..."   # your run ID
+
+requests.put(f"{BASE}/api/v1/runs/{run_id}/note", json={
+    "content": "# Experiment summary\n\n"
+               "Best loss: **0.034** at step 120.\n\n"
+               "```\nlr=1e-3  batch=64  dropout=0.1\n```"
+})
+```
+
+Retrieve it again:
+```python
+r = requests.get(f"{BASE}/api/v1/runs/{run_id}/note")
+print(r.json()["content"])   # markdown string
+print(r.json()["updated_by"])  # username, if auth is configured
+```
+
+Delete by sending an empty string:
+```python
+requests.put(f"{BASE}/api/v1/runs/{run_id}/note", json={"content": ""})
+```
+
+### Starring a run (Python)
+
+Stars use the special MLflow tag `lmf.starred=true` — any standard MLflow client
+can read/write it.
+
+```python
+import mlflow
+
+mlflow.set_tracking_uri("http://localhost:5000")
+
+# Star a run
+with mlflow.start_run(run_id="abc123..."):
+    mlflow.set_tag("lmf.starred", "true")
+
+# Unstar
+with mlflow.start_run(run_id="abc123..."):
+    mlflow.delete_tag("lmf.starred")
+```
+
+### UI workflow
+
+1. Open any run detail page.
+2. Click **☆** in the header to toggle the star (persisted on server immediately).
+3. Back in the experiment runs table, starred rows show **★** and float to the
+   top (toggle the "Starred first" checkbox to disable).
+4. Click **✏** next to the run name to rename it inline — press Enter or click
+   away to save; press Escape to cancel.
+5. In the Notes card, click **Edit** (or **+ Add note**) to write markdown.
+   The card renders bold, italic, code, lists, and links without any CDN
+   dependency.
+6. Select multiple runs with checkboxes, then click **Tags** in the bulk bar
+   to add, remove, or replace the `lmf.project` tag on all selected runs at once.

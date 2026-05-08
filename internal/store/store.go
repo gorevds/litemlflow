@@ -105,6 +105,14 @@ type Store interface {
 	GetTags(ctx context.Context, runID string) ([]model.KV, error)
 	GetLatestMetrics(ctx context.Context, runID string) ([]model.Metric, error)
 
+	// Run notes (markdown).
+	// SetRunNote upserts the note for a run. An empty content string deletes
+	// the note row entirely. user may be empty for anonymous writes.
+	SetRunNote(ctx context.Context, runID, content, user string) error
+	// GetRunNote returns the note for a run. Returns ErrNotFound if no note has
+	// been set.
+	GetRunNote(ctx context.Context, runID string) (content, updatedBy string, updatedAt int64, err error)
+
 	// Datasets / log_inputs.
 	LogInputs(ctx context.Context, runID string, inputs []model.DatasetInput) error
 	GetRunDatasets(ctx context.Context, runID string) ([]model.DatasetInput, error)

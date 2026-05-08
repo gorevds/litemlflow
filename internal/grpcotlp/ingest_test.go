@@ -116,6 +116,10 @@ func (nopStore) LogInputs(_ context.Context, _ string, _ []model.DatasetInput) e
 func (nopStore) GetRunDatasets(_ context.Context, _ string) ([]model.DatasetInput, error) {
 	panic("not impl")
 }
+func (nopStore) SetRunNote(_ context.Context, _, _, _ string) error { panic("not impl") }
+func (nopStore) GetRunNote(_ context.Context, _ string) (string, string, int64, error) {
+	panic("not impl")
+}
 func (nopStore) CreatePrompt(_ context.Context, _ *model.Prompt) (int64, error) { panic("not impl") }
 func (nopStore) GetLatestPrompt(_ context.Context, _ string) (*model.Prompt, error) {
 	panic("not impl")

@@ -118,6 +118,91 @@
     };
   }
 
+  // ─── Tiny safe inline Markdown renderer ──────────────────────────────────────
+  // Whitelist: bold (**text**), italic (*text*), inline code (`text`),
+  // code blocks (```...```), links ([text](url)), unordered lists (- item),
+  // and paragraphs. NO raw HTML pass-through.
+  function renderMarkdown(md) {
+    if (!md) return "";
+    const lines = md.split("\n");
+    const out = [];
+    let inCode = false;
+    let inList = false;
+
+    for (let i = 0; i < lines.length; i++) {
+      let line = lines[i];
+
+      // Fenced code block toggle
+      if (line.startsWith("```")) {
+        if (inCode) {
+          out.push("</code></pre>");
+          inCode = false;
+        } else {
+          if (inList) { out.push("</ul>"); inList = false; }
+          out.push('<pre class="md-code"><code>');
+          inCode = true;
+        }
+        continue;
+      }
+      if (inCode) {
+        out.push(escapeHTML(line) + "\n");
+        continue;
+      }
+
+      // Unordered list items
+      if (line.match(/^[-*+] /)) {
+        if (!inList) { out.push("<ul>"); inList = true; }
+        out.push("<li>" + inlineMarkdown(line.slice(2)) + "</li>");
+        continue;
+      }
+      if (inList && line.trim() !== "") {
+        // continuation indented items
+        if (line.match(/^\s+[-*+] /)) {
+          out.push("<li>" + inlineMarkdown(line.trimStart().slice(2)) + "</li>");
+          continue;
+        }
+      }
+      if (inList) { out.push("</ul>"); inList = false; }
+
+      // Headings
+      if (line.startsWith("# "))  { out.push("<h3>" + inlineMarkdown(line.slice(2)) + "</h3>"); continue; }
+      if (line.startsWith("## ")) { out.push("<h4>" + inlineMarkdown(line.slice(3)) + "</h4>"); continue; }
+      if (line.startsWith("### ")) { out.push("<h5>" + inlineMarkdown(line.slice(4)) + "</h5>"); continue; }
+
+      // Blank line → paragraph break
+      if (line.trim() === "") {
+        out.push("<br/>");
+        continue;
+      }
+
+      out.push("<p>" + inlineMarkdown(line) + "</p>");
+    }
+    if (inList) out.push("</ul>");
+    if (inCode) out.push("</code></pre>");
+    return out.join("");
+  }
+
+  function inlineMarkdown(text) {
+    // Process inline code first to prevent double-escaping.
+    // Split on backtick spans, escape & render.
+    const parts = text.split(/(`[^`]+`)/g);
+    return parts.map((part, i) => {
+      if (i % 2 === 1) {
+        // inline code
+        return "<code>" + escapeHTML(part.slice(1, -1)) + "</code>";
+      }
+      let s = escapeHTML(part);
+      // Bold
+      s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+      // Italic (single star, not already consumed by bold)
+      s = s.replace(/\*([^*]+)\*/g, "<em>$1</em>");
+      // Links [text](url) — allow only http/https/mailto hrefs
+      s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+|mailto:[^)]+)\)/g,
+        '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+      return s;
+    }).join("");
+  }
+
   // ─── Chart ───────────────────────────────────────────────────────────────────
   function simpleChart(key, points, downsampledFrom) {
     if (!points.length) return "";
@@ -653,6 +738,10 @@ mlflow.log_metric("loss", 0.42)</pre>
     async renderExperiment(expID) {
       const main = $("#app");
       BulkSelect.reset(expID);
+      const STARRED_TAG = "lmf.starred";
+      const starredFirstKey = "litemlflow.runs.starredFirst";
+      let starredFirst = localStorage.getItem(starredFirstKey) !== "false";
+
       try {
         const [exp, runsRes] = await Promise.all([
           fetchJSON(`/api/2.0/mlflow/experiments/get?experiment_id=${expID}`),
@@ -662,17 +751,31 @@ mlflow.log_metric("loss", 0.42)</pre>
           }),
         ]);
         const e = exp.experiment;
-        const runs = runsRes.runs || [];
+        let runs = runsRes.runs || [];
 
-        const rows = runs.map((r, i) => {
+        const isStarred = r => (r.data && r.data.tags || []).some(t => (t.key || t.Key) === STARRED_TAG && (t.value || t.Value) === "true");
+
+        const sortRuns = list => {
+          if (!starredFirst) return list;
+          return [...list].sort((a, b) => {
+            const as = isStarred(a) ? 0 : 1;
+            const bs = isStarred(b) ? 0 : 1;
+            return as - bs;
+          });
+        };
+
+        const renderRows = (list) => sortRuns(list).map((r, i) => {
           const info = r.info, data = r.data;
           const metrics = (data.metrics || []).map(m => `${escapeHTML(m.key)}=${m.value.toPrecision(4)}`).join(", ");
           const checked = BulkSelect.has(info.run_id) ? "checked" : "";
+          const starred = isStarred(r);
           return `
             <tr data-row-index="${i}" data-run-id="${info.run_id}">
               <td class="bulk-col"><input type="checkbox" class="bulk-cb" data-run-id="${info.run_id}" ${checked} /></td>
               <td class="mono" onclick="location.hash='#/experiments/${expID}/runs/${info.run_id}'">${info.run_id.slice(0, 8)}</td>
-              <td onclick="location.hash='#/experiments/${expID}/runs/${info.run_id}'">${escapeHTML(info.run_name || "—")}</td>
+              <td onclick="location.hash='#/experiments/${expID}/runs/${info.run_id}'">
+                ${starred ? '<span class="star-icon" title="Starred">&#9733;</span> ' : ""}${escapeHTML(info.run_name || "—")}
+              </td>
               <td onclick="location.hash='#/experiments/${expID}/runs/${info.run_id}'"><span class="status-pill status-${info.status}">${info.status}</span></td>
               <td onclick="location.hash='#/experiments/${expID}/runs/${info.run_id}'">${formatTime(info.start_time)}</td>
               <td onclick="location.hash='#/experiments/${expID}/runs/${info.run_id}'">${info.end_time ? formatDuration(info.end_time - info.start_time) : "—"}</td>
@@ -693,7 +796,13 @@ mlflow.log_metric("loss", 0.42)</pre>
               </table>
             </div>
           </div>
-          <h2>Runs (${runs.length})</h2>
+          <div style="display:flex;align-items:center;gap:12px;margin-top:16px;margin-bottom:4px">
+            <h2 style="margin:0">Runs (${runs.length})</h2>
+            <label style="font-size:12px;color:var(--fg-muted);display:flex;align-items:center;gap:4px;cursor:pointer">
+              <input type="checkbox" id="starred-first-cb" ${starredFirst ? "checked" : ""}/>
+              Starred first
+            </label>
+          </div>
           <div class="card" style="padding:0">
             <table>
               <thead>
@@ -702,9 +811,26 @@ mlflow.log_metric("loss", 0.42)</pre>
                   <th>ID</th><th>Name</th><th>Status</th><th>Started</th><th>Duration</th><th>Metrics</th>
                 </tr>
               </thead>
-              <tbody>${rows || `<tr><td colspan="7" class="empty">No runs yet.</td></tr>`}</tbody>
+              <tbody id="runs-tbody">${renderRows(runs) || `<tr><td colspan="7" class="empty">No runs yet.</td></tr>`}</tbody>
             </table>
           </div>`;
+
+        // Starred-first toggle
+        const sfCb = $("#starred-first-cb");
+        sfCb.addEventListener("change", () => {
+          starredFirst = sfCb.checked;
+          localStorage.setItem(starredFirstKey, String(starredFirst));
+          const tbody = $("#runs-tbody");
+          if (tbody) tbody.innerHTML = renderRows(runs) || `<tr><td colspan="7" class="empty">No runs yet.</td></tr>`;
+          // Rewire checkboxes
+          $$(".bulk-cb", main).forEach(cb => {
+            cb.checked = BulkSelect.has(cb.dataset.runId);
+            cb.addEventListener("change", () => {
+              BulkSelect.toggle(cb.dataset.runId);
+              this._updateBulkBar(expID, runs);
+            });
+          });
+        });
 
         // Checkbox wiring
         $$(".bulk-cb", main).forEach(cb => {
@@ -755,6 +881,7 @@ mlflow.log_metric("loss", 0.42)</pre>
         <button id="bulk-compare">Compare</button>
         <button id="bulk-delete" class="btn-danger">Delete</button>
         <button id="bulk-export">Export JSON</button>
+        <button id="bulk-tags">Tags</button>
         <button id="bulk-clear" class="btn-ghost">✕ Clear</button>`;
 
       $("#bulk-compare").onclick = () => {
@@ -786,12 +913,117 @@ mlflow.log_metric("loss", 0.42)</pre>
         URL.revokeObjectURL(a.href);
       };
 
+      $("#bulk-tags").onclick = () => {
+        this._openBulkTagModal(expID, runs);
+      };
+
       $("#bulk-clear").onclick = () => {
         BulkSelect.clear();
         $$(".bulk-cb", $("#app")).forEach(cb => { cb.checked = false; });
         const allCb = $("#bulk-all");
         if (allCb) allCb.checked = false;
         this._updateBulkBar(expID, runs);
+      };
+    },
+
+    _openBulkTagModal(expID, runs) {
+      // Remove any existing modal
+      const old = $("#bulk-tag-modal-overlay");
+      if (old) old.remove();
+
+      const overlay = document.createElement("div");
+      overlay.id = "bulk-tag-modal-overlay";
+      overlay.className = "shortcut-overlay";
+      overlay.innerHTML = `
+        <div class="shortcut-modal" style="min-width:360px">
+          <div class="shortcut-modal-header">
+            <strong>Bulk Tag Editor</strong>
+            <button class="modal-close" id="bulk-tag-close">✕</button>
+          </div>
+          <div style="margin-bottom:12px">
+            <label style="font-size:12px;color:var(--fg-muted)">Action</label><br/>
+            <select id="bulk-tag-action" style="width:100%;margin-top:4px;padding:6px;border:1px solid var(--border);border-radius:6px;background:var(--bg-card);color:var(--fg);font:inherit">
+              <option value="add">Add / update tag</option>
+              <option value="remove">Remove tag</option>
+              <option value="project">Replace project (lmf.project)</option>
+            </select>
+          </div>
+          <div id="bulk-tag-key-row" style="margin-bottom:12px">
+            <label style="font-size:12px;color:var(--fg-muted)">Key</label><br/>
+            <input id="bulk-tag-key" type="text" placeholder="tag key…" style="width:100%;margin-top:4px" />
+          </div>
+          <div id="bulk-tag-val-row" style="margin-bottom:16px">
+            <label style="font-size:12px;color:var(--fg-muted)">Value</label><br/>
+            <input id="bulk-tag-val" type="text" placeholder="tag value…" style="width:100%;margin-top:4px" />
+          </div>
+          <div id="bulk-tag-progress" style="font-size:12px;color:var(--fg-muted);min-height:18px;margin-bottom:8px"></div>
+          <div style="display:flex;gap:8px;justify-content:flex-end">
+            <button id="bulk-tag-cancel">Cancel</button>
+            <button id="bulk-tag-apply" style="background:var(--accent);color:#fff;border-color:var(--accent)">Apply to ${BulkSelect.size()} runs</button>
+          </div>
+        </div>`;
+      document.body.appendChild(overlay);
+      overlay.classList.add("open");
+
+      const actionSel = $("#bulk-tag-action");
+      const keyRow = $("#bulk-tag-key-row");
+      const valRow = $("#bulk-tag-val-row");
+      const keyInp = $("#bulk-tag-key");
+      const valInp = $("#bulk-tag-val");
+      const progress = $("#bulk-tag-progress");
+
+      const updateVisibility = () => {
+        const action = actionSel.value;
+        keyRow.style.display = action === "project" ? "none" : "";
+        valRow.style.display = action === "remove" ? "none" : "";
+      };
+      actionSel.addEventListener("change", updateVisibility);
+      updateVisibility();
+
+      const close = () => overlay.remove();
+      $("#bulk-tag-close").onclick = close;
+      $("#bulk-tag-cancel").onclick = close;
+      overlay.addEventListener("click", ev => { if (ev.target === overlay) close(); });
+
+      $("#bulk-tag-apply").onclick = async () => {
+        const action = actionSel.value;
+        const key = action === "project" ? "lmf.project" : keyInp.value.trim();
+        const value = valInp.value.trim();
+
+        if (action !== "project" && action !== "remove" && key === "") {
+          keyInp.style.borderColor = "var(--error)";
+          setTimeout(() => { keyInp.style.borderColor = ""; }, 1500);
+          return;
+        }
+
+        const ids = BulkSelect.list();
+        let done = 0;
+        progress.textContent = `Applying to 0 of ${ids.length} runs…`;
+
+        for (const id of ids) {
+          try {
+            if (action === "remove") {
+              await fetchJSON("/api/2.0/mlflow/runs/delete-tag", {
+                method: "POST",
+                body: JSON.stringify({ run_id: id, key }),
+              });
+            } else {
+              await fetchJSON("/api/2.0/mlflow/runs/set-tag", {
+                method: "POST",
+                body: JSON.stringify({ run_id: id, key, value }),
+              });
+            }
+          } catch { /* skip failed */ }
+          done++;
+          progress.textContent = `Applied to ${done} of ${ids.length} runs…`;
+        }
+
+        progress.textContent = `Done — applied to ${done} of ${ids.length} runs.`;
+        setTimeout(() => {
+          close();
+          BulkSelect.clear();
+          App.renderExperiment(expID);
+        }, 800);
       };
     },
 
@@ -882,20 +1114,31 @@ mlflow.log_metric("loss", 0.42)</pre>
     // ── Run detail ───────────────────────────────────────────────────────────
     async renderRun(expID, runID) {
       const main = $("#app");
+      const STARRED_TAG = "lmf.starred";
+
       try {
-        const data = await fetchJSON(`/api/v1/runs/${runID}/data`);
+        const [data, noteRes] = await Promise.all([
+          fetchJSON(`/api/v1/runs/${runID}/data`),
+          fetchJSON(`/api/v1/runs/${runID}/note`).catch(() => null),
+        ]);
         const params = (data.params || []).map(p => `<tr><td>${escapeHTML(p.Key || p.key)}</td><td class="mono">${escapeHTML(p.Value || p.value)}</td></tr>`).join("");
-        const tags = (data.tags || []).map(t => `<span class="tag">${escapeHTML(t.Key || t.key)}=${escapeHTML(t.Value || t.value)}</span>`).join(" ");
+        const allTags = data.tags || [];
+        const isStarred = allTags.some(t => (t.Key || t.key) === STARRED_TAG && (t.Value || t.value) === "true");
+        const visibleTags = allTags.filter(t => (t.Key || t.key) !== STARRED_TAG);
+        const tags = visibleTags.map(t => `<span class="tag">${escapeHTML(t.Key || t.key)}=${escapeHTML(t.Value || t.value)}</span>`).join(" ");
         const metrics = data.metrics || [];
         const isTrace = data.kind === "trace";
+        const starIcon = isStarred ? "&#9733;" : "&#9734;";
 
         main.innerHTML = `
           <div class="crumbs">
             <a href="#/experiments">Experiments</a> /
             <a href="#/experiments/${expID}">exp ${expID}</a> / ${data.id}
           </div>
-          <h1>
-            ${escapeHTML(data.name || "(unnamed run)")}
+          <h1 style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <button id="star-btn" class="btn-ghost star-btn" title="${isStarred ? "Unstar" : "Star"} this run" style="font-size:20px;padding:2px 6px">${starIcon}</button>
+            <span id="run-name-display" class="run-name-display">${escapeHTML(data.name || "(unnamed run)")}</span>
+            <button id="rename-btn" class="btn-ghost" title="Rename run" style="font-size:13px;padding:2px 6px">&#9998;</button>
             <span class="kind-pill">${data.kind}</span>
             <span class="status-pill status-${data.status}">${data.status}</span>
           </h1>
@@ -906,7 +1149,7 @@ mlflow.log_metric("loss", 0.42)</pre>
                 <tr><td>Started</td><td>${formatTime(data.start_time)}</td></tr>
                 <tr><td>Duration</td><td>${data.end_time ? formatDuration(data.end_time - data.start_time) : "running"}</td></tr>
                 <tr><td>Artifact URI</td><td class="mono">${escapeHTML(data.artifact_uri)}</td></tr>
-                <tr><td>Tags</td><td class="tag-list">${tags || "—"}</td></tr>
+                <tr><td>Tags</td><td class="tag-list" id="run-tags-cell">${tags || "—"}</td></tr>
               </table>
             </div>
           </div>
@@ -925,9 +1168,260 @@ mlflow.log_metric("loss", 0.42)</pre>
           </div>
 
           ${isTrace ? this.renderSpanWaterfall(data.spans || []) : await this.renderMetricCharts(data.id, metrics)}
+
+          <div class="section" id="notes-section">
+            <h2>Notes</h2>
+            ${this._renderNoteCard(noteRes)}
+          </div>
+
+          <div class="section" id="artifacts-section">
+            <h2>Artifacts</h2>
+            <div id="artifacts-list"><span style="color:var(--fg-muted);font-size:13px">Loading…</span></div>
+          </div>
         `;
+
+        // ── Star toggle ───────────────────────────────────────────────────────
+        let currentlyStarred = isStarred;
+        const starBtn = $("#star-btn");
+        starBtn.addEventListener("click", async () => {
+          try {
+            if (currentlyStarred) {
+              await fetchJSON("/api/2.0/mlflow/runs/delete-tag", {
+                method: "POST",
+                body: JSON.stringify({ run_id: runID, key: STARRED_TAG }),
+              });
+              currentlyStarred = false;
+            } else {
+              await fetchJSON("/api/2.0/mlflow/runs/set-tag", {
+                method: "POST",
+                body: JSON.stringify({ run_id: runID, key: STARRED_TAG, value: "true" }),
+              });
+              currentlyStarred = true;
+            }
+            starBtn.innerHTML = currentlyStarred ? "&#9733;" : "&#9734;";
+            starBtn.title = currentlyStarred ? "Unstar this run" : "Star this run";
+          } catch (err) {
+            alert("Failed to update star: " + err);
+          }
+        });
+
+        // ── Rename ────────────────────────────────────────────────────────────
+        let currentName = data.name || "";
+        const nameDisplay = $("#run-name-display");
+        const renameBtn = $("#rename-btn");
+
+        const startRename = () => {
+          const inp = document.createElement("input");
+          inp.type = "text";
+          inp.value = currentName;
+          inp.className = "run-rename-input";
+          inp.style.cssText = "font-size:inherit;font-weight:inherit;border:1px solid var(--accent);border-radius:4px;padding:2px 6px;min-width:200px;background:var(--bg-card);color:var(--fg)";
+          nameDisplay.replaceWith(inp);
+          inp.focus();
+          inp.select();
+
+          const commitRename = async () => {
+            const newName = inp.value.trim();
+            if (!newName) {
+              inp.style.borderColor = "var(--error)";
+              return;
+            }
+            try {
+              await fetchJSON("/api/2.0/mlflow/runs/update", {
+                method: "POST",
+                body: JSON.stringify({ run_id: runID, run_name: newName }),
+              });
+              currentName = newName;
+              const span = document.createElement("span");
+              span.id = "run-name-display";
+              span.className = "run-name-display";
+              span.textContent = newName;
+              inp.replaceWith(span);
+            } catch (err) {
+              alert("Rename failed: " + err);
+              const span = document.createElement("span");
+              span.id = "run-name-display";
+              span.className = "run-name-display";
+              span.textContent = currentName;
+              inp.replaceWith(span);
+            }
+          };
+
+          inp.addEventListener("keydown", e => {
+            if (e.key === "Enter") { e.preventDefault(); commitRename(); }
+            if (e.key === "Escape") {
+              const span = document.createElement("span");
+              span.id = "run-name-display";
+              span.className = "run-name-display";
+              span.textContent = currentName;
+              inp.replaceWith(span);
+            }
+          });
+          inp.addEventListener("blur", commitRename);
+        };
+
+        renameBtn.addEventListener("click", startRename);
+        nameDisplay.addEventListener("dblclick", startRename);
+
+        // ── Notes wiring ──────────────────────────────────────────────────────
+        this._wireNoteCard(runID, noteRes);
+
+        // ── Artifact preview (lazy) ───────────────────────────────────────────
+        this._loadArtifactPreview(runID);
+
       } catch (err) {
         main.innerHTML = `<div class="empty">Failed to load: ${escapeHTML(String(err))}</div>`;
+      }
+    },
+
+    _renderNoteCard(noteRes) {
+      const hasNote = noteRes && noteRes.content;
+      const md = hasNote ? renderMarkdown(noteRes.content) : "";
+      const meta = hasNote
+        ? `<div class="note-meta">Last edited${noteRes.updated_by ? " by " + escapeHTML(noteRes.updated_by) : ""} ${formatTime(noteRes.updated_at)}</div>`
+        : "";
+      return `
+        <div class="card note-card" id="note-card">
+          <div id="note-view-mode" ${hasNote ? "" : 'style="display:none"'}>
+            <div class="note-rendered" id="note-rendered">${md}</div>
+            ${meta}
+            <button class="btn-ghost" id="note-edit-btn" style="margin-top:8px;font-size:12px">Edit</button>
+          </div>
+          <div id="note-edit-mode" ${hasNote ? 'style="display:none"' : ""}>
+            <textarea id="note-textarea" rows="6" style="width:100%;font-family:var(--mono);font-size:12px;background:var(--bg-card);color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:8px;resize:vertical">${hasNote ? escapeHTML(noteRes.content) : ""}</textarea>
+            <div style="display:flex;gap:8px;margin-top:8px">
+              <button id="note-save-btn" style="background:var(--accent);color:#fff;border-color:var(--accent)">Save</button>
+              <button class="btn-ghost" id="note-cancel-btn">Cancel</button>
+            </div>
+          </div>
+          ${!hasNote ? `<button class="btn-ghost" id="note-add-btn" style="font-size:13px">+ Add note</button>` : ""}
+        </div>`;
+    },
+
+    _wireNoteCard(runID, noteRes) {
+      let currentContent = (noteRes && noteRes.content) || "";
+
+      const viewMode = $("#note-view-mode");
+      const editMode = $("#note-edit-mode");
+      const rendered = $("#note-rendered");
+      const textarea = $("#note-textarea");
+      const editBtn = $("#note-edit-btn");
+      const saveBtn = $("#note-save-btn");
+      const cancelBtn = $("#note-cancel-btn");
+      const addBtn = $("#note-add-btn");
+      const noteCard = $("#note-card");
+
+      const showEdit = () => {
+        if (viewMode) viewMode.style.display = "none";
+        editMode.style.display = "";
+        if (addBtn) addBtn.style.display = "none";
+        textarea.value = currentContent;
+        textarea.focus();
+      };
+
+      const showView = (newContent) => {
+        currentContent = newContent;
+        editMode.style.display = "none";
+        if (newContent) {
+          viewMode.style.display = "";
+          if (rendered) rendered.innerHTML = renderMarkdown(newContent);
+          if (addBtn) addBtn.style.display = "none";
+        } else {
+          if (viewMode) viewMode.style.display = "none";
+          if (addBtn) addBtn.style.display = "";
+        }
+      };
+
+      if (editBtn) editBtn.addEventListener("click", showEdit);
+      if (addBtn) addBtn.addEventListener("click", showEdit);
+      if (cancelBtn) cancelBtn.addEventListener("click", () => showView(currentContent));
+
+      if (saveBtn) {
+        saveBtn.addEventListener("click", async () => {
+          const newContent = textarea.value;
+          try {
+            const resp = await fetchJSON(`/api/v1/runs/${runID}/note`, {
+              method: "PUT",
+              body: JSON.stringify({ content: newContent }),
+            });
+            // Re-render note card with fresh data
+            const noteSection = $("#notes-section");
+            if (noteSection) {
+              noteSection.innerHTML = "<h2>Notes</h2>" + this._renderNoteCard(newContent ? resp : null);
+              this._wireNoteCard(runID, newContent ? resp : null);
+            }
+          } catch (err) {
+            alert("Failed to save note: " + err);
+          }
+        });
+      }
+    },
+
+    async _loadArtifactPreview(runID) {
+      const container = $("#artifacts-list");
+      if (!container) return;
+      try {
+        const data = await fetchJSON(`/api/2.0/mlflow/artifacts/list?run_id=${runID}`);
+        const files = data.files || [];
+        if (!files.length) {
+          container.innerHTML = `<span style="color:var(--fg-muted);font-size:13px">No artifacts.</span>`;
+          return;
+        }
+        container.innerHTML = files.map(f => {
+          const path = f.path || "";
+          const size = f.file_size != null ? ` <span style="color:var(--fg-muted);font-size:11px">(${formatBytes(f.file_size)})</span>` : "";
+          const ext = path.split(".").pop().toLowerCase();
+          const dlURL = `/api/2.0/mlflow-artifacts/artifacts/${encodeURIComponent(runID)}/${encodeURI(path)}`;
+          return `
+            <details class="artifact-entry" data-path="${escapeHTML(path)}" data-ext="${escapeHTML(ext)}" data-run="${escapeHTML(runID)}">
+              <summary style="cursor:pointer;font-family:var(--mono);font-size:12px;padding:4px 0">
+                ${escapeHTML(path)}${size}
+                <a href="${escapeHTML(dlURL)}" download="${escapeHTML(path.split("/").pop())}" onclick="event.stopPropagation()" style="margin-left:8px;font-size:11px">&#x2B07; download</a>
+              </summary>
+              <div class="artifact-preview-slot" style="margin-top:4px"></div>
+            </details>`;
+        }).join("");
+
+        // Lazy preview — only fetch when <details> is opened.
+        $$(".artifact-entry", container).forEach(det => {
+          det.addEventListener("toggle", async () => {
+            if (!det.open) return;
+            const slot = $(".artifact-preview-slot", det);
+            if (slot.dataset.loaded) return;
+            slot.dataset.loaded = "1";
+            const ext = det.dataset.ext;
+            const path = det.dataset.path;
+            const rID = det.dataset.run;
+            const previewURL = `/api/2.0/mlflow-artifacts/artifacts/${encodeURIComponent(rID)}/${encodeURI(path)}`;
+
+            if (["png", "jpg", "jpeg", "gif", "svg"].includes(ext)) {
+              slot.innerHTML = `<img src="${escapeHTML(previewURL)}" alt="${escapeHTML(path)}" style="max-height:280px;max-width:100%;border-radius:4px;display:block;margin-top:4px" />`;
+            } else if (["json", "txt", "md", "log", "yaml", "yml", "csv"].includes(ext)) {
+              try {
+                // Fetch at most 4 KB
+                const resp = await fetch(previewURL, { headers: { Range: "bytes=0-4095" } });
+                const text = await resp.text();
+                const snippet = text.slice(0, 4096);
+
+                if (ext === "json") {
+                  let pretty;
+                  try { pretty = JSON.stringify(JSON.parse(snippet), null, 2); } catch { pretty = snippet; }
+                  slot.innerHTML = `<pre class="artifact-pre">${escapeHTML(pretty)}</pre>`;
+                } else if (ext === "csv") {
+                  slot.innerHTML = renderCSVPreview(snippet);
+                } else {
+                  slot.innerHTML = `<pre class="artifact-pre">${escapeHTML(snippet)}</pre>`;
+                }
+              } catch (e) {
+                slot.innerHTML = `<span style="color:var(--fg-muted);font-size:11px">Preview unavailable.</span>`;
+              }
+            } else {
+              slot.innerHTML = `<span style="color:var(--fg-muted);font-size:11px">No preview for this file type.</span>`;
+            }
+          });
+        });
+      } catch {
+        container.innerHTML = `<span style="color:var(--fg-muted);font-size:13px">Could not list artifacts.</span>`;
       }
     },
 
@@ -1355,6 +1849,51 @@ mlflow.log_metric("loss", 0.42)</pre>
         </div>`;
     },
   };
+
+  // ─── File size formatter ──────────────────────────────────────────────────────
+  function formatBytes(n) {
+    if (n == null || isNaN(n)) return "?B";
+    if (n < 1024) return n + "B";
+    if (n < 1048576) return (n / 1024).toFixed(1) + "KB";
+    return (n / 1048576).toFixed(1) + "MB";
+  }
+
+  // ─── CSV table preview (first 10 rows + header) ───────────────────────────────
+  function renderCSVPreview(text) {
+    const lines = text.split(/\r?\n/).filter(l => l.trim() !== "");
+    const rows = lines.slice(0, 11); // header + 10 data rows
+    if (!rows.length) return `<span style="color:var(--fg-muted);font-size:11px">Empty CSV.</span>`;
+
+    const parse = line => {
+      // Naive CSV splitter — handles quoted fields with embedded commas.
+      const fields = [];
+      let cur = "";
+      let inQuote = false;
+      for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (ch === '"' && !inQuote) { inQuote = true; continue; }
+        if (ch === '"' && inQuote) {
+          if (line[i + 1] === '"') { cur += '"'; i++; } else { inQuote = false; }
+          continue;
+        }
+        if (ch === "," && !inQuote) { fields.push(cur); cur = ""; continue; }
+        cur += ch;
+      }
+      fields.push(cur);
+      return fields;
+    };
+
+    const header = parse(rows[0]);
+    const dataRows = rows.slice(1);
+    const thCells = header.map(h => `<th>${escapeHTML(h)}</th>`).join("");
+    const bodyRows = dataRows.map(r => {
+      const cols = parse(r);
+      const tds = header.map((_, i) => `<td class="mono">${escapeHTML(cols[i] || "")}</td>`).join("");
+      return `<tr>${tds}</tr>`;
+    }).join("");
+    const truncNote = lines.length > 11 ? `<p style="font-size:11px;color:var(--fg-muted);margin:4px 0 0">Showing first 10 rows of ${lines.length - 1} total.</p>` : "";
+    return `<div style="overflow-x:auto"><table style="font-size:11px"><thead><tr>${thCells}</tr></thead><tbody>${bodyRows}</tbody></table></div>${truncNote}`;
+  }
 
   // ─── Line diff helper ─────────────────────────────────────────────────────────
   function renderLineDiff(textA, textB) {
