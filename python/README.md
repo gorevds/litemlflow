@@ -47,6 +47,30 @@ v = c.create_prompt("rag.system", "You are a helpful assistant.")
 c.set_prompt_alias("rag.system", "production", v)
 ```
 
+### C. LangChain auto-instrumentation
+
+Install the optional LangChain extra and pass the handler as a callback. Every
+chain, LLM, chat-model, tool, and retriever call is recorded as a LiteMLflow
+span automatically. Token usage and USD cost are derived from a built-in
+pricing table and logged as run metrics.
+
+```bash
+pip install 'litemlflow[langchain]'
+```
+
+```python
+from litemlflow import Client
+from litemlflow.langchain import LiteMLflowCallbackHandler
+
+c = Client("http://localhost:5000")
+handler = LiteMLflowCallbackHandler(c)          # auto-creates run + experiment
+
+# Pass the handler to any LangChain chain, agent, or LLM.
+chain.invoke({"question": "..."}, config={"callbacks": [handler]})
+```
+
+See [docs/cookbook.md](../docs/cookbook.md) for a full RAG example.
+
 ## License
 
 Apache 2.0.

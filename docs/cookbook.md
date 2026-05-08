@@ -48,33 +48,78 @@ with mlflow.start_run(run_name="pytorch-mnist"):
             mlflow.log_artifact(f"/tmp/ckpt-{epoch}.pt")
 ```
 
-## 3. Trace a LangChain RAG run
+## 3. Auto-instrument a LangChain RAG run
+
+Install the optional extra:
+
+```bash
+pip install 'litemlflow[langchain]'
+```
 
 ```python
 from litemlflow import Client
+from litemlflow.langchain import LiteMLflowCallbackHandler
 from langchain_openai import ChatOpenAI
-from langchain.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
 
-c = Client("http://localhost:5000")
-exp_id = c.create_experiment("rag-traces")
+# Connect and create the handler — it auto-creates a run in the "langchain"
+# experiment (or specify experiment_id= / run_id= to attach to an existing one).
+client = Client("http://localhost:5000")
+handler = LiteMLflowCallbackHandler(client, auto_metrics=True)
 
-prompt_text = "Answer based on context: {context}\n\nQuestion: {question}"
-prompt_version = c.create_prompt("rag.qa", prompt_text)
+# Build a simple RAG-style chain.
+prompt = ChatPromptTemplate.from_template(
+    "Answer based on the context.\n\nContext: {context}\n\nQuestion: {question}"
+)
+llm = ChatOpenAI(model="gpt-4o-mini")
+chain = prompt | llm | StrOutputParser()
 
-with c.start_run(exp_id, name="rag-trial") as run:
-    run.log_param("model", "gpt-4o-mini")
-    run.log_param("prompt_version", str(prompt_version))
+# Run the chain — all spans are recorded automatically.
+answer = chain.invoke(
+    {"context": "LiteMLflow is a lightweight experiment tracker.", "question": "What is LiteMLflow?"},
+    config={"callbacks": [handler]},
+)
+print(answer)
+```
 
-    trace_id = c.start_trace()
-    pipeline = c.log_span(trace_id, "rag.pipeline", run_id=run.id)
+Sample trace tree (visible in the LiteMLflow UI under the auto-created run):
 
-    retrieve = c.log_span(trace_id, "rag.retrieve", run_id=run.id, parent_id=pipeline,
-                           attrs={"k": 5, "index": "wiki"})
-    generate = c.log_span(trace_id, "rag.generate", run_id=run.id, parent_id=pipeline,
-                           attrs={"model": "gpt-4o-mini", "prompt_tokens": 120,
-                                  "completion_tokens": 80})
-    run.log_metric("latency_ms", 850.0)
-    run.log_metric("tokens.total", 200.0)
+```
+langchain-trace-1746700000
+└── chain:RunnableSequence          [OK, 1.23 s]
+    ├── chain:ChatPromptTemplate     [OK, 0.001 s]
+    ├── chat:gpt-4o-mini             [OK, 1.22 s]
+    │     tokens.prompt=42  tokens.completion=31  cost.usd=0.0000247
+    └── chain:StrOutputParser        [OK, 0.000 s]
+
+Metrics logged to run:
+  tokens.prompt      42
+  tokens.completion  31
+  tokens.total       73
+  cost.usd           0.0000247
+```
+
+Every LangChain event type (chain, LLM, chat model, tool, retriever) is
+captured as a span with timing, status, and relevant attributes. Token usage
+and cost are logged as run metrics on `on_llm_end` / `on_chat_model_end` when
+`auto_metrics=True` (default).
+
+Spans are batched and flushed in a single HTTP call when the root span closes,
+so you pay one round-trip per chain invocation.
+
+### Attaching to an existing run
+
+```python
+# Create a run manually and pass its id.
+exp_id = client.create_experiment("rag-evals")
+run = client.create_run(exp_id, name="trial-1")
+run.log_param("retriever_k", "5")
+
+handler = LiteMLflowCallbackHandler(client, run_id=run.id)
+chain.invoke({"context": "...", "question": "..."}, config={"callbacks": [handler]})
+
+run.finish()
 ```
 
 ## 4. Evaluate two models against each other

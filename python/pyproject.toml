@@ -37,6 +37,9 @@ dev = [
 mlflow-compat = [
     "mlflow-skinny>=2.10",
 ]
+langchain = [
+    "langchain-core>=0.2",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["litemlflow"]
