@@ -1,0 +1,20 @@
+# CODEOWNERS — GitHub automatically requests review from these users.
+# Syntax: <pattern> <owner> [<owner> ...]
+# See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default owner for everything not matched below
+*                       @dolonet
+
+# Security-sensitive files — require explicit review
+SECURITY.md             @dolonet
+docs/spec/threat-model.md  @dolonet
+internal/auth/          @dolonet
+internal/server/rbac.go @dolonet
+
+# Distribution artifacts
+dist/                   @dolonet
+operator/               @dolonet
+
+# Docs site
+site/                   @dolonet
+marketing/              @dolonet

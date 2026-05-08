@@ -1,0 +1,39 @@
+cff-version: 1.2.0
+message: "If you use LiteMLflow in academic work, please cite it as below."
+title: "LiteMLflow: Single-binary MLflow-compatible experiment tracker"
+version: 1.0.0
+date-released: "2026-05-08"
+url: "https://github.com/litemlflow/litemlflow"
+license: Apache-2.0
+repository-code: "https://github.com/litemlflow/litemlflow"
+abstract: >
+  LiteMLflow is a lightweight, self-hosted experiment tracker for machine learning
+  and LLM workflows. It is compatible with the MLflow REST API (~80% of the
+  canonical surface), ships as a single statically-linked Go binary with zero
+  runtime dependencies, and adds first-class support for LLM traces, versioned
+  prompts, and evals. The server starts in ~53 ms (143× faster cold start vs
+  MLflow + SQLite) and stores all data in SQLite + local filesystem, enabling
+  single-command backup and restore.
+authors:
+  - family-names: Dolotov
+    given-names: Oscar
+    email: oscar@dolotov.com
+    orcid: ""   # TODO: add ORCID if available
+keywords:
+  - machine learning
+  - experiment tracking
+  - MLflow
+  - LLM observability
+  - Go
+  - SQLite
+  - open source
+preferred-citation:
+  type: software
+  title: "LiteMLflow: Single-binary MLflow-compatible experiment tracker"
+  authors:
+    - family-names: Dolotov
+      given-names: Oscar
+  version: 1.0.0
+  date-released: "2026-05-08"
+  url: "https://github.com/litemlflow/litemlflow"
+  license: Apache-2.0
