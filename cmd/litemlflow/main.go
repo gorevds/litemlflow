@@ -2,12 +2,13 @@
 //
 // Usage:
 //
-//	litemlflow up      [--data DIR] [--addr HOST:PORT] [--auth MODE] ...
+//	litemlflow up           [--data DIR] [--addr HOST:PORT] [--auth MODE] ...
 //	litemlflow version
-//	litemlflow migrate [--data DIR]
-//	litemlflow rollback [--data DIR]
-//	litemlflow backup  [--data DIR] [--out FILE]
-//	litemlflow restore [--data DIR] [--in FILE]
+//	litemlflow migrate      [--data DIR]
+//	litemlflow rollback     [--data DIR]
+//	litemlflow backup       [--data DIR] [--out FILE]
+//	litemlflow restore      [--data DIR] [--in FILE]
+//	litemlflow import-mlflow --from URL --data DIR [--workspace WS] [--include-deleted] [--dry-run]
 package main
 
 import (
@@ -19,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -26,7 +28,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/litemlflow/litemlflow/internal/artifact"
 	"github.com/litemlflow/litemlflow/internal/config"
+	"github.com/litemlflow/litemlflow/internal/migrator"
 	"github.com/litemlflow/litemlflow/internal/migrations"
 	"github.com/litemlflow/litemlflow/internal/server"
 	"github.com/litemlflow/litemlflow/internal/store"
@@ -54,6 +58,8 @@ func main() {
 		err = runBackup(args)
 	case "restore":
 		err = runRestore(args)
+	case "import-mlflow":
+		err = runImportMLflow(args)
 	case "help", "-h", "--help":
 		usage(os.Stdout)
 	default:
@@ -70,16 +76,17 @@ func usage(w io.Writer) {
 	_, _ = fmt.Fprint(w, `litemlflow — single-binary experiment tracker.
 
 Usage:
-  litemlflow up       [--data DIR] [--addr HOST:PORT] [--auth MODE] [--basic-user USER --basic-pass-hash HASH] [--dev]
-                      [--oidc-issuer URL] [--oidc-client-id ID] [--oidc-client-secret SECRET]
-                      [--oidc-redirect-url URL] [--session-ttl DURATION]
-                      [--artifact-backend fs|s3]
-                      [--s3-endpoint URL] [--s3-bucket BUCKET] [--s3-region REGION]
-                      [--s3-access-key KEY] [--s3-secret-key SECRET] [--s3-prefix PREFIX]
-  litemlflow migrate  [--data DIR]
-  litemlflow rollback [--data DIR]
-  litemlflow backup   [--data DIR] [--out FILE]
-  litemlflow restore  [--data DIR] [--in FILE]
+  litemlflow up           [--data DIR] [--addr HOST:PORT] [--auth MODE] [--basic-user USER --basic-pass-hash HASH] [--dev]
+                          [--oidc-issuer URL] [--oidc-client-id ID] [--oidc-client-secret SECRET]
+                          [--oidc-redirect-url URL] [--session-ttl DURATION]
+                          [--artifact-backend fs|s3]
+                          [--s3-endpoint URL] [--s3-bucket BUCKET] [--s3-region REGION]
+                          [--s3-access-key KEY] [--s3-secret-key SECRET] [--s3-prefix PREFIX]
+  litemlflow migrate      [--data DIR]
+  litemlflow rollback     [--data DIR]
+  litemlflow backup       [--data DIR] [--out FILE]
+  litemlflow restore      [--data DIR] [--in FILE]
+  litemlflow import-mlflow --from MLFLOW_URL --data DIR [--workspace WS] [--include-deleted] [--dry-run]
   litemlflow version
 
 Environment variables override defaults; flags override env vars.
@@ -356,6 +363,75 @@ func runRestore(args []string) error {
 		}
 	}
 	fmt.Println("restored to", cfg.DataDir)
+	return nil
+}
+
+// runImportMLflow copies experiments/runs/metrics/params/tags/artifacts from
+// a running MLflow tracking server directly into a LiteMLflow data directory.
+// LiteMLflow must NOT be running on that data directory during import.
+func runImportMLflow(args []string) error {
+	fs := flag.NewFlagSet("import-mlflow", flag.ContinueOnError)
+	from := fs.String("from", "", "URL of the source MLflow tracking server (required)")
+	dataDir := fs.String("data", "", "target LiteMLflow data directory (required)")
+	workspace := fs.String("workspace", "default", "workspace to import into")
+	includeDeleted := fs.Bool("include-deleted", false, "also import lifecycle_stage='deleted' rows")
+	dryRun := fs.Bool("dry-run", false, "enumerate but do not write")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *from == "" {
+		return errors.New("--from is required")
+	}
+	if *dataDir == "" {
+		return errors.New("--data is required")
+	}
+
+	// Initialise the target data directory and SQLite store.
+	if err := os.MkdirAll(*dataDir, 0o755); err != nil {
+		return fmt.Errorf("create data dir: %w", err)
+	}
+	dbPath := filepath.Join(*dataDir, "litemlflow.db")
+	artifactsDir := filepath.Join(*dataDir, "artifacts")
+
+	ctx := context.Background()
+	st, err := store.OpenSQLite(ctx, dbPath, *dataDir)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer st.Close()
+
+	// Apply any pending schema migrations.
+	if err := st.Migrate(ctx); err != nil {
+		return fmt.Errorf("migrate schema: %w", err)
+	}
+
+	artStore, err := artifact.NewFilesystemStore(artifactsDir)
+	if err != nil {
+		return fmt.Errorf("open artifact store: %w", err)
+	}
+
+	filter := migrator.FilterActive
+	if *includeDeleted {
+		filter = migrator.FilterAll
+	}
+
+	imp := &migrator.MLflowImporter{
+		SourceURL:     *from,
+		Workspace:     *workspace,
+		DryRun:        *dryRun,
+		Include:       filter,
+		HTTP:          &http.Client{Timeout: 120 * time.Second},
+		Store:         st,
+		ArtifactStore: artStore,
+		OnProgress: func(stage string, n int) {
+			fmt.Printf("[import] %s: %d entities processed\n", stage, n)
+		},
+	}
+	imp.SetCheckpointDir(*dataDir)
+
+	if _, err := imp.Run(ctx); err != nil {
+		return err
+	}
 	return nil
 }
 
