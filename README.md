@@ -1,5 +1,10 @@
 # LiteMLflow
 
+[![Test Coverage](https://img.shields.io/badge/coverage-TBD-lightgrey?logo=go)](https://github.com/litemlflow/litemlflow/actions)
+[![Go Report Card](https://goreportcard.com/badge/github.com/litemlflow/litemlflow)](https://goreportcard.com/report/github.com/litemlflow/litemlflow)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![Latest Release](https://img.shields.io/github/v/release/litemlflow/litemlflow?include_prereleases)](https://github.com/litemlflow/litemlflow/releases)
+
 > Your experiments, in one file. A single Go binary, MLflow-API-compatible, with first-class LLM trace support.
 
 LiteMLflow is a lightweight, self-hosted experiment tracker for solo ML engineers and small teams who want real tracking infrastructure without standing up Postgres, S3, and a reverse proxy.
