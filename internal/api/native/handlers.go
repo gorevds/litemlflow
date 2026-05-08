@@ -87,6 +87,10 @@ func (h *Handler) Mount(r chi.Router) {
 
 	// PROJECTS: list distinct lmf.project tag values in the current workspace.
 	r.Get("/api/v1/projects", h.ListProjects)
+
+	// Run notes (markdown).
+	r.Get("/api/v1/runs/{runID}/note", h.GetRunNote)
+	r.Put("/api/v1/runs/{runID}/note", h.SetRunNote)
 }
 
 // projectDTO is one row in the projects-list response.
@@ -120,6 +124,57 @@ func (h *Handler) ListProjects(w http.ResponseWriter, r *http.Request) {
 		out = append(out, projectDTO{Name: p.Name, Count: p.Count})
 	}
 	writeJSON(w, map[string]any{"projects": out, "tag_key": "lmf.project"})
+}
+
+// ---- run notes --------------------------------------------------------------
+
+type runNoteResp struct {
+	Content   string `json:"content"`
+	UpdatedAt int64  `json:"updated_at"`
+	UpdatedBy string `json:"updated_by,omitempty"`
+}
+
+// GetRunNote handles GET /api/v1/runs/{runID}/note.
+// Returns 404 when no note has been set.
+func (h *Handler) GetRunNote(w http.ResponseWriter, r *http.Request) {
+	runID := chi.URLParam(r, "runID")
+	content, by, at, err := h.Store.GetRunNote(r.Context(), runID)
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, runNoteResp{Content: content, UpdatedAt: at, UpdatedBy: by})
+}
+
+type setRunNoteReq struct {
+	Content string `json:"content"`
+}
+
+// SetRunNote handles PUT /api/v1/runs/{runID}/note.
+// Body: {"content": "..."} — empty content deletes the note.
+func (h *Handler) SetRunNote(w http.ResponseWriter, r *http.Request) {
+	runID := chi.URLParam(r, "runID")
+	var req setRunNoteReq
+	if err := decodeJSON(r, &req); err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+	user := r.Header.Get("X-LiteMLflow-User")
+	if err := h.Store.SetRunNote(r.Context(), runID, req.Content, user); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	if req.Content == "" {
+		writeJSON(w, map[string]bool{"deleted": true})
+		return
+	}
+	// Return the stored note so the UI can immediately refresh.
+	content, by, at, err := h.Store.GetRunNote(r.Context(), runID)
+	if err != nil {
+		writeJSON(w, map[string]bool{"ok": true})
+		return
+	}
+	writeJSON(w, runNoteResp{Content: content, UpdatedAt: at, UpdatedBy: by})
 }
 
 // ---- health -----------------------------------------------------------------

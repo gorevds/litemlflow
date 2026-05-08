@@ -497,6 +497,80 @@ button.btn-ghost:hover { background: var(--bg-alt); }
   color: var(--accent);
 }
 
+/* ── Run starring ───────────────────────────────────────────────────────── */
+.star-icon {
+  color: var(--warning);
+  font-size: 13px;
+}
+.star-btn {
+  font-size: 18px !important;
+  color: var(--warning);
+  line-height: 1;
+}
+.star-btn:hover { opacity: 0.75; }
+
+/* ── Run rename ─────────────────────────────────────────────────────────── */
+.run-name-display {
+  cursor: default;
+}
+
+/* ── Notes card ─────────────────────────────────────────────────────────── */
+.note-card {
+  margin-top: 0;
+}
+.note-rendered {
+  font-size: 13px;
+  line-height: 1.6;
+}
+.note-rendered h3, .note-rendered h4, .note-rendered h5 {
+  margin: 8px 0 4px;
+  font-size: 14px;
+}
+.note-rendered p { margin: 4px 0; }
+.note-rendered ul { margin: 4px 0; padding-left: 20px; }
+.note-rendered code {
+  font-family: var(--mono);
+  font-size: 11px;
+  background: var(--bg-alt);
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+.note-rendered pre.md-code {
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  font-size: 12px;
+  font-family: var(--mono);
+  margin: 8px 0;
+}
+.note-meta {
+  font-size: 11px;
+  color: var(--fg-muted);
+  margin-top: 8px;
+}
+
+/* ── Artifact preview ───────────────────────────────────────────────────── */
+.artifact-entry {
+  border-bottom: 1px solid var(--border);
+  padding: 4px 0;
+}
+.artifact-entry:last-child { border-bottom: none; }
+.artifact-pre {
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-family: var(--mono);
+  font-size: 11px;
+  overflow-x: auto;
+  max-height: 280px;
+  overflow-y: auto;
+  white-space: pre;
+  margin: 4px 0;
+}
+
 /* ── Projects (experiments grouping) ────────────────────────────────────── */
 .proj-pill {
   display: inline-block;

@@ -85,7 +85,7 @@ Open http://localhost:5000 — you're done. No Postgres. No S3. No reverse proxy
 
 - **MLflow REST API** — experiments, runs, metrics, params, tags, artifacts (upload/download/delete), metric history, search with full filter grammar (`=`/`!=`/`<`/`>`/`LIKE`/`IN`/`BETWEEN`), `log_batch`, `log_inputs`, pagination, Model Registry
 - **Native API** — traces (manual + OTLP HTTP/gRPC), prompts (versioned, content-addressed, aliased), evals
-- **Embedded UI** — experiments → runs → run detail; metrics charts, trace waterfall, prompt diff, bulk compare/export; keyboard shortcuts; command palette; dark/light theme; embed mode
+- **Embedded UI** — experiments → runs → run detail; metrics charts, trace waterfall, prompt diff, bulk compare/export/tag; run notes (markdown), starring, inline rename, artifact preview; keyboard shortcuts; command palette; dark/light theme; embed mode
 - **Auth** — anonymous, basic, OIDC (PKCE + RS256 + JWKS), session cookies, RBAC (viewer/editor/admin)
 - **Storage backends** — filesystem (default, zero config) and S3-compatible (MinIO/AWS, pure-Go SigV4, multipart)
 - **Observability** — Prometheus `/metrics` endpoint (12 metric families), server-side LTTB downsampling

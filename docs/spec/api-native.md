@@ -13,6 +13,44 @@ All endpoints accept and return JSON. Auth (when configured) is enforced before 
 - Errors use the same shape as MLflow compat (`{error_code, message}`).
 - All list endpoints support `?limit=N&page_token=...` and return `{items: [...], next_page_token: "..."}`.
 
+## Special tag conventions
+
+LiteMLflow reserves the `lmf.` tag-key namespace for internal metadata. These
+tags are first-class in the UI but are plain MLflow tags under the hood — any
+MLflow client can set or delete them via the standard `set-tag` / `delete-tag`
+endpoints.
+
+| Tag key | Values | Purpose |
+|---|---|---|
+| `lmf.project` | any string | Experiment-level grouping tag. Groups experiments into "projects" in the UI. See `GET /api/v1/projects`. |
+| `lmf.starred` | `"true"` | Run-level starring. The UI shows ⭐ on starred runs and can sort them first. Toggle via `set-tag` / `delete-tag`. |
+| `lmf.note` | reserved | Not used as a tag. Run notes are stored in the `run_notes` table (dedicated API below) to avoid polluting the tag namespace with multiline markdown blobs. |
+
+## Run notes
+
+Long-form markdown notes for a run. Stored outside the tag namespace to keep
+the tag surface clean for k=v pairs. Multiple lines, code blocks, and basic
+formatting are supported (rendered in the UI without external dependencies).
+
+```
+GET /api/v1/runs/{run_id}/note
+```
+Returns `{content, updated_at, updated_by}` or **404** if no note has been set.
+
+```
+PUT /api/v1/runs/{run_id}/note
+{"content": "# My note\n\nWith **markdown**."}
+```
+Upserts the note. Returns the stored note (same shape as GET).
+
+```
+PUT /api/v1/runs/{run_id}/note
+{"content": ""}
+```
+**Deletes** the note (empty content is the delete signal). Returns `{"deleted": true}`.
+
+**Auth**: `PUT` requires `editor` role (same as all write operations). `GET` requires `viewer`.
+
 ## Health and meta
 
 | Endpoint | Method | Description |

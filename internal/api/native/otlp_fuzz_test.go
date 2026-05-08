@@ -134,6 +134,10 @@ func (s *stubStore) LogInputs(_ context.Context, _ string, _ []model.DatasetInpu
 func (s *stubStore) GetRunDatasets(_ context.Context, _ string) ([]model.DatasetInput, error) {
 	return nil, store.ErrNotFound
 }
+func (s *stubStore) SetRunNote(_ context.Context, _, _, _ string) error { return store.ErrNotFound }
+func (s *stubStore) GetRunNote(_ context.Context, _ string) (string, string, int64, error) {
+	return "", "", 0, store.ErrNotFound
+}
 func (s *stubStore) CreatePrompt(_ context.Context, _ *model.Prompt) (int64, error) {
 	return 0, store.ErrNotFound
 }
