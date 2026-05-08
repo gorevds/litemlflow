@@ -1,100 +1,224 @@
 # LiteMLflow
 
-[![Test Coverage](https://img.shields.io/badge/coverage-TBD-lightgrey?logo=go)](https://github.com/litemlflow/litemlflow/actions)
+[![CI](https://img.shields.io/github/actions/workflow/status/litemlflow/litemlflow/ci.yml?branch=main&logo=github&label=CI)](https://github.com/litemlflow/litemlflow/actions)
+[![Coverage](https://img.shields.io/badge/coverage-TBD-lightgrey?logo=go)](https://github.com/litemlflow/litemlflow/actions)
 [![Go Report Card](https://goreportcard.com/badge/github.com/litemlflow/litemlflow)](https://goreportcard.com/report/github.com/litemlflow/litemlflow)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Latest Release](https://img.shields.io/github/v/release/litemlflow/litemlflow?include_prereleases)](https://github.com/litemlflow/litemlflow/releases)
+[![Release](https://img.shields.io/github/v/release/litemlflow/litemlflow?include_prereleases)](https://github.com/litemlflow/litemlflow/releases)
+[![All Contributors](https://img.shields.io/badge/all_contributors-1-orange.svg)](#acknowledgements)
 
-> Your experiments, in one file. A single Go binary, MLflow-API-compatible, with first-class LLM trace support.
+> **Your experiments, in one file.**
+> A single Go binary. MLflow-API-compatible. First-class LLM trace support.
+> Zero databases. Zero config. `litemlflow up` and you're tracking.
 
-LiteMLflow is a lightweight, self-hosted experiment tracker for solo ML engineers and small teams who want real tracking infrastructure without standing up Postgres, S3, and a reverse proxy.
+<!-- TODO: record demo.gif — 90 s, 1280×720, show: curl install → litemlflow up → mlflow.log_metric → UI <300ms → trace waterfall → /metrics -->
+<!-- ![Demo](docs/demo.gif) -->
 
-```bash
-# 1. Build (pre-built binaries land with v0.1.0 release)
-make build
-
-# 2. Run it
-./bin/litemlflow up --data ./data
-
-# 3. Log from Python (your existing MLflow code works unchanged)
-import mlflow
-mlflow.set_tracking_uri("http://localhost:5000")
-mlflow.log_metric("loss", 0.42)
-```
-
-That's it. No database to install. No object store to configure. No reverse proxy.
+---
 
 ## Why LiteMLflow
 
-| | LiteMLflow | MLflow | Aim | Langfuse |
-|---|---|---|---|---|
-| Install steps | 1 | 4+ | 2 | 5+ (docker-compose) |
-| Runtime deps | none | Python, optional Postgres, optional S3 | Python | Postgres, ClickHouse |
-| MLflow client compat | ✅ pragmatic 80% | ✅ native | ❌ | ❌ |
-| First-class LLM traces | ✅ | bolt-on | ❌ | ✅ |
-| Single-file backup | ✅ `cp` the dir | dump DB + sync S3 | partial | dump 2 DBs |
-| Auth out-of-the-box | basic + (OIDC v0.2) | none | basic | basic |
-| License | Apache 2.0, OSS | Apache 2.0 | Apache 2.0 | MIT |
+- **143× faster cold start than MLflow** — 53 ms vs 7.5 s. No Python interpreter, no ORM, no migration dance in CI.
+- **One env variable to migrate** — `MLFLOW_TRACKING_URI=http://localhost:5000`. Your existing MLflow code keeps running.
+- **LLM-native from day one** — traces, prompts (versioned + aliased), evals, and OpenTelemetry OTLP live beside classic ML metrics in the same UI.
 
-## What works today (v0.1)
+---
 
-- **MLflow REST API**: experiments, runs, metrics, params, tags, artifacts (list/upload/download/delete), metric history, search with filters
-- **LiteMLflow native API**: traces (manual + OTLP/JSON), prompts (versioned, content-addressed, aliases), evals
-- **Embedded UI**: experiments → runs → run detail (metrics charts + trace waterfall)
-- **CLI**: `up`, `migrate`, `rollback`, `backup`, `restore`, `version`
-- **Auth**: anonymous, basic; OIDC scaffolded for v0.2
-- **Tested against the real MLflow Python client** (3.x) — see [`tests/integration/mlflow_compat.py`](tests/integration/mlflow_compat.py)
+## Quick install
+
+```bash
+# macOS / Linux (Homebrew)
+brew install litemlflow/tap/litemlflow
+
+# Docker
+docker run -p 5000:5000 -v $(pwd)/data:/data ghcr.io/litemlflow/litemlflow:latest up
+
+# Kubernetes (Helm)
+helm install lmf oci://ghcr.io/litemlflow/charts/litemlflow --version 0.1.0
+
+# Build from source (Go 1.22+)
+git clone https://github.com/litemlflow/litemlflow && cd litemlflow && make build
+```
+
+---
+
+## 30-second start
+
+```bash
+litemlflow up --data ./data          # server on :5000 in ~53 ms
+```
+
+```python
+import mlflow
+mlflow.set_tracking_uri("http://localhost:5000")
+mlflow.set_experiment("my-project")
+
+with mlflow.start_run():
+    mlflow.log_param("lr", 0.01)
+    mlflow.log_metric("loss", 0.42)
+```
+
+Open http://localhost:5000 — you're done. No Postgres. No S3. No reverse proxy.
+
+---
+
+## How it compares
+
+| | **LiteMLflow** | MLflow | Weights & Biases | Aim | Langfuse |
+|---|---|---|---|---|---|
+| Cold start | **53 ms** | 7 500 ms | SaaS | ~2 s | SaaS / heavy |
+| `log_metric` p50 | **1.4 ms** | 21.6 ms | ~network | ~3 ms | ~network |
+| Runtime deps | **none** | Python + optional Postgres + optional S3 | account | Python | Postgres + ClickHouse |
+| Install steps | **1** | 4+ | 3 (sign up) | 2 | 5+ (docker-compose) |
+| MLflow client compat | **✅ 80%+** | ✅ native | ❌ | ❌ | ❌ |
+| First-class LLM traces | **✅** | bolt-on | ✅ | ❌ | ✅ |
+| Single-file backup | **✅ `cp dir`** | dump DB + sync S3 | export | partial | dump 2 DBs |
+| Self-hostable | **✅** | ✅ | ❌ (OSS version limited) | ✅ | ✅ |
+| Auth out-of-the-box | **basic + OIDC** | none | account | basic | basic |
+| License | **Apache 2.0** | Apache 2.0 | proprietary | Apache 2.0 | MIT |
+
+*Benchmark details: [docs/bench-v04.md](docs/bench-v04.md). All numbers measured on the same loopback machine.*
+
+---
+
+## What works today (v1.0)
+
+- **MLflow REST API** — experiments, runs, metrics, params, tags, artifacts (upload/download/delete), metric history, search with full filter grammar (`=`/`!=`/`<`/`>`/`LIKE`/`IN`/`BETWEEN`), `log_batch`, `log_inputs`, pagination, Model Registry
+- **Native API** — traces (manual + OTLP HTTP/gRPC), prompts (versioned, content-addressed, aliased), evals
+- **Embedded UI** — experiments → runs → run detail; metrics charts, trace waterfall, prompt diff, bulk compare/export; keyboard shortcuts; command palette; dark/light theme; embed mode
+- **Auth** — anonymous, basic, OIDC (PKCE + RS256 + JWKS), session cookies, RBAC (viewer/editor/admin)
+- **Storage backends** — filesystem (default, zero config) and S3-compatible (MinIO/AWS, pure-Go SigV4, multipart)
+- **Observability** — Prometheus `/metrics` endpoint (12 metric families), server-side LTTB downsampling
+- **CLI** — `up`, `migrate`, `rollback`, `backup`, `restore`, `import-mlflow`, `version`
+- **Distribution** — Docker, Homebrew, Debian, RPM, Snap, Helm chart, Kubernetes operator
+- **Python SDK** — `litemlflow[langchain]` (auto-instrument LangChain), `litemlflow[llamaindex]` (auto-instrument LlamaIndex)
+- **Tested against real MLflow Python client 3.x** — 31/31 compat checks pass live at https://lmf.gorev.space
+
+---
+
+## Migrate from MLflow
+
+```python
+# Before
+mlflow.set_tracking_uri("http://mlflow-server:5000")
+
+# After
+mlflow.set_tracking_uri("http://litemlflow-server:5000")
+# Everything else stays the same.
+```
+
+To import existing data from a running MLflow instance:
+
+```bash
+litemlflow import-mlflow \
+  --src http://mlflow-server:5000 \
+  --data ./data
+```
+
+---
+
+## Project layout
+
+```
+cmd/litemlflow/      CLI entry point
+internal/
+  api/mlflow/        MLflow REST compat layer
+  api/native/        LiteMLflow native API (traces, prompts, evals, OTLP)
+  artifact/          Filesystem + S3 artifact storage
+  store/             SQLite store (WAL mode, LTTB downsampling)
+  server/            HTTP/2 server, middleware, auth, RBAC, metrics
+  migrations/        Embedded SQL migrations + runner
+python/litemlflow/   Python SDK + LangChain + LlamaIndex handlers
+operator/            Kubernetes operator (separate Go module)
+dist/                Homebrew formula, Debian, RPM, Snap, Helm chart
+docs/                Human-facing documentation
+tests/integration/   End-to-end tests (real MLflow client + bench harness)
+```
+
+---
+
+## Build & test
+
+```bash
+make build          # → bin/litemlflow (requires Go 1.22+)
+make test           # Go + Python tests
+make compat-test    # real MLflow Python client against local binary
+make lint           # static analysis
+make fuzz-short     # fuzz targets (parsers, JWT, OTLP)
+```
+
+---
 
 ## Documentation
 
-- [docs/vision.md](docs/vision.md) — hero user, anti-features, success metrics
-- [docs/architecture.md](docs/architecture.md) — system design, performance budgets
-- [docs/quickstart.md](docs/quickstart.md) — install, run, first metric
-- [docs/cookbook.md](docs/cookbook.md) — sklearn, PyTorch, LangChain, OTLP, deployment recipes
-- [docs/spec/](docs/spec/) — data model, API specs, threat model
+| | |
+|---|---|
+| [Quickstart](docs/quickstart.md) | Install, run, first metric |
+| [Cookbook](docs/cookbook.md) | sklearn, PyTorch, LangChain, LlamaIndex, OTLP, deployment |
+| [Architecture](docs/architecture.md) | System design, concurrency model, perf budgets |
+| [Benchmarks](docs/bench-v04.md) | 143× cold start and honest trade-offs |
+| [Roadmap Y1](docs/roadmap-y1.md) | Delivered: foundation → hardening → ergonomics → distribution |
+| [Roadmap Y2](docs/roadmap-y2.md) | Analytics (DuckDB), dataset versioning, federation, time-travel |
+| [Vision](docs/vision.md) | Hero user, anti-personas, why this will work |
+| [Governance](docs/governance.md) | Maintainership, release cadence, DCO policy |
 
-## Project structure
+---
 
-```
-.
-├── cmd/litemlflow/      # CLI entry point
-├── internal/
-│   ├── api/mlflow/      # MLflow REST API compat layer
-│   ├── api/native/      # LiteMLflow native API (traces, prompts, evals, OTLP)
-│   ├── artifact/        # filesystem artifact storage (plus interface for plugins)
-│   ├── config/          # runtime configuration
-│   ├── migrations/      # embedded SQL migrations + runner
-│   ├── model/           # domain types
-│   ├── server/          # HTTP server, middleware
-│   └── store/           # SQLite store (the OLTP layer)
-├── pkg/version/         # build-time version metadata
-├── ui/static/           # embedded SPA (vanilla HTML/CSS/JS)
-├── python/litemlflow/   # native Python SDK
-├── docs/                # human-facing documentation
-└── tests/integration/   # end-to-end tests (incl. real MLflow client)
-```
+## Star history
 
-## Build
+[![Star History Chart](https://api.star-history.com/svg?repos=litemlflow/litemlflow&type=Date)](https://star-history.com/#litemlflow/litemlflow&Date)
 
-Requires Go 1.22+ and Python 3.9+ (only for tests/SDK).
+---
 
-```bash
-make build           # produces bin/litemlflow
-make test            # Go + Python tests
-make compat-test     # runs the real MLflow client against the binary
-make lint            # static analysis
-```
+## FAQ
 
-## Status
+<details>
+<summary><strong>vs MLflow — why not just run MLflow?</strong></summary>
 
-Pre-1.0. The MLflow compat surface is stable for the canonical 80% of usage. APIs marked "v0.2" in the spec are scaffolded but not wired (workspaces, OIDC, plugin host).
+MLflow is great but operationally expensive: Python environment, SQLAlchemy, optional Postgres, optional S3, optional Nginx. LiteMLflow replaces all of that with a single binary. If you have an existing MLflow setup with a team of 50, stick with it — LiteMLflow targets solo engineers and small teams who want real tracking without DevOps.
+
+</details>
+
+<details>
+<summary><strong>vs Weights & Biases — what's the difference?</strong></summary>
+
+W&B is a closed SaaS product. LiteMLflow is Apache 2.0, self-hosted, and your data stays in a directory you own. W&B wins on collaborative features and polish at large scale. LiteMLflow wins on privacy, cost, and zero operational complexity.
+
+</details>
+
+<details>
+<summary><strong>vs Langfuse — what about LLM observability?</strong></summary>
+
+Langfuse is excellent for LLM-only workflows. LiteMLflow unifies classic ML experiment tracking (the MLflow compat surface) with LLM traces and prompts in one binary. If you run both traditional training jobs and LLM pipelines, you no longer need two tools.
+
+</details>
+
+<details>
+<summary><strong>vs Aim — what's different?</strong></summary>
+
+Aim has no MLflow compatibility, no built-in auth, and is Python-based (heavier startup). LiteMLflow adds MLflow compat, OIDC, RBAC, LLM traces, a pure-Go storage layer (143× faster cold start), and distribution as a single static binary.
+
+</details>
+
+---
+
+## Sponsor
+
+LiteMLflow is free and Apache 2.0. If it saves you time, consider sponsoring development:
+
+- [GitHub Sponsors](https://github.com/sponsors/dolonet) *(TODO: activate before launch)*
+- [Polar.sh](https://polar.sh/litemlflow) *(TODO: activate before launch)*
+
+---
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). DCO sign-off required (`git commit -s`); no CLA.
+See [CONTRIBUTING.md](CONTRIBUTING.md). DCO sign-off required (`git commit -s`); no CLA — your copyright stays yours.
 
-## License
+## Acknowledgements
 
 Apache 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
-LiteMLflow is independent of and not affiliated with Databricks, Inc. References to MLflow describe API compatibility only.
+[![All Contributors](https://img.shields.io/badge/all_contributors-1-orange.svg)](https://github.com/litemlflow/litemlflow/graphs/contributors)
+
+LiteMLflow is independent of and not affiliated with Databricks, Inc. References to "MLflow" describe API compatibility only.

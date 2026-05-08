@@ -1,0 +1,106 @@
+---
+title: LiteMLflow
+description: Single-binary MLflow-compatible experiment tracking with first-class LLM trace support.
+template: splash
+hero:
+  tagline: Your experiments, in one file. 143× faster cold start. Zero databases. Zero config.
+  image:
+    file: ../../assets/logo.svg
+  actions:
+    - text: Install in 30 seconds
+      link: /quickstart/
+      icon: right-arrow
+      variant: primary
+    - text: Read the docs
+      link: /architecture/
+      icon: open-book
+    - text: GitHub
+      link: https://github.com/litemlflow/litemlflow
+      icon: github
+      variant: minimal
+---
+
+import { Card, CardGrid, Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Why LiteMLflow?
+
+<CardGrid stagger>
+  <Card title="143× faster cold start" icon="rocket">
+    53 ms vs 7 500 ms for MLflow + SQLite. No Python interpreter. No ORM warm-up.
+    CI pipelines and ephemeral environments notice immediately.
+  </Card>
+  <Card title="One env variable to migrate" icon="pencil">
+    Change `MLFLOW_TRACKING_URI`. That's it. All your existing MLflow Python code
+    keeps running without modification.
+  </Card>
+  <Card title="LLM-native from day one" icon="star">
+    Traces, versioned prompts, evals, and OpenTelemetry OTLP live next to classic
+    ML metrics in the same UI — no second tool.
+  </Card>
+  <Card title="Single file, single command" icon="document">
+    One Go binary. `litemlflow up`. Open the browser. No Postgres. No S3.
+    No reverse proxy. Backup is `cp`.
+  </Card>
+</CardGrid>
+
+---
+
+## Benchmark snapshot
+
+| Metric | LiteMLflow | MLflow + SQLite | Ratio |
+|---|---|---|---|
+| Cold start | **53 ms** | 7 513 ms | **143×** |
+| `log_metric` p50 | **1.44 ms** | 21.6 ms | **15×** |
+| `log_metric` p95 | **1.68 ms** | 30.9 ms | **18×** |
+| `log_batch` throughput | **24 533 rows/s** | 8 008 rows/s | **3.1×** |
+| Populate 1 000 runs | **3.8 s** | 64.7 s | **17×** |
+| UI first paint p50 | **0.6 ms** | n/a (React bundle) | — |
+
+*Full methodology and honest trade-offs in [Benchmarks](/bench-v04/).*
+
+---
+
+## Quick install
+
+<Tabs>
+  <TabItem label="Homebrew">
+    ```bash
+    brew install litemlflow/tap/litemlflow
+    litemlflow up --data ./data
+    ```
+  </TabItem>
+  <TabItem label="Docker">
+    ```bash
+    docker run -p 5000:5000 -v $(pwd)/data:/data \
+      ghcr.io/litemlflow/litemlflow:latest up
+    ```
+  </TabItem>
+  <TabItem label="Helm">
+    ```bash
+    helm install lmf oci://ghcr.io/litemlflow/charts/litemlflow \
+      --version 0.1.0
+    ```
+  </TabItem>
+  <TabItem label="Source">
+    ```bash
+    git clone https://github.com/litemlflow/litemlflow
+    cd litemlflow && make build
+    ./bin/litemlflow up --data ./data
+    ```
+  </TabItem>
+</Tabs>
+
+---
+
+## Full comparison
+
+| | **LiteMLflow** | MLflow | W&B | Aim | Langfuse |
+|---|---|---|---|---|---|
+| Cold start | **53 ms** | 7 500 ms | SaaS | ~2 s | SaaS |
+| Runtime deps | **none** | Python + Postgres + S3 | account | Python | Postgres + ClickHouse |
+| Install steps | **1** | 4+ | 3 | 2 | 5+ |
+| MLflow compat | **✅ 80%+** | ✅ native | ❌ | ❌ | ❌ |
+| LLM traces | **✅** | bolt-on | ✅ | ❌ | ✅ |
+| Self-hostable | **✅** | ✅ | ❌ | ✅ | ✅ |
+| Auth | **basic + OIDC** | none | account | basic | basic |
+| License | **Apache 2.0** | Apache 2.0 | proprietary | Apache 2.0 | MIT |

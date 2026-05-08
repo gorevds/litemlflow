@@ -1,0 +1,49 @@
+/* LiteMLflow brand tokens — overrides Starlight defaults */
+
+:root {
+  /* Primary accent — LiteMLflow blue */
+  --sl-color-accent-low: #d0e3ff;
+  --sl-color-accent: #2d6cdf;
+  --sl-color-accent-high: #1a4fa8;
+
+  /* Text */
+  --sl-color-text-accent: #2d6cdf;
+
+  /* Code blocks */
+  --sl-color-bg-inline-code: #eef3fc;
+
+  /* Sidebar hover */
+  --sl-color-bg-sidebar: var(--sl-color-gray-7, #f6f7f8);
+}
+
+:root[data-theme='dark'] {
+  --sl-color-accent-low: #0d2a5e;
+  --sl-color-accent: #4d88f0;
+  --sl-color-accent-high: #7aaeff;
+  --sl-color-text-accent: #7aaeff;
+  --sl-color-bg-inline-code: #0f1e3a;
+}
+
+/* Hero headline */
+.hero h1 {
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+/* Comparison table — make the LiteMLflow column pop */
+table td:nth-child(2),
+table th:nth-child(2) {
+  background: color-mix(in srgb, var(--sl-color-accent) 6%, transparent);
+  font-weight: 600;
+}
+
+/* Card grid — add subtle border */
+.card {
+  border-left: 3px solid var(--sl-color-accent);
+}
+
+/* Inline code */
+code {
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+}

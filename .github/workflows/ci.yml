@@ -11,8 +11,11 @@ permissions:
 
 jobs:
   go:
-    name: Go (build + tests + race)
-    runs-on: ubuntu-latest
+    name: Go (build + tests + race) — ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -28,6 +31,7 @@ jobs:
           mkdir -p bin
           go build -o bin/litemlflow ./cmd/litemlflow
       - uses: actions/upload-artifact@v4
+        if: matrix.os == 'ubuntu-latest'
         with:
           name: litemlflow-${{ github.sha }}
           path: bin/litemlflow

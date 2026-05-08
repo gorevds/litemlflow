@@ -1,0 +1,70 @@
+name: Feature request
+description: Suggest a new feature or improvement.
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before opening a feature request, check:
+        - [Roadmap Y1](../docs/roadmap-y1.md) — delivered features
+        - [Roadmap Y2](../docs/roadmap-y2.md) — planned features
+        - [GitHub Discussions](https://github.com/litemlflow/litemlflow/discussions) — community ideas
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: |
+        Describe the problem you face without jumping straight to a solution.
+        "I am trying to ... and I cannot because ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: What would you like LiteMLflow to do? Include API shapes, CLI flags, UI elements as applicable.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you have considered
+      description: Other approaches you tried or considered (workarounds, other tools, etc.).
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - MLflow API compatibility
+        - Native API (traces / prompts / evals)
+        - UI
+        - Auth / OIDC / RBAC
+        - Storage (SQLite / S3)
+        - Performance
+        - Distribution (Docker / Helm / Homebrew / etc.)
+        - Python SDK
+        - Kubernetes operator
+        - Documentation
+        - Other
+
+  - type: dropdown
+    id: breaking
+    attributes:
+      label: Would this require a breaking change?
+      options:
+        - "No"
+        - "Yes — existing API/behavior would change"
+        - "Unsure"
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Links, screenshots, reference implementations in other tools.
