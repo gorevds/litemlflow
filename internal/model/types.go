@@ -128,6 +128,22 @@ type Prompt struct {
 	Description string `json:"description,omitempty"`
 }
 
+// Dataset describes a dataset referenced by a run input.
+type Dataset struct {
+	Name       string `json:"name"`
+	Digest     string `json:"digest"`
+	SourceType string `json:"source_type,omitempty"`
+	Source     string `json:"source,omitempty"`
+	Schema     string `json:"schema,omitempty"`
+	Profile    string `json:"profile,omitempty"`
+}
+
+// DatasetInput links a Dataset to a run, optionally with tags.
+type DatasetInput struct {
+	Dataset Dataset `json:"dataset"`
+	Tags    []KV    `json:"tags,omitempty"`
+}
+
 // Eval is the structured payload of a run with kind=eval.
 type Eval struct {
 	RunID        string   `json:"run_id"`

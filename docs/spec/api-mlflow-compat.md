@@ -34,7 +34,8 @@ The wire format is JSON over HTTP, request and response shapes match MLflow exac
 | `/api/2.0/mlflow/runs/log-batch` | POST | batch metrics/params/tags |
 | `/api/2.0/mlflow/runs/set-tag` | POST | upsert tag |
 | `/api/2.0/mlflow/runs/delete-tag` | POST | remove tag |
-| `/api/2.0/mlflow/metrics/get-history` | GET | timeseries by `run_id` + `metric_key` |
+| `/api/2.0/mlflow/runs/log-inputs` | POST | dataset linkage (migration 006) |
+| `/api/2.0/mlflow/metrics/get-history` | GET | timeseries by `run_id` + `metric_key`; supports `?max_results=N&page_token=...` |
 
 ### Artifacts
 
@@ -88,11 +89,11 @@ The wire format is JSON over HTTP, request and response shapes match MLflow exac
 - **`get-download-uri`**: returns the `source` field verbatim — no URL rewriting. Clients that need actual byte access should use the artifacts API with the `run_id`.
 - **Aliases**: upsert semantics (POST), delete by `name`+`alias` query params (DELETE), resolve by `name`+`alias` (GET).
 - **Tags**: all tag operations are upsert. Tags cascade-delete with their parent model/version.
-- **Migration**: schema lives in `internal/migrations/004_registry.sql`.
+- **Migration**: schema lives in `internal/migrations/003_registry.sql`.
 
-## Deferred to v0.2
+## Deferred to v0.3
 
-- `/api/2.0/mlflow/runs/log-inputs` — dataset linkage
+(All v0.2 deliverables landed: model registry, log-inputs/datasets, set_experiment auto-create.)
 
 ## Explicitly out of scope (use native API instead)
 
@@ -121,6 +122,22 @@ Error response shape:
   "message": "experiment with id=42 does not exist"
 }
 ```
+
+## Run filter operators
+
+`search_runs` supports the following filter operators via `parseRunFilter`:
+
+| Operator | Example | Notes |
+|---|---|---|
+| `=` | `params.lr = '0.01'` | exact match |
+| `!=` | `status != 'RUNNING'` | not equal |
+| `<` `<=` `>` `>=` | `metrics.loss > 0.5` | numeric comparison on latest metric value |
+| `LIKE` | `attributes.run_name LIKE 'train%'` | SQL LIKE on string fields |
+| `IN (...)` | `attributes.run_id IN ('id1','id2')` | set membership; works on `attributes.*`, `params.*`, `tags.*` |
+| `BETWEEN x AND y` | `metrics.score BETWEEN 0.5 AND 1.0` | inclusive range on latest metric value; also `attributes.start_time` / `end_time` |
+| `AND` | `params.lr = '0.01' AND metrics.loss < 0.5` | chain multiple predicates |
+
+Supported attribute columns for `attributes.*`: `run_id`, `run_name`, `status`, `start_time`, `end_time`.
 
 ## Compatibility test matrix
 

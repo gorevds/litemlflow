@@ -609,6 +609,7 @@ func splitOnAnd(s string) []string {
 	last := 0
 	depth := 0
 	inQuote := false
+	inBetween := false // true after BETWEEN until we consume its AND
 	for i := 0; i < len(s); i++ {
 		ch := s[i]
 		switch ch {
@@ -623,7 +624,16 @@ func splitOnAnd(s string) []string {
 				depth--
 			}
 		}
+		if !inQuote && depth == 0 && i+9 <= len(s) && upper[i:i+9] == " BETWEEN " {
+			inBetween = true
+		}
 		if !inQuote && depth == 0 && i+5 <= len(s) && upper[i:i+5] == " AND " {
+			if inBetween {
+				// This AND belongs to the BETWEEN clause, skip it.
+				inBetween = false
+				i += 4
+				continue
+			}
 			out = append(out, s[last:i])
 			last = i + 5
 			i += 4
@@ -638,7 +648,22 @@ func splitOnAnd(s string) []string {
 // multiple operators in their right-hand side (e.g. "x = a=b") are treated
 // as having a literal "a=b" right-hand side; we do not attempt to detect
 // malformed expressions. Callers wanting strict parsing should pre-validate.
+//
+// Supported operators:
+//   - =, !=, <, <=, >, >= for all field types (numeric or string)
+//   - LIKE for string fields
+//   - IN ('a','b','c') for attributes (e.g. attributes.run_id IN (...))
+//   - BETWEEN x AND y for numeric metrics
 func parseRunPredicate(c string) (string, []any, error) {
+	// Check for IN operator first (before generic op scan).
+	if clause, args, err, ok := tryParseIN(c); ok {
+		return clause, args, err
+	}
+	// Check for BETWEEN operator.
+	if clause, args, err, ok := tryParseBETWEEN(c); ok {
+		return clause, args, err
+	}
+
 	for _, op := range []string{">=", "<=", "!=", "=", ">", "<", " LIKE "} {
 		opUpper := strings.ToUpper(op)
 		idx := -1
@@ -692,6 +717,7 @@ func parseRunPredicate(c string) (string, []any, error) {
 				"start_time": "start_time",
 				"end_time":   "end_time",
 				"run_name":   "name",
+				"run_id":     "id",
 			}
 			scol, ok := whitelist[col]
 			if !ok {
@@ -701,6 +727,170 @@ func parseRunPredicate(c string) (string, []any, error) {
 		}
 	}
 	return "", nil, fmt.Errorf("unable to parse predicate %q", c)
+}
+
+// tryParseIN handles "left IN ('a','b','c')" predicates.
+// Returns (clause, args, err, matched).
+func tryParseIN(c string) (string, []any, error, bool) {
+	upper := strings.ToUpper(c)
+	inIdx := strings.Index(upper, " IN (")
+	if inIdx < 0 {
+		return "", nil, nil, false
+	}
+	left := strings.TrimSpace(c[:inIdx])
+	rest := strings.TrimSpace(c[inIdx+5:]) // skip " IN ("
+	// Find the closing paren
+	closeIdx := strings.LastIndex(rest, ")")
+	if closeIdx < 0 {
+		return "", nil, fmt.Errorf("IN predicate missing closing ')'"), true
+	}
+	inner := rest[:closeIdx]
+	vals, err := parseINValues(inner)
+	if err != nil {
+		return "", nil, err, true
+	}
+	if len(vals) == 0 {
+		return "", nil, fmt.Errorf("IN predicate has no values"), true
+	}
+	marks := strings.TrimRight(strings.Repeat("?,", len(vals)), ",")
+	args := make([]any, len(vals))
+	for i, v := range vals {
+		args[i] = v
+	}
+	switch {
+	case left == "status":
+		return "status IN (" + marks + ")", args, nil, true
+	case strings.HasPrefix(left, "attributes."):
+		col := strings.TrimPrefix(left, "attributes.")
+		whitelist := map[string]string{
+			"status":     "status",
+			"run_id":     "id",
+			"run_name":   "name",
+			"start_time": "start_time",
+			"end_time":   "end_time",
+		}
+		scol, ok := whitelist[col]
+		if !ok {
+			return "", nil, fmt.Errorf("unsupported attribute %q in IN predicate", col), true
+		}
+		return scol + " IN (" + marks + ")", args, nil, true
+	case strings.HasPrefix(left, "params."):
+		key := strings.TrimPrefix(left, "params.")
+		return "id IN (SELECT run_id FROM params WHERE key = ? AND value IN (" + marks + "))", append([]any{key}, args...), nil, true
+	case strings.HasPrefix(left, "tags."):
+		key := strings.TrimPrefix(left, "tags.")
+		return "id IN (SELECT run_id FROM tags WHERE key = ? AND value IN (" + marks + "))", append([]any{key}, args...), nil, true
+	}
+	return "", nil, fmt.Errorf("IN predicate on unsupported field %q", left), true
+}
+
+// parseINValues splits the inside of an IN (...) list into individual string values.
+// Handles both quoted ('a','b') and unquoted (1,2,3) forms.
+func parseINValues(s string) ([]string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, nil
+	}
+	var vals []string
+	inQ := false
+	cur := strings.Builder{}
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		switch {
+		case ch == '\'' && !inQ:
+			inQ = true
+		case ch == '\'' && inQ:
+			// Handle escaped quote ''
+			if i+1 < len(s) && s[i+1] == '\'' {
+				cur.WriteByte('\'')
+				i++
+			} else {
+				inQ = false
+				vals = append(vals, cur.String())
+				cur.Reset()
+				// skip whitespace + comma
+				for i+1 < len(s) && (s[i+1] == ',' || s[i+1] == ' ') {
+					i++
+				}
+			}
+		case ch == ',' && !inQ:
+			v := strings.TrimSpace(cur.String())
+			vals = append(vals, v)
+			cur.Reset()
+		default:
+			if !inQ && ch == ' ' {
+				continue // skip spaces between unquoted tokens
+			}
+			cur.WriteByte(ch)
+		}
+	}
+	if inQ {
+		return nil, fmt.Errorf("unterminated quote in IN list")
+	}
+	if remaining := strings.TrimSpace(cur.String()); remaining != "" {
+		vals = append(vals, remaining)
+	}
+	return vals, nil
+}
+
+// tryParseBETWEEN handles "metrics.key BETWEEN lo AND hi".
+// Returns (clause, args, err, matched).
+func tryParseBETWEEN(c string) (string, []any, error, bool) {
+	upper := strings.ToUpper(c)
+	betIdx := strings.Index(upper, " BETWEEN ")
+	if betIdx < 0 {
+		return "", nil, nil, false
+	}
+	left := strings.TrimSpace(c[:betIdx])
+	rest := strings.TrimSpace(c[betIdx+9:]) // skip " BETWEEN "
+	andIdx := strings.Index(strings.ToUpper(rest), " AND ")
+	if andIdx < 0 {
+		return "", nil, fmt.Errorf("BETWEEN predicate missing AND"), true
+	}
+	loStr := strings.TrimSpace(rest[:andIdx])
+	hiStr := strings.TrimSpace(rest[andIdx+5:])
+	switch {
+	case strings.HasPrefix(left, "metrics."):
+		key := strings.TrimPrefix(left, "metrics.")
+		lo, err := strconv.ParseFloat(loStr, 64)
+		if err != nil {
+			return "", nil, fmt.Errorf("BETWEEN lo must be numeric, got %q", loStr), true
+		}
+		hi, err := strconv.ParseFloat(hiStr, 64)
+		if err != nil {
+			return "", nil, fmt.Errorf("BETWEEN hi must be numeric, got %q", hiStr), true
+		}
+		return `id IN (
+			SELECT run_id FROM metrics m1
+			WHERE key = ?
+			  AND (timestamp, step) = (
+				SELECT timestamp, step FROM metrics m2
+				WHERE m2.run_id = m1.run_id AND m2.key = m1.key
+				ORDER BY timestamp DESC, step DESC LIMIT 1
+			  )
+			  AND value BETWEEN ? AND ?
+		)`, []any{key, lo, hi}, nil, true
+	case strings.HasPrefix(left, "attributes."):
+		col := strings.TrimPrefix(left, "attributes.")
+		whitelist := map[string]string{
+			"start_time": "start_time",
+			"end_time":   "end_time",
+		}
+		scol, ok := whitelist[col]
+		if !ok {
+			return "", nil, fmt.Errorf("BETWEEN on unsupported attribute %q", col), true
+		}
+		lo, err := strconv.ParseFloat(loStr, 64)
+		if err != nil {
+			return "", nil, fmt.Errorf("BETWEEN lo must be numeric, got %q", loStr), true
+		}
+		hi, err := strconv.ParseFloat(hiStr, 64)
+		if err != nil {
+			return "", nil, fmt.Errorf("BETWEEN hi must be numeric, got %q", hiStr), true
+		}
+		return scol + " BETWEEN ? AND ?", []any{lo, hi}, nil, true
+	}
+	return "", nil, fmt.Errorf("BETWEEN on unsupported field %q", left), true
 }
 
 // ----- metrics, params, tags -----
@@ -843,25 +1033,70 @@ func (s *SQLiteStore) DeleteTag(ctx context.Context, runID, key string) error {
 	return nil
 }
 
-// GetMetricHistory returns all observations for one metric key on one run.
-func (s *SQLiteStore) GetMetricHistory(ctx context.Context, runID, key string) ([]model.Metric, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT key, value, timestamp, step FROM metrics WHERE run_id = ? AND key = ?
-		ORDER BY timestamp ASC, step ASC
-	`, runID, key)
+// GetMetricHistory returns observations for one metric key on one run.
+// opt.MaxResults=0 returns all points. Otherwise it pages using a
+// simple "timestamp:step" cursor encoded as base64.
+func (s *SQLiteStore) GetMetricHistory(ctx context.Context, runID, key string, opt MetricHistoryOptions) ([]model.Metric, string, error) {
+	args := []any{runID, key}
+	q := `SELECT key, value, timestamp, step FROM metrics WHERE run_id = ? AND key = ?`
+
+	if opt.PageToken != "" {
+		ts, step, err := decodeMetricPageToken(opt.PageToken)
+		if err == nil {
+			q += ` AND (timestamp > ? OR (timestamp = ? AND step > ?))`
+			args = append(args, ts, ts, step)
+		}
+	}
+	q += ` ORDER BY timestamp ASC, step ASC`
+
+	if opt.MaxResults > 0 {
+		q += ` LIMIT ?`
+		args = append(args, opt.MaxResults+1)
+	}
+
+	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer rows.Close()
 	var out []model.Metric
 	for rows.Next() {
 		var m model.Metric
 		if err := rows.Scan(&m.Key, &m.Value, &m.Timestamp, &m.Step); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		out = append(out, m)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+
+	var nextToken string
+	if opt.MaxResults > 0 && len(out) > opt.MaxResults {
+		out = out[:opt.MaxResults]
+		last := out[len(out)-1]
+		nextToken = encodeMetricPageToken(last.Timestamp, last.Step)
+	}
+	return out, nextToken, nil
+}
+
+// encodeMetricPageToken encodes a (timestamp, step) cursor as a simple string.
+func encodeMetricPageToken(ts, step int64) string {
+	return fmt.Sprintf("%d:%d", ts, step)
+}
+
+// decodeMetricPageToken decodes a page token produced by encodeMetricPageToken.
+func decodeMetricPageToken(tok string) (ts, step int64, err error) {
+	parts := strings.SplitN(tok, ":", 2)
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("invalid page token")
+	}
+	ts, err = strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return 0, 0, err
+	}
+	step, err = strconv.ParseInt(parts[1], 10, 64)
+	return ts, step, err
 }
 
 // GetLatestMetrics returns the most recent value of every metric for a run.
@@ -1189,6 +1424,121 @@ func (s *SQLiteStore) GetEval(ctx context.Context, runID string) (*model.Eval, e
 		return nil, err
 	}
 	return &e, nil
+}
+
+// ----- datasets / log_inputs -----
+
+// LogInputs records dataset linkages for a run. Each dataset is upserted
+// (idempotent on name+digest); the input row and its tags are inserted fresh
+// each call to match MLflow's semantics (duplicate calls are additive).
+func (s *SQLiteStore) LogInputs(ctx context.Context, runID string, inputs []model.DatasetInput) error {
+	if len(inputs) == 0 {
+		return nil
+	}
+	if err := assertRunExists(ctx, s.db, runID); err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	for _, inp := range inputs {
+		ds := inp.Dataset
+		// Upsert dataset record (name+digest are PK).
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO datasets(name, digest, source_type, source, schema, profile)
+			VALUES (?, ?, ?, ?, ?, ?)
+			ON CONFLICT(name, digest) DO UPDATE SET
+			  source_type = COALESCE(excluded.source_type, source_type),
+			  source      = COALESCE(excluded.source,      source),
+			  schema      = COALESCE(excluded.schema,      schema),
+			  profile     = COALESCE(excluded.profile,     profile)
+		`, ds.Name, ds.Digest, nilIfEmpty(ds.SourceType), nilIfEmpty(ds.Source),
+			nilIfEmpty(ds.Schema), nilIfEmpty(ds.Profile)); err != nil {
+			return fmt.Errorf("upsert dataset: %w", err)
+		}
+
+		// Insert dataset_input row and get its id.
+		res, err := tx.ExecContext(ctx, `
+			INSERT INTO dataset_inputs(run_id, name, digest) VALUES (?, ?, ?)
+		`, runID, ds.Name, ds.Digest)
+		if err != nil {
+			return fmt.Errorf("insert dataset_input: %w", err)
+		}
+		inputID, err := res.LastInsertId()
+		if err != nil {
+			return err
+		}
+
+		for _, tag := range inp.Tags {
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO dataset_input_tags(dataset_input_id, key, value) VALUES (?, ?, ?)
+				ON CONFLICT(dataset_input_id, key) DO UPDATE SET value = excluded.value
+			`, inputID, tag.Key, tag.Value); err != nil {
+				return fmt.Errorf("insert dataset_input_tag: %w", err)
+			}
+		}
+	}
+	return tx.Commit()
+}
+
+// GetRunDatasets returns all dataset inputs linked to a run.
+func (s *SQLiteStore) GetRunDatasets(ctx context.Context, runID string) ([]model.DatasetInput, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT di.id, d.name, d.digest,
+		       COALESCE(d.source_type,''), COALESCE(d.source,''),
+		       COALESCE(d.schema,''), COALESCE(d.profile,'')
+		FROM dataset_inputs di
+		JOIN datasets d ON d.name = di.name AND d.digest = di.digest
+		WHERE di.run_id = ?
+		ORDER BY di.id ASC
+	`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var inputs []model.DatasetInput
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		var di model.DatasetInput
+		if err := rows.Scan(&id, &di.Dataset.Name, &di.Dataset.Digest,
+			&di.Dataset.SourceType, &di.Dataset.Source,
+			&di.Dataset.Schema, &di.Dataset.Profile); err != nil {
+			return nil, err
+		}
+		inputs = append(inputs, di)
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Load tags per input.
+	for i, id := range ids {
+		tagRows, err := s.db.QueryContext(ctx, `
+			SELECT key, value FROM dataset_input_tags WHERE dataset_input_id = ? ORDER BY key
+		`, id)
+		if err != nil {
+			return nil, err
+		}
+		for tagRows.Next() {
+			var kv model.KV
+			if err := tagRows.Scan(&kv.Key, &kv.Value); err != nil {
+				_ = tagRows.Close()
+				return nil, err
+			}
+			inputs[i].Tags = append(inputs[i].Tags, kv)
+		}
+		_ = tagRows.Close()
+		if err := tagRows.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return inputs, nil
 }
 
 // ----- helpers -----

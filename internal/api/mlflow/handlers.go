@@ -50,6 +50,7 @@ func (h *Handler) Mount(r chi.Router) {
 	r.Post("/api/2.0/mlflow/runs/log-batch", h.LogBatch)
 	r.Post("/api/2.0/mlflow/runs/set-tag", h.SetTag)
 	r.Post("/api/2.0/mlflow/runs/delete-tag", h.DeleteTag)
+	r.Post("/api/2.0/mlflow/runs/log-inputs", h.LogInputs)
 	r.Get("/api/2.0/mlflow/metrics/get-history", h.GetMetricHistory)
 
 	// Artifacts
@@ -172,6 +173,12 @@ func (h *Handler) SearchExperiments(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Filter == "" {
 		req.Filter = r.URL.Query().Get("filter")
+	}
+	if req.ViewType == "" {
+		req.ViewType = r.URL.Query().Get("view_type")
+	}
+	if req.PageToken == "" {
+		req.PageToken = r.URL.Query().Get("page_token")
 	}
 	stage := mapViewType(req.ViewType)
 	// TENANCY: scope to workspace
@@ -365,9 +372,15 @@ func (h *Handler) GetRun(w http.ResponseWriter, r *http.Request) {
 		writeStoreErr(w, err)
 		return
 	}
-	writeJSON(w, runResp{Run: runDTO{Info: runInfoToDTO(run), Data: data}})
+	inputs, err := h.collectRunInputs(r, id)
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, runResp{Run: runDTO{Info: runInfoToDTO(run), Data: data, Inputs: inputs}})
 }
 
+// collectRunData loads metrics, params, and tags for a run.
 func (h *Handler) collectRunData(r *http.Request, runID string) (runDataDTO, error) {
 	metrics, err := h.Store.GetLatestMetrics(r.Context(), runID)
 	if err != nil {
@@ -386,6 +399,15 @@ func (h *Handler) collectRunData(r *http.Request, runID string) (runDataDTO, err
 		Params:  paramsToDTO(params),
 		Tags:    tagsToDTO(tags),
 	}, nil
+}
+
+// collectRunInputs loads dataset inputs for a run.
+func (h *Handler) collectRunInputs(r *http.Request, runID string) (*runInputsDTO, error) {
+	datasets, err := h.Store.GetRunDatasets(r.Context(), runID)
+	if err != nil {
+		return nil, err
+	}
+	return datasetInputsToDTO(datasets), nil
 }
 
 type updateRunReq struct {
@@ -516,7 +538,12 @@ func (h *Handler) SearchRuns(w http.ResponseWriter, r *http.Request) {
 			writeStoreErr(w, err)
 			return
 		}
-		runs = append(runs, runDTO{Info: runInfoToDTO(run), Data: data})
+		inputs, err := h.collectRunInputs(r, run.ID)
+		if err != nil {
+			writeStoreErr(w, err)
+			return
+		}
+		runs = append(runs, runDTO{Info: runInfoToDTO(run), Data: data, Inputs: inputs})
 	}
 	writeJSON(w, searchRunsResp{Runs: runs, NextPageToken: res.NextPageToken})
 }
@@ -676,11 +703,63 @@ func (h *Handler) DeleteTag(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, struct{}{})
 }
 
+// ---- log-inputs (datasets) --------------------------------------------------
+
+type logInputsDatasetReq struct {
+	Dataset datasetDTO `json:"dataset"`
+	Tags    []tagDTO   `json:"tags,omitempty"`
+}
+
+type logInputsReq struct {
+	RunID    string                `json:"run_id"`
+	Datasets []logInputsDatasetReq `json:"datasets,omitempty"`
+	// Models is accepted for wire compatibility but ignored (model registry out of scope).
+	Models []json.RawMessage `json:"models,omitempty"`
+}
+
+// LogInputs handles POST /api/2.0/mlflow/runs/log-inputs.
+func (h *Handler) LogInputs(w http.ResponseWriter, r *http.Request) {
+	var req logInputsReq
+	if err := decodeJSON(r, &req); err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+	if req.RunID == "" {
+		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "run_id is required")
+		return
+	}
+	inputs := make([]model.DatasetInput, 0, len(req.Datasets))
+	for _, d := range req.Datasets {
+		tags := make([]model.KV, 0, len(d.Tags))
+		for _, t := range d.Tags {
+			tags = append(tags, model.KV{Key: t.Key, Value: t.Value})
+		}
+		inputs = append(inputs, model.DatasetInput{
+			Dataset: model.Dataset{
+				Name:       d.Dataset.Name,
+				Digest:     d.Dataset.Digest,
+				SourceType: d.Dataset.SourceType,
+				Source:     d.Dataset.Source,
+				Schema:     d.Dataset.Schema,
+				Profile:    d.Dataset.Profile,
+			},
+			Tags: tags,
+		})
+	}
+	if err := h.Store.LogInputs(r.Context(), req.RunID, inputs); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, struct{}{})
+}
+
 type getMetricHistoryResp struct {
-	Metrics []metricDTO `json:"metrics"`
+	Metrics       []metricDTO `json:"metrics"`
+	NextPageToken string      `json:"next_page_token,omitempty"`
 }
 
 // GetMetricHistory handles GET .../metrics/get-history.
+// Supports optional ?max_results=N and ?page_token=... query params.
 func (h *Handler) GetMetricHistory(w http.ResponseWriter, r *http.Request) {
 	runID := r.URL.Query().Get("run_id")
 	if runID == "" {
@@ -691,12 +770,25 @@ func (h *Handler) GetMetricHistory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "run_id and metric_key are required")
 		return
 	}
-	hist, err := h.Store.GetMetricHistory(r.Context(), runID, key)
+	var maxResults int
+	if v := r.URL.Query().Get("max_results"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "max_results must be a non-negative integer")
+			return
+		}
+		maxResults = n
+	}
+	pageToken := r.URL.Query().Get("page_token")
+	hist, nextToken, err := h.Store.GetMetricHistory(r.Context(), runID, key, store.MetricHistoryOptions{
+		MaxResults: maxResults,
+		PageToken:  pageToken,
+	})
 	if err != nil {
 		writeStoreErr(w, err)
 		return
 	}
-	writeJSON(w, getMetricHistoryResp{Metrics: metricsToDTO(hist)})
+	writeJSON(w, getMetricHistoryResp{Metrics: metricsToDTO(hist), NextPageToken: nextToken})
 }
 
 // ---- artifacts --------------------------------------------------------------

@@ -47,9 +47,30 @@ type runDataDTO struct {
 	Tags    []tagDTO    `json:"tags,omitempty"`
 }
 
+// runInputsDTO mirrors MLflow's RunInputs proto.
+// NOTE: inputs lives at the top-level run object, not inside data.
+type runInputsDTO struct {
+	DatasetInputs []datasetInputDTO `json:"dataset_inputs,omitempty"`
+}
+
+type datasetInputDTO struct {
+	Dataset datasetDTO `json:"dataset"`
+	Tags    []tagDTO   `json:"tags,omitempty"`
+}
+
+type datasetDTO struct {
+	Name       string `json:"name"`
+	Digest     string `json:"digest"`
+	SourceType string `json:"source_type,omitempty"`
+	Source     string `json:"source,omitempty"`
+	Schema     string `json:"schema,omitempty"`
+	Profile    string `json:"profile,omitempty"`
+}
+
 type runDTO struct {
-	Info runInfoDTO `json:"info"`
-	Data runDataDTO `json:"data"`
+	Info   runInfoDTO    `json:"info"`
+	Data   runDataDTO    `json:"data"`
+	Inputs *runInputsDTO `json:"inputs,omitempty"`
 }
 
 type metricDTO struct {
@@ -128,4 +149,24 @@ func tagsToDTO(ts []model.KV) []tagDTO {
 		out = append(out, tagDTO{Key: t.Key, Value: t.Value})
 	}
 	return out
+}
+
+func datasetInputsToDTO(inputs []model.DatasetInput) *runInputsDTO {
+	if len(inputs) == 0 {
+		return nil
+	}
+	out := make([]datasetInputDTO, 0, len(inputs))
+	for _, inp := range inputs {
+		d := datasetDTO{
+			Name:       inp.Dataset.Name,
+			Digest:     inp.Dataset.Digest,
+			SourceType: inp.Dataset.SourceType,
+			Source:     inp.Dataset.Source,
+			Schema:     inp.Dataset.Schema,
+			Profile:    inp.Dataset.Profile,
+		}
+		tags := tagsToDTO(inp.Tags)
+		out = append(out, datasetInputDTO{Dataset: d, Tags: tags})
+	}
+	return &runInputsDTO{DatasetInputs: out}
 }
