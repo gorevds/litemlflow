@@ -68,4 +68,6 @@ ui/node_modules/
 # Coverage reports
 *.lcov
 .claude/
-litemlflow
+
+# Repo-root binary (anchored — must NOT match python/litemlflow/...)
+/litemlflow
