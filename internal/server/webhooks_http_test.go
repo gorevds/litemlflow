@@ -39,6 +39,9 @@ func buildNativeTestHandler(st *store.SQLiteStore) http.Handler {
 
 // TestWebhookCRUD exercises the create/list/update/delete lifecycle.
 func TestWebhookCRUD(t *testing.T) {
+	// Tests legitimately use loopback URLs to avoid touching the real network;
+	// the SSRF-defense expects an explicit operator opt-in for that.
+	t.Setenv("LITEMLFLOW_WEBHOOK_ALLOW_PRIVATE", "1")
 	st := openWebhookStore(t)
 	srv := httptest.NewServer(buildNativeTestHandler(st))
 	defer srv.Close()
@@ -135,6 +138,7 @@ func TestWebhookCRUD(t *testing.T) {
 // TestWebhookTestEndpoint exercises POST /api/v1/webhooks/{id}/test against a
 // real httptest server acting as the webhook receiver.
 func TestWebhookTestEndpoint(t *testing.T) {
+	t.Setenv("LITEMLFLOW_WEBHOOK_ALLOW_PRIVATE", "1")
 	// Start a mock receiver.
 	received := make(chan []byte, 1)
 	mockReceiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

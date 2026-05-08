@@ -54,9 +54,24 @@ func (s *SQLiteStore) GetRunLineage(ctx context.Context, runID string) (*RunLine
 	}
 
 	// Walk ancestors upward (iterative to avoid unbounded recursion).
+	//
+	// Cycle defense: a malicious or buggy client can set tags such that
+	// parent_run_id forms a cycle (A → B → A). We track visited IDs and
+	// also cap the walk depth so that even non-cycle pathological chains
+	// (e.g., a 100k-deep tag-injected chain) cannot DoS the request.
+	const maxLineageDepth = 256
+	visited := make(map[string]struct{}, maxLineageDepth)
+	visited[runID] = struct{}{}
 	var ancestors []*model.Run
 	cur := run.ParentRunID
 	for cur != "" {
+		if _, seen := visited[cur]; seen {
+			break // cycle detected — stop walking
+		}
+		if len(ancestors) >= maxLineageDepth {
+			break // depth cap — stop walking
+		}
+		visited[cur] = struct{}{}
 		p, err := s.GetRun(ctx, cur)
 		if err != nil {
 			if errors.Is(err, ErrNotFound) {

@@ -1,8 +1,14 @@
 package native
 
 import (
+	"context"
+	"fmt"
+	"net"
 	"net/http"
+	"net/url"
+	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -10,6 +16,65 @@ import (
 	"github.com/gorevds/litemlflow/internal/model"
 	"github.com/gorevds/litemlflow/internal/webhooks"
 )
+
+// validateWebhookURL rejects URLs that target private/loopback/link-local
+// addresses, defending against SSRF — a webhook URL is operator-controlled
+// data, but in semi-trusted deployments (multi-tenant, hosted) it would let
+// an attacker probe internal services or reach the cloud-metadata endpoint.
+//
+// Operators who genuinely need a webhook to a private address can set
+// LITEMLFLOW_WEBHOOK_ALLOW_PRIVATE=1 to disable this check at server start.
+func validateWebhookURL(rawURL string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid url: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("url scheme must be http or https; got %q", u.Scheme)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("url is missing host")
+	}
+	// Allow override at server level for legitimate intra-cluster delivery.
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("LITEMLFLOW_WEBHOOK_ALLOW_PRIVATE")), "1") {
+		return nil
+	}
+	// Resolve the host to one or more IPs and reject if any is private/loopback.
+	// (We resolve here so a name like "localhost" is caught even though it
+	// isn't a literal IP. This is best-effort — DNS rebinding could still
+	// bypass it, which is why operators behind multi-tenant deployments
+	// should put a network egress filter in front.)
+	// Use a background context for the lookup; we cap implicitly via DNS
+	// timeout in the resolver.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		// If we can't resolve, allow but log — strict-blocking on resolve
+		// failure would break offline / split-DNS deployments.
+		return nil
+	}
+	for _, ipa := range ips {
+		if isBlockedIP(ipa.IP) {
+			return fmt.Errorf("webhook url resolves to a blocked address (%s); set LITEMLFLOW_WEBHOOK_ALLOW_PRIVATE=1 to override", ipa.IP)
+		}
+	}
+	return nil
+}
+
+
+// isBlockedIP returns true for loopback (127.0.0.0/8, ::1), link-local
+// (169.254.0.0/16, fe80::/10 — including AWS metadata 169.254.169.254),
+// RFC1918 private ranges (10/8, 172.16/12, 192.168/16), and unique-local
+// IPv6 (fc00::/7).
+func isBlockedIP(ip net.IP) bool {
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsPrivate() || ip.IsUnspecified() || ip.IsMulticast() {
+		return true
+	}
+	return false
+}
 
 // mountWebhookRoutes registers webhook CRUD routes on the router.
 // Called from Handler.Mount.
@@ -70,6 +135,10 @@ func (h *Handler) CreateWebhook(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "name, url, and events are required")
 		return
 	}
+	if err := validateWebhookURL(req.URL); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", err.Error())
+		return
+	}
 	enabled := true
 	if req.Enabled != nil {
 		enabled = *req.Enabled
@@ -114,6 +183,10 @@ func (h *Handler) UpdateWebhook(w http.ResponseWriter, r *http.Request) {
 		existing.Name = req.Name
 	}
 	if req.URL != "" {
+		if err := validateWebhookURL(req.URL); err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", err.Error())
+			return
+		}
 		existing.URL = req.URL
 	}
 	if req.Events != "" {
