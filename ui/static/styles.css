@@ -419,6 +419,32 @@ button.btn-ghost:hover { background: var(--bg-alt); }
 .shortcut-table tr:last-child td { border-bottom: none; }
 .shortcut-table td:first-child { width: 120px; }
 
+/* ── Workspace member management ────────────────────────────────────────────── */
+/* Inline text link that looks like a regular anchor but sits inside a table cell. */
+.btn-link {
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  text-decoration: none;
+}
+.btn-link:hover { text-decoration: underline; }
+
+/* Role dropdown inside the members table */
+.member-role-select {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  border-radius: 6px;
+  padding: 3px 6px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
 /* ── Command palette ────────────────────────────────────────────────────────── */
 .palette-overlay {
   display: none;

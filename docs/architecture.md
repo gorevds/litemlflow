@@ -203,6 +203,38 @@ entirely. Prometheus scrapers do not send credentials by default, and
 exposing the scrape endpoint publicly does not leak user data (only aggregate
 server statistics).
 
+## Kubernetes Operator
+
+A separate Go module (`operator/`, module path `github.com/litemlflow/litemlflow-operator`)
+provides a Kubernetes operator built on `sigs.k8s.io/controller-runtime`. It is
+**not** a dependency of the main LiteMLflow server module — keeping `controller-runtime`
+and its transitive dependencies (Prometheus client, RBAC informers, leader-election)
+entirely out of the server binary.
+
+The operator introduces a `LiteMLflow` custom resource (`apiVersion: litemlflow.dev/v1alpha1`).
+Each CR represents a running LiteMLflow instance and is reconciled into:
+
+- A **StatefulSet** (always `replicas: 1` to match SQLite single-writer semantics)
+- A **headless Service** (required by the StatefulSet)
+- A **ClusterIP Service** (for in-cluster access)
+- A **PersistentVolumeClaim** (via the StatefulSet's `volumeClaimTemplates`)
+
+The reconciler reads `StatefulSet.status.readyReplicas` to set
+`LiteMLflow.status.ready`, and sets a `MissingSecret` condition when
+`auth.mode=basic` is configured but the referenced Secret does not yet exist.
+
+The operator releases on its own cadence — Kubernetes and `controller-runtime`
+major bumps do not require a LiteMLflow server tag. The directory is structured
+so that it can be extracted into a standalone `litemlflow-operator` repository
+with minimal changes (update the import paths and add CI).
+
+Build and test:
+
+```bash
+make operator-build   # → bin/litemlflow-operator
+make operator-test    # pure unit tests, no cluster required
+```
+
 ## Dependency policy
 
 Only the following classes of third-party dependencies are allowed in core:

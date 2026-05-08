@@ -598,6 +598,107 @@ No AWS SDK or MinIO client library is required.
 - IAM instance-profile / IRSA automatic credential discovery is not implemented;
   explicit `access-key` / `secret-key` are required.
 
+## 13. Manage workspace members from the UI
+
+LiteMLflow's embedded UI provides a dedicated page for managing workspace
+membership without needing `curl`. Navigate to it from the **Workspaces** page
+or directly via the URL hash.
+
+### Step 1 — open the Workspaces page
+
+Click the **Workspaces** link in the header (or navigate to `/#/workspaces`).
+You will see a table of all workspaces with a **Manage members** link on each
+row.
+
+### Step 2 — open the Members page
+
+Click **Manage members** for a workspace, or navigate directly to:
+
+```
+http://localhost:5000/#/workspaces/<workspace-id>/members
+```
+
+For example, `http://localhost:5000/#/workspaces/team-nlp/members`.
+
+The page fetches two API calls simultaneously:
+
+```
+GET /api/v1/workspaces/team-nlp          → workspace name + description
+GET /api/v1/workspaces/team-nlp/members  → current member list
+```
+
+### Step 3 — view existing members
+
+The members table shows three columns:
+
+| Column | Description |
+|---|---|
+| **User ID** | The identifier used for authentication (e.g. the basic-auth username or OIDC `sub` claim) |
+| **Role** | A dropdown: `viewer`, `editor`, or `admin` |
+| **Actions** | **Remove** button |
+
+### Step 4 — change a member's role
+
+Click the **Role** dropdown on any row and select the new role. The UI immediately
+calls:
+
+```
+PUT /api/v1/workspaces/team-nlp/members/alice
+Content-Type: application/json
+
+{"role": "editor"}
+```
+
+No "Save" button needed — the change is applied on dropdown change.
+
+### Step 5 — add a new member
+
+Fill in the **User ID** field and choose a **Role** in the "Add member" form at
+the bottom, then click **+ Add member** (or press Enter). The UI calls:
+
+```
+PUT /api/v1/workspaces/team-nlp/members/bob
+Content-Type: application/json
+
+{"role": "viewer"}
+```
+
+On success the page reloads the member list; the new member appears in the
+table.
+
+### Step 6 — remove a member
+
+Click the **Remove** button on any row. After confirmation the UI calls:
+
+```
+DELETE /api/v1/workspaces/team-nlp/members/bob
+```
+
+The row disappears immediately from the table.
+
+### Access control
+
+The Members page is admin-only. If you are not an admin of the selected
+workspace (or if `auth=none` is disabled), the page shows:
+
+> You must be an **admin** of workspace `team-nlp` to manage its members.
+
+This surfaces the underlying **403** response from the API.
+
+### curl equivalents
+
+```bash
+# List members
+curl http://localhost:5000/api/v1/workspaces/team-nlp/members | python3 -m json.tool
+
+# Add/update a member
+curl -X PUT http://localhost:5000/api/v1/workspaces/team-nlp/members/alice \
+  -H 'Content-Type: application/json' -d '{"role": "admin"}'
+
+# Remove a member
+curl -X DELETE http://localhost:5000/api/v1/workspaces/team-nlp/members/bob
+```
+
 ## 10. Multiple workspaces for a small team
 
 LiteMLflow supports multi-tenancy through workspaces. Each workspace is an isolated namespace for experiments and runs. A single `default` workspace exists out of the box so solo users and existing MLflow clients need no changes.
