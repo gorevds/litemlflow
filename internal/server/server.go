@@ -146,6 +146,10 @@ func buildRouter(cfg config.Config, logger *slog.Logger, st store.Store, art art
 	// to all downstream handlers. It validates the X-Workspace header /
 	// lmf_workspace cookie against the store and falls back to "default".
 	r.Use(workspaceMiddleware(st))
+	// RBAC: role enforcement runs after workspace resolution. In auth=none mode
+	// and for the default workspace with no members it is a no-op, preserving
+	// backward compat for solo users and the MLflow compat test suite.
+	r.Use(rbacMiddleware(cfg, st))
 
 	// /metrics is public (see isPublicPath). Auth middleware skips it, so
 	// Prometheus can scrape without credentials even when auth=basic.

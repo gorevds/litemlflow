@@ -46,8 +46,8 @@ type SessionStore interface {
 
 // OIDCProvider is the minimal interface the handler needs from auth.Provider.
 type OIDCProvider interface {
-	BeginPKCE(ctx context.Context, state, verifier string) (string, error)
-	Exchange(ctx context.Context, code, verifier string) (string, map[string]any, error)
+	BeginPKCE(ctx context.Context, state, verifier, nonce string) (string, error)
+	Exchange(ctx context.Context, code, verifier, expectedNonce string) (string, map[string]any, error)
 }
 
 // Mount registers the native API on the given router.
@@ -652,8 +652,8 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 }
 
 // OIDCStart handles GET /api/v1/auth/oidc/start.
-// It generates a PKCE verifier + anti-CSRF state, stashes them in a short-lived
-// cookie, and redirects the browser to the IdP.
+// It generates a PKCE verifier + anti-CSRF state + nonce, stashes them in a
+// short-lived cookie, and redirects the browser to the IdP.
 func (h *Handler) OIDCStart(w http.ResponseWriter, r *http.Request) {
 	if h.OIDCProvider == nil {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE",
@@ -671,15 +671,20 @@ func (h *Handler) OIDCStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate PKCE verifier")
 		return
 	}
+	nonce, err := auth.NewPKCENonce()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate nonce")
+		return
+	}
 
 	returnTo := r.URL.Query().Get("return_to")
-	pkceState := auth.PKCEState{State: state, CodeVerifier: verifier, ReturnTo: returnTo}
+	pkceState := auth.PKCEState{State: state, CodeVerifier: verifier, Nonce: nonce, ReturnTo: returnTo}
 	if err := auth.SetOIDCStateCookieAuto(w, r, pkceState); err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to set state cookie")
 		return
 	}
 
-	authURL, err := h.OIDCProvider.BeginPKCE(r.Context(), state, verifier)
+	authURL, err := h.OIDCProvider.BeginPKCE(r.Context(), state, verifier, nonce)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "OIDC discovery failed: "+err.Error())
 		return
@@ -724,7 +729,7 @@ func (h *Handler) OIDCCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, claims, err := h.OIDCProvider.Exchange(r.Context(), code, pkceState.CodeVerifier)
+	_, claims, err := h.OIDCProvider.Exchange(r.Context(), code, pkceState.CodeVerifier, pkceState.Nonce)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "OIDC_ERROR", "token exchange failed: "+err.Error())
 		return

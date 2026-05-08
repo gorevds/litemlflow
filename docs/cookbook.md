@@ -389,12 +389,38 @@ curl -s http://localhost:5000/api/v1/workspaces/current \
 # → {"workspace": {"id": "team-nlp", ...}, "user": "alice", "role": "admin"}
 ```
 
+### Step 6 — role-based access control
+
+Starting from v0.3, member roles are enforced. The three roles are:
+
+| Role | Read | Write experiments/runs | Manage workspace / members |
+|---|:---:|:---:|:---:|
+| `viewer` | ✅ | ❌ | ❌ |
+| `editor` | ✅ | ✅ | ❌ |
+| `admin`  | ✅ | ✅ | ✅ |
+
+```bash
+# Promote bob from viewer to editor.
+curl -s -X PUT http://localhost:5000/api/v1/workspaces/team-nlp/members/bob \
+  -H 'Content-Type: application/json' -d '{"role": "editor"}'
+
+# Remove bob's access.
+curl -s -X DELETE http://localhost:5000/api/v1/workspaces/team-nlp/members/bob
+
+# List all members of a workspace.
+curl -s http://localhost:5000/api/v1/workspaces/team-nlp/members | python3 -m json.tool
+```
+
+**Open mode (fresh-install backward compat):** The `default` workspace with zero members configured operates in *open mode* — all authenticated users can read and write, no role required. This ensures that existing MLflow clients and solo users need no configuration changes. The moment you add the first member to `default`, role enforcement activates for that workspace.
+
+**auth=none single-user mode:** When `--auth=none` is set, RBAC is entirely inactive. All requests pass through regardless of workspace membership.
+
 ### Notes
 
 - The `default` workspace cannot be deleted and requires no `X-Workspace` header; existing MLflow clients continue to work unchanged.
 - Workspace IDs are slugs (`[a-z0-9-]{1,64}`), immutable after creation.
 - A workspace with experiments cannot be deleted until all experiments are removed or moved (there is no move API yet — delete the experiments first).
-- Member roles (`viewer`, `editor`, `admin`) are stored but not yet enforced by the API layer; enforcement is planned for v0.2 once OIDC lands.
+- RBAC uses the workspace resolved from `X-Workspace` / `lmf_workspace` / default for the role check. When managing members of workspace `team-nlp`, set `X-Workspace: team-nlp` so the middleware knows your role in that workspace.
 
 ## 11. Plot a million-point metric series in <300 ms
 

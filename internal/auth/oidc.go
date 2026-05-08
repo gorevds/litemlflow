@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"net/url"
@@ -40,6 +41,10 @@ var ErrUnsupportedAlg = errors.New("unsupported JWT algorithm (only RS256 suppor
 
 // ErrInvalidToken is the catch-all for JWT validation failures.
 var ErrInvalidToken = errors.New("invalid ID token")
+
+// ErrNonceMismatch is returned by Exchange when the nonce in the ID token
+// does not match the expected nonce from the PKCE state cookie.
+var ErrNonceMismatch = errors.New("nonce mismatch: possible replay attack")
 
 // Provider encapsulates an OIDC provider, lazily loading the discovery doc and JWKS.
 type Provider struct {
@@ -157,6 +162,18 @@ func NewPKCEVerifier() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
+// NewPKCENonce generates a cryptographically random nonce for OIDC ID-token
+// binding. The nonce is 32 bytes of crypto/rand, base64url-encoded without
+// padding. Including a nonce ties each ID token to a specific login attempt
+// and prevents token replay attacks across sessions.
+func NewPKCENonce() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
 // NewOIDCState generates a random anti-CSRF state value.
 func NewOIDCState() (string, error) {
 	b := make([]byte, 24)
@@ -174,8 +191,10 @@ func codeChallenge(verifier string) string {
 }
 
 // BeginPKCE builds the authorization URL the client should be redirected to.
-// Both state and codeVerifier must be freshly generated random values.
-func (p *Provider) BeginPKCE(ctx context.Context, state, codeVerifier string) (string, error) {
+// state and codeVerifier must be freshly generated random values.
+// nonce, when non-empty, is included in the auth URL so the IdP echoes it
+// back in the ID token's "nonce" claim; Exchange then validates this binding.
+func (p *Provider) BeginPKCE(ctx context.Context, state, codeVerifier, nonce string) (string, error) {
 	if err := p.EnsureDiscovery(ctx); err != nil {
 		return "", err
 	}
@@ -196,6 +215,9 @@ func (p *Provider) BeginPKCE(ctx context.Context, state, codeVerifier string) (s
 	params.Set("state", state)
 	params.Set("code_challenge", codeChallenge(codeVerifier))
 	params.Set("code_challenge_method", "S256")
+	if nonce != "" {
+		params.Set("nonce", nonce)
+	}
 
 	return authEP + "?" + params.Encode(), nil
 }
@@ -212,7 +234,11 @@ type tokenResponse struct {
 
 // Exchange completes the PKCE flow: it POSTs to the token endpoint and returns
 // the raw ID token JWT plus parsed claims.
-func (p *Provider) Exchange(ctx context.Context, code, codeVerifier string) (string, map[string]any, error) {
+//
+// expectedNonce, when non-empty, is compared against the "nonce" claim in the
+// verified ID token. A mismatch returns ErrNonceMismatch. Pass an empty string
+// to skip the check (e.g. for backward-compat with pre-nonce state cookies).
+func (p *Provider) Exchange(ctx context.Context, code, codeVerifier, expectedNonce string) (string, map[string]any, error) {
 	if err := p.EnsureDiscovery(ctx); err != nil {
 		return "", nil, err
 	}
@@ -262,6 +288,20 @@ func (p *Provider) Exchange(ctx context.Context, code, codeVerifier string) (str
 	if err != nil {
 		return "", nil, err
 	}
+
+	// Nonce binding: if an expected nonce was supplied, verify it matches the
+	// claim in the token. An empty expectedNonce means the state cookie was
+	// created before nonce support was added (v0.2→v0.3 in-flight upgrade);
+	// we skip the check and log a one-time warning.
+	if expectedNonce == "" {
+		slog.Warn("oidc: nonce not present in PKCE state cookie; skipping nonce check (in-flight upgrade?)")
+	} else {
+		gotNonce, _ := claims["nonce"].(string)
+		if gotNonce != expectedNonce {
+			return "", nil, ErrNonceMismatch
+		}
+	}
+
 	return tr.IDToken, claims, nil
 }
 
