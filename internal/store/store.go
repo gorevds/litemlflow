@@ -198,6 +198,9 @@ type Store interface {
 	GetDashboard(ctx context.Context, workspaceID, project string) (*model.Dashboard, error)
 	SaveDashboard(ctx context.Context, workspaceID, project, widgetsJSON string) (*model.Dashboard, error)
 
+	// Analytics (templated DSL — see analytics.go for the contract).
+	AnalyticsQuery(ctx context.Context, q AnalyticsQuery) (*AnalyticsResult, error)
+
 	// Workspaces.
 	CreateWorkspace(ctx context.Context, w *model.Workspace) error
 	GetWorkspace(ctx context.Context, id string) (*model.Workspace, error)

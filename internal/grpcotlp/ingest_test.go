@@ -235,6 +235,9 @@ func (nopStore) GetDashboard(_ context.Context, _, _ string) (*model.Dashboard, 
 func (nopStore) SaveDashboard(_ context.Context, _, _, _ string) (*model.Dashboard, error) {
 	return nil, store.ErrNotFound
 }
+func (nopStore) AnalyticsQuery(_ context.Context, _ store.AnalyticsQuery) (*store.AnalyticsResult, error) {
+	return &store.AnalyticsResult{}, nil
+}
 
 // ---- in-memory gRPC server setup -------------------------------------------
 

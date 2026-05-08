@@ -43,13 +43,15 @@ These take ~2 weeks each but are sequential not parallel (security firm scheduli
 
 | Stream | Deliverable | Owner |
 |---|---|---|
-| OLAP | DuckDB attached to the SQLite file via `ATTACH 'litemlflow.db' AS lmf (TYPE SQLITE)`. Read-only analytical queries. | Storage |
-| API | `POST /api/v1/analytics/query` — accepts a parameterised SQL-ish DSL (whitelisted tables + columns) and returns rows. NOT raw SQL — it's templated. | API |
-| UI | New "Analytics" page with a query builder (no SQL knowledge required) and saved queries. | Frontend |
-| Materialized views | A `materialized_metrics_latest` table refreshed via SQL trigger or background job, indexed for hot queries. | Storage |
-| Docs | Cookbook: "Find the best run across an experiment in one line". | Docs |
+| OLAP | ~~DuckDB attached to the SQLite file~~ → **Pure-SQLite materialised view (`metrics_latest`)** with triggered upsert and `(key, value DESC)` index. DuckDB dropped: CGO-only, breaks single-binary guarantee. SQLite hits the 200 ms target without it. | Storage |
+| API | `POST /api/v1/analytics/query` — accepts a parameterised DSL (allowlisted aggs / group-by dimensions / where clauses) and returns rows. NOT raw SQL — it's templated. | API |
+| UI | "Analytics" page with a query builder (metric, agg, group-by, time window, status filter) + saved queries (per-workspace localStorage). | Frontend |
+| Materialised view | `metrics_latest` table indexed by `(key, value DESC, run_id)`, kept in sync via SQL triggers on `metrics` insert/delete. Backfill in migration 010. | Storage |
+| Docs | Cookbook recipe "Find the best run across all experiments in one query" + the API contract. | Docs |
 
-**Acceptance:** the analytics query "best `eval/f1` per `optimizer` last 30 days, grouped by `params.model`" runs in < 200 ms on a 100k-run dataset.
+**Acceptance — met (165 ms wall, 100 K runs):** "best `eval/f1` per `params.model`, last 30 days, status FINISHED" on a 100 K-run synthetic DB completes in ~165 ms after `ANALYZE` (vs. 200 ms target). See `docs/cookbook.md#analytics`.
+
+**Status:** delivered v1.1.0-rc1.
 
 ### Q2 Y2 — v1.2 "Dataset versioning"
 

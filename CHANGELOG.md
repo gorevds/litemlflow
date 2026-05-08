@@ -2,6 +2,36 @@
 
 All notable changes to LiteMLflow are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/) starting at v1.0.
 
+## [v1.1.0-rc1] — 2026-05-08
+
+First Y2 release. Theme: **analytics primitives** — cross-experiment OLAP queries without exporting to a notebook.
+
+### Added
+
+- **Analytics page + API.** `POST /api/v1/analytics/query` accepts a templated DSL (allowlisted aggregations, group-by dimensions, where clauses) and returns rows with `agg_value`, `run_count`, `best_run_id`. NO raw SQL is exposed to clients. UI at `#/analytics` provides a query builder, results table, bar chart for grouped queries, and saved queries (per-workspace `localStorage`).
+- **`metrics_latest` materialised view** (migration 010) — one row per (run_id, metric_key), kept in sync via `AFTER INSERT` / `AFTER DELETE` triggers on the `metrics` table. Indexed by `(key, value DESC, run_id)` so "best metric across runs" is an index range scan.
+- **Drag-and-drop dashboard widget reordering.** When a project dashboard is in edit mode, widgets are HTML5-draggable; the existing ↑/↓/✕ buttons stay as fallbacks for keyboard / accessibility.
+
+### Performance
+
+- **Headline benchmark met.** "Best `eval/f1` per `params.model`, last 30 days, status FINISHED" on a synthetic 100,000-run database completes in **~165 ms** wall-clock after `ANALYZE` (target was <200 ms). The execution path is one indexed GROUP BY scan + one indexed `LIMIT 1` lookup per result group.
+- Two-step strategy chosen over a single window-function pass after benchmarking: window functions materialised the full filtered partition in temp B-tree memory, costing ~3x more wall time on the 100k-run dataset.
+
+### Roadmap deviation
+
+- **Dropped DuckDB attach.** The Y2 plan called for `ATTACH 'litemlflow.db' AS lmf (TYPE SQLITE)` via DuckDB. We dropped it because DuckDB's Go bindings require CGO, which would break the project's "single binary, no CGO" guarantee. Pure-SQLite with a triggered materialised view + composite index meets the 200 ms budget without the trade-off.
+
+### Coverage
+
+- **Mutation testing on `internal/webhooks` raised from 53% → 70% efficacy.** New `echo_test.go` covers the in-process echo ring buffer (capacity, eviction, body truncation, concurrent record/list); new `sync_test.go` covers `SyncDelivery` for both the lmf:// echo path and a real HTTP roundtrip with HMAC headers. CI threshold raised from 50 → 65.
+
+### Docs
+
+- New cookbook recipe **"Analytics — find the best run across thousands"** with API examples and the agg/group-by/where reference.
+- `docs/roadmap-y2.md` updated to reflect the actual delivery (DuckDB → SQLite materialised view) with the rationale.
+
+
+
 ## [v1.0.0] — 2026-05-08
 
 **Stable v1.0.** Closes the year-1 roadmap. Production-ready under the hero use cases (solo MLE / small team) documented in `docs/vision.md`.

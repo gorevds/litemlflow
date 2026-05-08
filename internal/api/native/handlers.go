@@ -98,8 +98,41 @@ func (h *Handler) Mount(r chi.Router) {
 	// SEARCH: cross-experiment search — runs by name, experiments by name, prompts by name.
 	r.Get("/api/v1/search", h.GlobalSearch)
 
+	// ANALYTICS: templated DSL → safe SQL (v1.1).
+	r.Post("/api/v1/analytics/query", h.AnalyticsQuery)
+
 	// Webhooks, lineage, and experiment clone (W7.C).
 	h.mountWebhookRoutes(r)
+}
+
+// AnalyticsQuery handles POST /api/v1/analytics/query.
+//
+// Request body is the AnalyticsQuery DSL. Response is AnalyticsResult.
+// Reading is gated behind the workspace's RBAC viewer role; the DSL itself
+// is parameterised + allowlisted (see internal/store/analytics.go).
+func (h *Handler) AnalyticsQuery(w http.ResponseWriter, r *http.Request) {
+	var q store.AnalyticsQuery
+	if err := decodeJSON(r, &q); err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+	if q.WorkspaceID == "" {
+		q.WorkspaceID = r.Header.Get("X-LiteMLflow-Workspace")
+	}
+	if q.WorkspaceID == "" {
+		q.WorkspaceID = "default"
+	}
+	res, err := h.Store.AnalyticsQuery(r.Context(), q)
+	if err != nil {
+		// Validation errors map to 400; other failures to 500.
+		if strings.HasPrefix(err.Error(), "validate:") {
+			writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", err.Error())
+			return
+		}
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, res)
 }
 
 // projectDTO is one row in the projects-list response.

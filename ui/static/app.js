@@ -690,6 +690,7 @@
       if (hash.startsWith("/about"))   return this.renderAbout();
       if (hash.startsWith("/webhooks")) return this.renderWebhooks();
       if (hash.startsWith("/dashboards")) return this.renderDashboardsIndex();
+      if (hash.startsWith("/analytics")) return this.renderAnalytics();
       return this.renderExperiments();
     },
 
@@ -3070,8 +3071,9 @@ c.create_prompt("rag.system", "You are a helpful assistant.", description="seed 
 
       const renderBoard = () => {
         const cards = widgets.map((w, i) => `
-          <div class="widget" data-widget-idx="${i}">
+          <div class="widget${editMode ? " widget-draggable" : ""}" data-widget-idx="${i}"${editMode ? ' draggable="true"' : ""}>
             ${editMode ? `<div class="widget-actions" style="display:flex">
+              <span class="widget-handle" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
               <button class="widget-up" data-idx="${i}" title="Move up">↑</button>
               <button class="widget-down" data-idx="${i}" title="Move down">↓</button>
               <button class="widget-rm btn-danger" data-idx="${i}" title="Remove">✕</button>
@@ -3129,6 +3131,43 @@ c.create_prompt("rag.system", "You are a helpful assistant.", description="seed 
             if (i < widgets.length - 1) [widgets[i + 1], widgets[i]] = [widgets[i], widgets[i + 1]];
             renderBoard();
           }));
+
+          // HTML5 drag-and-drop for visual reordering. Indices in the DOM
+          // dataset are stable across the array swap because we re-render
+          // after every drop.
+          let dragSrc = -1;
+          $$(".widget-draggable", main).forEach(el => {
+            el.addEventListener("dragstart", (e) => {
+              dragSrc = Number(el.dataset.widgetIdx);
+              el.classList.add("widget-dragging");
+              if (e.dataTransfer) {
+                e.dataTransfer.effectAllowed = "move";
+                e.dataTransfer.setData("text/plain", String(dragSrc));
+              }
+            });
+            el.addEventListener("dragend", () => {
+              el.classList.remove("widget-dragging");
+              $$(".widget-drop-target", main).forEach(t => t.classList.remove("widget-drop-target"));
+              dragSrc = -1;
+            });
+            el.addEventListener("dragover", (e) => {
+              if (dragSrc < 0) return;
+              e.preventDefault();
+              if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+              el.classList.add("widget-drop-target");
+            });
+            el.addEventListener("dragleave", () => {
+              el.classList.remove("widget-drop-target");
+            });
+            el.addEventListener("drop", (e) => {
+              e.preventDefault();
+              const dst = Number(el.dataset.widgetIdx);
+              if (dragSrc < 0 || dragSrc === dst) return;
+              const [moved] = widgets.splice(dragSrc, 1);
+              widgets.splice(dst, 0, moved);
+              renderBoard();
+            });
+          });
         }
       };
 
@@ -3234,6 +3273,282 @@ c.create_prompt("rag.system", "You are a helpful assistant.", description="seed 
         onAdd(cfg);
         close();
       });
+    },
+
+    // ── Analytics (v1.1) ─────────────────────────────────────────────────────
+    async renderAnalytics() {
+      const main = $("#app");
+
+      // Persisted query and saved-queries list (per-workspace).
+      const wsKey = `litemlflow.analytics.${Workspace.get() || "default"}.last`;
+      const savedKey = `litemlflow.analytics.${Workspace.get() || "default"}.saved`;
+      const loadJSON = (k, def) => { try { return JSON.parse(localStorage.getItem(k)) || def; } catch { return def; } };
+      const saveJSON = (k, v) => localStorage.setItem(k, JSON.stringify(v));
+
+      let query = loadJSON(wsKey, {
+        metric: "",
+        agg: "max",
+        group_by: "",
+        where: { lifecycle: "active" },
+        order_by: "value_desc",
+        limit: 100,
+      });
+      const savedQueries = loadJSON(savedKey, []); // [{name, query}]
+
+      // Fetch experiments (for the experiment-id picker) + project tags.
+      let experiments = [];
+      try {
+        const data = await fetchJSON("/api/2.0/mlflow/experiments/search?max_results=500");
+        experiments = (data.experiments || []).filter(e => e.lifecycle_stage === "active");
+      } catch {}
+
+      // Pull a sample of metric/param/tag keys via a probe run from each
+      // experiment (best effort — keys are autocomplete hints, not required).
+      const sampleSize = Math.min(experiments.length, 8);
+      const sampleRuns = await Promise.all(
+        experiments.slice(0, sampleSize).map(e =>
+          fetchJSON("/api/2.0/mlflow/runs/search", {
+            method: "POST",
+            body: JSON.stringify({ experiment_ids: [String(e.experiment_id)], max_results: 5 }),
+          }).then(r => r.runs || []).catch(() => [])
+        )
+      );
+      const allRuns = sampleRuns.flat();
+      const metricKeys = [...new Set(allRuns.flatMap(r => (r.data?.metrics || []).map(m => m.key)))].sort();
+      const paramKeys  = [...new Set(allRuns.flatMap(r => (r.data?.params  || []).map(p => p.key)))].sort();
+      const tagKeys    = [...new Set(allRuns.flatMap(r => (r.data?.tags    || []).map(t => t.key).filter(k => !k.startsWith("mlflow.") && !k.startsWith("lmf."))))].sort();
+
+      const metricOpts = metricKeys.length
+        ? metricKeys.map(k => `<option value="${escapeHTML(k)}">${escapeHTML(k)}</option>`).join("")
+        : `<option value="">(no metrics seen — type a key)</option>`;
+      const groupOpts = `
+        <option value="">(no grouping)</option>
+        <option value="experiment_id">experiment_id</option>
+        <option value="status">status</option>
+        ${paramKeys.map(k => `<option value="params.${escapeHTML(k)}">params.${escapeHTML(k)}</option>`).join("")}
+        ${tagKeys.map(k => `<option value="tags.${escapeHTML(k)}">tags.${escapeHTML(k)}</option>`).join("")}
+      `;
+
+      // Helpers: time-window presets
+      const windowPresets = [
+        { label: "All time", value: 0 },
+        { label: "Last 24 hours", value: 24 * 3600 * 1000 },
+        { label: "Last 7 days", value: 7 * 24 * 3600 * 1000 },
+        { label: "Last 30 days", value: 30 * 24 * 3600 * 1000 },
+        { label: "Last 90 days", value: 90 * 24 * 3600 * 1000 },
+      ];
+
+      const buildToolbar = () => `
+        <div class="toolbar" style="align-items:flex-end;flex-wrap:wrap;gap:12px">
+          <label class="aq-field">
+            <span>Metric</span>
+            <input list="aq-metric-list" id="aq-metric" placeholder="e.g. eval/f1" value="${escapeHTML(query.metric || "")}" />
+            <datalist id="aq-metric-list">${metricOpts}</datalist>
+          </label>
+          <label class="aq-field">
+            <span>Agg</span>
+            <select id="aq-agg">
+              <option value="max"${query.agg === "max" ? " selected" : ""}>max</option>
+              <option value="min"${query.agg === "min" ? " selected" : ""}>min</option>
+              <option value="avg"${query.agg === "avg" ? " selected" : ""}>avg</option>
+              <option value="last"${query.agg === "last" ? " selected" : ""}>last</option>
+            </select>
+          </label>
+          <label class="aq-field">
+            <span>Group by</span>
+            <select id="aq-group">${groupOpts.replace(`value="${escapeHTML(query.group_by || "")}"`, `value="${escapeHTML(query.group_by || "")}" selected`)}</select>
+          </label>
+          <label class="aq-field">
+            <span>Time window</span>
+            <select id="aq-window">
+              ${windowPresets.map(w => `<option value="${w.value}"${(query._window === w.value || (w.value === 0 && !query._window)) ? " selected" : ""}>${escapeHTML(w.label)}</option>`).join("")}
+            </select>
+          </label>
+          <label class="aq-field">
+            <span>Status</span>
+            <select id="aq-status" multiple size="1" style="min-width:140px">
+              <option value="FINISHED"${(query.where.status||[]).includes("FINISHED") ? " selected" : ""}>FINISHED</option>
+              <option value="FAILED"${(query.where.status||[]).includes("FAILED") ? " selected" : ""}>FAILED</option>
+              <option value="RUNNING"${(query.where.status||[]).includes("RUNNING") ? " selected" : ""}>RUNNING</option>
+              <option value="KILLED"${(query.where.status||[]).includes("KILLED") ? " selected" : ""}>KILLED</option>
+            </select>
+          </label>
+          <label class="aq-field">
+            <span>Order</span>
+            <select id="aq-order">
+              <option value="value_desc"${query.order_by === "value_desc" ? " selected" : ""}>value desc</option>
+              <option value="value_asc"${query.order_by === "value_asc" ? " selected" : ""}>value asc</option>
+              <option value="count_desc"${query.order_by === "count_desc" ? " selected" : ""}>run count desc</option>
+              <option value="group_asc"${query.order_by === "group_asc" ? " selected" : ""}>group asc</option>
+            </select>
+          </label>
+          <label class="aq-field">
+            <span>Limit</span>
+            <input type="number" id="aq-limit" min="1" max="1000" value="${query.limit || 100}" style="width:80px;min-width:0"/>
+          </label>
+          <button id="aq-run" class="btn-primary">Run query</button>
+          <button id="aq-save">Save</button>
+          <button id="aq-clear" class="btn-ghost">Clear</button>
+        </div>`;
+
+      const buildSavedList = () => savedQueries.length === 0 ? "" : `
+        <div class="saved-queries">
+          <strong>Saved:</strong>
+          ${savedQueries.map((s, i) => `
+            <button class="saved-q" data-saved-idx="${i}" title="Load this query">${escapeHTML(s.name)}</button>
+            <button class="saved-q-rm btn-ghost" data-saved-idx="${i}" title="Delete">✕</button>
+          `).join("")}
+        </div>`;
+
+      const renderResultRows = (result) => {
+        const rows = (result.rows || []).map(r => `
+          <tr>
+            <td>${r.group != null && r.group !== "" ? escapeHTML(String(r.group)) : `<span style="color:var(--fg-muted)">— total —</span>`}</td>
+            <td class="numeric mono">${r.agg_value.toPrecision(5)}</td>
+            <td class="numeric">${r.run_count}</td>
+            <td>${r.best_run_id ? `<a href="#/experiments/${r.best_experiment_id}/runs/${r.best_run_id}">${escapeHTML(r.best_run_name || r.best_run_id.slice(0,8))}</a>` : "—"}</td>
+          </tr>`).join("");
+        return rows || `<tr><td colspan="4" class="empty">No matching runs.</td></tr>`;
+      };
+
+      const renderResultChart = (result) => {
+        const rows = (result.rows || []).filter(r => r.group != null && r.group !== "");
+        if (rows.length < 2) return "";
+        const w0 = 720, h0 = 200, padL = 80, padR = 12, padT = 12, padB = 36;
+        const innerH = h0 - padT - padB;
+        const innerW = w0 - padL - padR;
+        const vals = rows.map(r => r.agg_value);
+        const vMax = Math.max(...vals, 0);
+        const vMin = Math.min(...vals, 0);
+        const vSpan = Math.max(1e-9, vMax - vMin);
+        const barW = Math.max(8, innerW / rows.length - 6);
+        const bars = rows.map((r, i) => {
+          const x = padL + i * (innerW / rows.length) + 3;
+          const yTop = padT + (1 - (r.agg_value - vMin) / vSpan) * innerH;
+          const barH = innerH - (yTop - padT);
+          return `
+            <rect x="${x.toFixed(1)}" y="${yTop.toFixed(1)}" width="${barW.toFixed(1)}" height="${Math.max(2, barH).toFixed(1)}" fill="var(--accent)" opacity="0.85" />
+            <text x="${(x + barW / 2).toFixed(1)}" y="${h0 - padB + 14}" text-anchor="middle" fill="var(--fg-muted)" font-size="10">${escapeHTML(String(r.group).slice(0, 14))}</text>
+            <text x="${(x + barW / 2).toFixed(1)}" y="${(yTop - 3).toFixed(1)}" text-anchor="middle" fill="var(--fg)" font-size="10">${r.agg_value.toPrecision(3)}</text>`;
+        }).join("");
+        return `
+          <h3 style="margin-bottom:6px">Distribution</h3>
+          <svg viewBox="0 0 ${w0} ${h0}" style="width:100%;height:auto;max-height:240px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:8px">
+            <line x1="${padL}" y1="${padT + innerH}" x2="${w0 - padR}" y2="${padT + innerH}" stroke="var(--border)" />
+            <text x="${padL - 4}" y="${padT + 4}" text-anchor="end" fill="var(--fg-muted)" font-size="10">${vMax.toPrecision(3)}</text>
+            <text x="${padL - 4}" y="${padT + innerH}" text-anchor="end" fill="var(--fg-muted)" font-size="10">${vMin.toPrecision(3)}</text>
+            ${bars}
+          </svg>`;
+      };
+
+      const renderResults = (result) => {
+        const meta = `<div style="color:var(--fg-muted);font-size:12px;margin-bottom:8px">
+          ${(result.rows || []).length} groups · ${result.total_runs_scanned} runs scanned · ${result.execution_ms}ms
+        </div>`;
+        return `
+          ${meta}
+          ${renderResultChart(result)}
+          <div class="card" style="padding:0;margin-top:10px">
+            <table>
+              <thead>
+                <tr><th>Group</th><th class="numeric">${escapeHTML(query.agg.toUpperCase())} ${escapeHTML(query.metric)}</th><th class="numeric">Runs</th><th>Best run</th></tr>
+              </thead>
+              <tbody>${renderResultRows(result)}</tbody>
+            </table>
+          </div>`;
+      };
+
+      const collectQuery = () => {
+        const statusEl = $("#aq-status");
+        const selected = Array.from(statusEl.options).filter(o => o.selected).map(o => o.value);
+        const win = parseInt($("#aq-window").value, 10) || 0;
+        return {
+          metric: $("#aq-metric").value.trim(),
+          agg: $("#aq-agg").value,
+          group_by: $("#aq-group").value,
+          order_by: $("#aq-order").value,
+          limit: parseInt($("#aq-limit").value, 10) || 100,
+          where: {
+            lifecycle: "active",
+            status: selected,
+            time_after: win > 0 ? Date.now() - win : 0,
+          },
+          _window: win, // UI-only, not sent
+        };
+      };
+
+      const runQuery = async () => {
+        const q = collectQuery();
+        if (!q.metric) {
+          $("#aq-results").innerHTML = `<div class="empty">Enter a metric key (e.g. <code>eval/f1</code>, <code>loss</code>) and run.</div>`;
+          return;
+        }
+        $("#aq-results").innerHTML = `<div class="loading">Running query…</div>`;
+        const body = { ...q };
+        delete body._window;
+        body.where = { ...body.where };
+        if (!body.where.status || !body.where.status.length) delete body.where.status;
+        if (!body.where.time_after) delete body.where.time_after;
+        try {
+          const result = await fetchJSON("/api/v1/analytics/query", {
+            method: "POST",
+            body: JSON.stringify(body),
+          });
+          query = q;
+          saveJSON(wsKey, query);
+          $("#aq-results").innerHTML = renderResults(result);
+        } catch (err) {
+          $("#aq-results").innerHTML = `<div class="empty">Query failed: ${escapeHTML(String(err))}</div>`;
+        }
+      };
+
+      main.innerHTML = `
+        <div class="toolbar">
+          <h1 style="margin:0">Analytics</h1>
+          <span style="color:var(--fg-muted);font-size:13px">Cross-experiment OLAP — find best runs, group by params/tags, filter by status & time.</span>
+        </div>
+        ${buildToolbar()}
+        ${buildSavedList()}
+        <div id="aq-results" style="margin-top:14px">
+          <div class="empty">Configure a query above, then <strong>Run query</strong>. Results render as a table + bar chart for grouped queries.</div>
+        </div>`;
+
+      // Wire main run button
+      $("#aq-run").addEventListener("click", runQuery);
+      $("#aq-clear").addEventListener("click", () => {
+        localStorage.removeItem(wsKey);
+        App.renderAnalytics();
+      });
+      $("#aq-save").addEventListener("click", () => {
+        const name = prompt("Save this query as:");
+        if (!name) return;
+        const q = collectQuery();
+        savedQueries.push({ name, query: q });
+        saveJSON(savedKey, savedQueries);
+        App.renderAnalytics();
+      });
+
+      // Saved-query buttons
+      $$(".saved-q", main).forEach(b => b.addEventListener("click", () => {
+        const idx = parseInt(b.dataset.savedIdx, 10);
+        const q = savedQueries[idx]?.query;
+        if (!q) return;
+        query = q;
+        saveJSON(wsKey, query);
+        App.renderAnalytics();
+      }));
+      $$(".saved-q-rm", main).forEach(b => b.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const idx = parseInt(b.dataset.savedIdx, 10);
+        savedQueries.splice(idx, 1);
+        saveJSON(savedKey, savedQueries);
+        App.renderAnalytics();
+      }));
+
+      // Auto-run if we have a stored query with a metric.
+      if (query.metric) {
+        runQuery();
+      }
     },
 
     // ── About ────────────────────────────────────────────────────────────────

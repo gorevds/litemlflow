@@ -277,6 +277,9 @@ func (s *stubStore) GetDashboard(_ context.Context, _, _ string) (*model.Dashboa
 func (s *stubStore) SaveDashboard(_ context.Context, _, _, _ string) (*model.Dashboard, error) {
 	return nil, store.ErrNotFound
 }
+func (s *stubStore) AnalyticsQuery(_ context.Context, _ store.AnalyticsQuery) (*store.AnalyticsResult, error) {
+	return &store.AnalyticsResult{}, nil
+}
 
 // --- fuzz setup ---
 

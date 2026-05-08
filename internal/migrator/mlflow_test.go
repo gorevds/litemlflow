@@ -551,6 +551,9 @@ func (s *inMemStore) GetDashboard(_ context.Context, _, _ string) (*model.Dashbo
 func (s *inMemStore) SaveDashboard(_ context.Context, _, _, _ string) (*model.Dashboard, error) {
 	return nil, store.ErrNotFound
 }
+func (s *inMemStore) AnalyticsQuery(_ context.Context, _ store.AnalyticsQuery) (*store.AnalyticsResult, error) {
+	return &store.AnalyticsResult{}, nil
+}
 
 // inMemArtifactStore records uploaded artifacts.
 type inMemArtifactStore struct {

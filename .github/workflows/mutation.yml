@@ -32,4 +32,4 @@ jobs:
       - name: mutation — store
         run: gremlins unleash --threshold-efficacy 70 ./internal/store/
       - name: mutation — webhooks
-        run: gremlins unleash --threshold-efficacy 50 ./internal/webhooks/
+        run: gremlins unleash --threshold-efficacy 65 ./internal/webhooks/
