@@ -44,6 +44,15 @@ langchain = [
 [tool.hatch.build.targets.wheel]
 packages = ["litemlflow"]
 
+# Editable installs: hatchling needs an explicit dev-mode source map so a
+# `pip install -e .` puts a path entry on sys.path. Without this, the dist-info
+# is created but `import litemlflow` fails outside the python/ directory.
+[tool.hatch.build.targets.wheel.sources]
+"litemlflow" = "litemlflow"
+
+[tool.hatch.build]
+dev-mode-dirs = ["."]
+
 [tool.ruff]
 line-length = 100
 target-version = "py39"
