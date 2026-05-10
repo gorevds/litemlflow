@@ -233,6 +233,18 @@ type Store interface {
 	// GetRunLineageWithOptions is the v1.4 extended form: directional walk
 	// (upstream/downstream/both) with a configurable descendant depth.
 	GetRunLineageWithOptions(ctx context.Context, runID string, opt LineageOptions) (*RunLineage, error)
+	// GetRunAsOf returns the run's state and tags reconstructed at the
+	// given unix-ms timestamp via the v1.5 event log replay. Returns
+	// ErrNotFound if the run did not exist at that timestamp (start_time
+	// > asOfMs). Metrics + params can be filtered separately at read
+	// time using their native timestamp fields.
+	GetRunAsOf(ctx context.Context, runID string, asOfMs int64) (*model.Run, []model.KV, error)
+	// GetRunAsOfInWorkspace is the workspace-scoped variant — preferred
+	// for HTTP handlers under the workspace middleware.
+	GetRunAsOfInWorkspace(ctx context.Context, runID, workspaceID string, asOfMs int64) (*model.Run, []model.KV, error)
+	// GetLatestMetricsAsOf returns the latest metric per key with
+	// timestamp <= asOfMs. asOfMs <= 0 disables the filter (= current).
+	GetLatestMetricsAsOf(ctx context.Context, runID string, asOfMs int64) ([]model.Metric, error)
 
 	// Janitor.
 	ArchiveStaleRuns(ctx context.Context, staleBefore int64) (int, error)

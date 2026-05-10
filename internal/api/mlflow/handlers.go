@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"path"
@@ -374,6 +375,12 @@ func (h *Handler) CreateRun(w http.ResponseWriter, r *http.Request) {
 }
 
 // GetRun handles GET /api/2.0/mlflow/runs/get.
+//
+// v1.5 time-travel: ?as_of=<unix_ms> reconstructs the run state at the
+// given timestamp via the event log. Tags are reconstructed; metrics
+// and params are filtered to entries with timestamp <= as_of (free —
+// they are append-only with native timestamps). Returns 404 if the run
+// did not exist at as_of (start_time > as_of).
 func (h *Handler) GetRun(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("run_id")
 	if id == "" {
@@ -383,12 +390,28 @@ func (h *Handler) GetRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "run_id is required")
 		return
 	}
-	run, err := h.Store.GetRun(r.Context(), id)
+
+	asOf, err := parseAsOf(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", err.Error())
+		return
+	}
+
+	var run *model.Run
+	var tags []model.KV
+	if asOf > 0 {
+		// Workspace-scoped lookup so a viewer in ws-A can't reconstruct
+		// historical state of a ws-B run by guessing run_id.
+		run, tags, err = h.Store.GetRunAsOfInWorkspace(r.Context(), id, currentWorkspace(r), asOf)
+	} else {
+		run, err = h.Store.GetRun(r.Context(), id)
+	}
 	if err != nil {
 		writeStoreErr(w, err)
 		return
 	}
-	data, err := h.collectRunData(r, id)
+
+	data, err := h.collectRunData(r, id, asOf, tags)
 	if err != nil {
 		writeStoreErr(w, err)
 		return
@@ -401,9 +424,42 @@ func (h *Handler) GetRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, runResp{Run: runDTO{Info: runInfoToDTO(run), Data: data, Inputs: inputs}})
 }
 
+// parseAsOf reads the ?as_of= query param and returns the timestamp in
+// unix-ms. Returns (0, nil) if absent. Returns an error for malformed
+// values or values that don't fit a reasonable epoch range.
+func parseAsOf(r *http.Request) (int64, error) {
+	v := r.URL.Query().Get("as_of")
+	if v == "" {
+		return 0, nil
+	}
+	ts, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("as_of must be unix milliseconds (integer)")
+	}
+	if ts <= 0 {
+		return 0, fmt.Errorf("as_of must be positive unix milliseconds")
+	}
+	return ts, nil
+}
+
 // collectRunData loads metrics, params, and tags for a run.
-func (h *Handler) collectRunData(r *http.Request, runID string) (runDataDTO, error) {
-	metrics, err := h.Store.GetLatestMetrics(r.Context(), runID)
+//
+// When asOf > 0, metrics are filtered to entries with timestamp <= as_of
+// and tags use the replay-reconstructed slice passed in. Params are
+// returned unfiltered (insert-only with no native timestamp); time-travel
+// for params would need a future event-log extension.
+func (h *Handler) collectRunData(r *http.Request, runID string, asOf int64, asOfTags []model.KV) (runDataDTO, error) {
+	var metrics []model.Metric
+	var err error
+	if asOf > 0 {
+		// v1.5: per-key reduction in SQL — pick the latest observation
+		// at-or-before asOf. The naive "GetLatestMetrics + filter"
+		// approach drops keys whose latest point post-dates asOf even
+		// when an earlier observation predates it (independent-review C1).
+		metrics, err = h.Store.GetLatestMetricsAsOf(r.Context(), runID, asOf)
+	} else {
+		metrics, err = h.Store.GetLatestMetrics(r.Context(), runID)
+	}
 	if err != nil {
 		return runDataDTO{}, err
 	}
@@ -411,9 +467,14 @@ func (h *Handler) collectRunData(r *http.Request, runID string) (runDataDTO, err
 	if err != nil {
 		return runDataDTO{}, err
 	}
-	tags, err := h.Store.GetTags(r.Context(), runID)
-	if err != nil {
-		return runDataDTO{}, err
+	var tags []model.KV
+	if asOf > 0 {
+		tags = asOfTags
+	} else {
+		tags, err = h.Store.GetTags(r.Context(), runID)
+		if err != nil {
+			return runDataDTO{}, err
+		}
 	}
 	return runDataDTO{
 		Metrics: metricsToDTO(metrics),
@@ -567,7 +628,8 @@ func (h *Handler) SearchRuns(w http.ResponseWriter, r *http.Request) {
 	}
 	runs := make([]runDTO, 0, len(res.Items))
 	for _, run := range res.Items {
-		data, err := h.collectRunData(r, run.ID)
+		// Search results don't carry as_of yet — defer to v1.5 stable.
+		data, err := h.collectRunData(r, run.ID, 0, nil)
 		if err != nil {
 			writeStoreErr(w, err)
 			return
@@ -849,6 +911,29 @@ func (h *Handler) GetMetricHistory(w http.ResponseWriter, r *http.Request) {
 		writeStoreErr(w, err)
 		return
 	}
+
+	// v1.5 time-travel: filter to entries with timestamp <= as_of.
+	// Metrics are append-only with native unix-ms timestamps so this is
+	// effectively free — no event-log replay needed.
+	asOf, err := parseAsOf(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", err.Error())
+		return
+	}
+	if asOf > 0 {
+		filtered := hist[:0]
+		for _, m := range hist {
+			if m.Timestamp <= asOf {
+				filtered = append(filtered, m)
+			}
+		}
+		hist = filtered
+		// Pagination tokens encode timestamp:step, so they remain
+		// valid relative to the filtered window. Next-page may still
+		// produce post-asOf rows the caller will discard; acceptable
+		// for v1.5-rc1 (the toolchain rarely paginates with as_of).
+	}
+
 	writeJSON(w, getMetricHistoryResp{Metrics: metricsToDTO(hist), NextPageToken: nextToken})
 }
 

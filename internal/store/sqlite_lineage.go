@@ -25,26 +25,49 @@ import (
 
 // setParentRunID writes parent_run_id into the runs row for an existing run,
 // and mirrors it as a tag `mlflow.parentRunId`. Called right after insert.
+//
+// v1.5: emits both run_parent and tag_set events so replay can undo each
+// side. The tag is inserted via raw SQL (not SetTag) to avoid the
+// SetTag→syncParentRunIDFromTag→setParentRunID cycle that would
+// double-write events.
 func (s *SQLiteStore) setParentRunID(ctx context.Context, runID, parentRunID string) error {
 	if parentRunID == "" {
 		return nil
 	}
+	before := s.captureRunBefore(ctx, runID)
 	_, err := s.db.ExecContext(ctx, `UPDATE runs SET parent_run_id = ? WHERE id = ?`, parentRunID, runID)
 	if err != nil {
 		return fmt.Errorf("set parent_run_id: %w", err)
 	}
-	// Mirror as tag for MLflow client compat.
+	if before != nil {
+		s.tryWriteRunEvent(ctx, EventRunParent, runID, map[string]any{"before": before})
+	}
+	// Mirror as tag for MLflow client compat. Capture pre-tag value so
+	// replay can correctly undo the upsert.
+	tagBefore, hadTag := s.readTagValue(ctx, runID, "mlflow.parentRunId")
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO tags(run_id, key, value) VALUES (?, 'mlflow.parentRunId', ?)
 		ON CONFLICT(run_id, key) DO UPDATE SET value = excluded.value
 	`, runID, parentRunID)
-	return err
+	if err != nil {
+		return err
+	}
+	tagPayload := map[string]any{"key": "mlflow.parentRunId", "value": parentRunID}
+	if hadTag {
+		tagPayload["before"] = tagBefore
+	}
+	s.tryWriteRunEvent(ctx, EventTagSet, runID, tagPayload)
+	return nil
 }
 
 // syncParentRunIDFromTag reads mlflow.parentRunId tag and writes it to the column.
 // Called after a set-tag on mlflow.parentRunId.
 func (s *SQLiteStore) syncParentRunIDFromTag(ctx context.Context, runID, tagValue string) error {
+	before := s.captureRunBefore(ctx, runID)
 	_, err := s.db.ExecContext(ctx, `UPDATE runs SET parent_run_id = ? WHERE id = ?`, tagValue, runID)
+	if err == nil && before != nil {
+		s.tryWriteRunEvent(ctx, EventRunParent, runID, map[string]any{"before": before})
+	}
 	return err
 }
 
@@ -385,6 +408,18 @@ func (s *SQLiteStore) ArchiveStaleRuns(ctx context.Context, staleBefore int64) (
 	}
 	defer updateStmt.Close()
 
+	// v1.5 time-travel: capture pre-state per run BEFORE the bulk
+	// UPDATE so the post-commit event writes have a meaningful `before`.
+	// Also capture pre-tag values so the auto-archive tag_set is undoable.
+	beforeState := make(map[string]map[string]any, len(ids))
+	beforeTag := make(map[string]string, len(ids))
+	for _, id := range ids {
+		beforeState[id] = s.captureRunBefore(ctx, id)
+		if v, ok := s.readTagValue(ctx, id, "lmf.auto_archived"); ok {
+			beforeTag[id] = v
+		}
+	}
+
 	for _, id := range ids {
 		if _, err := updateStmt.ExecContext(ctx, now, id); err != nil {
 			return 0, fmt.Errorf("update run %s: %w", id, err)
@@ -396,6 +431,25 @@ func (s *SQLiteStore) ArchiveStaleRuns(ctx context.Context, staleBefore int64) (
 
 	if err := tx.Commit(); err != nil {
 		return 0, err
+	}
+
+	// Events are written after commit so a rollback doesn't leave
+	// orphan event rows pointing at no-op state. Failures here surface
+	// in slog; the bulk operation itself has already succeeded.
+	for _, id := range ids {
+		if before := beforeState[id]; before != nil {
+			if err := s.writeRunEvent(ctx, EventRunUpdate, id,
+				map[string]any{"before": before}); err != nil {
+				slog.Warn("janitor: event write failed", "run_id", id, "kind", EventRunUpdate, "err", err)
+			}
+		}
+		tagPayload := map[string]any{"key": "lmf.auto_archived", "value": "stale"}
+		if v, ok := beforeTag[id]; ok {
+			tagPayload["before"] = v
+		}
+		if err := s.writeRunEvent(ctx, EventTagSet, id, tagPayload); err != nil {
+			slog.Warn("janitor: event write failed", "run_id", id, "kind", EventTagSet, "err", err)
+		}
 	}
 	return len(ids), nil
 }

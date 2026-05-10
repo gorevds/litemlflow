@@ -197,6 +197,15 @@ func (NopStore) GetRunLineage(context.Context, string) (*store.RunLineage, error
 func (NopStore) GetRunLineageWithOptions(context.Context, string, store.LineageOptions) (*store.RunLineage, error) {
 	return nil, store.ErrNotFound
 }
+func (NopStore) GetRunAsOf(context.Context, string, int64) (*model.Run, []model.KV, error) {
+	return nil, nil, store.ErrNotFound
+}
+func (NopStore) GetRunAsOfInWorkspace(context.Context, string, string, int64) (*model.Run, []model.KV, error) {
+	return nil, nil, store.ErrNotFound
+}
+func (NopStore) GetLatestMetricsAsOf(context.Context, string, int64) ([]model.Metric, error) {
+	return nil, nil
+}
 
 // Janitor.
 func (NopStore) ArchiveStaleRuns(context.Context, int64) (int, error) { return 0, nil }

@@ -505,6 +505,10 @@ func (s *SQLiteStore) UpdateRun(ctx context.Context, id string, status *string, 
 	if len(sets) == 0 {
 		return nil
 	}
+	// v1.5 time-travel: capture pre-state BEFORE the UPDATE, then write
+	// the event AFTER. If the UPDATE returns ErrNotFound the event is
+	// not written. See sqlite_events.go for the durability tradeoff.
+	before := s.captureRunBefore(ctx, id)
 	args = append(args, id)
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE runs SET `+strings.Join(sets, ", ")+` WHERE id = ?`, args...)
@@ -515,6 +519,9 @@ func (s *SQLiteStore) UpdateRun(ctx context.Context, id string, status *string, 
 	if n == 0 {
 		return ErrNotFound
 	}
+	if before != nil {
+		s.tryWriteRunEvent(ctx, EventRunUpdate, id, map[string]any{"before": before})
+	}
 	return nil
 }
 
@@ -523,6 +530,7 @@ func (s *SQLiteStore) SetRunLifecycle(ctx context.Context, id, stage string) err
 	if stage != model.LifecycleActive && stage != model.LifecycleDeleted {
 		return fmt.Errorf("invalid lifecycle stage %q", stage)
 	}
+	before := s.captureRunBefore(ctx, id)
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE runs SET lifecycle_stage = ? WHERE id = ?`, stage, id)
 	if err != nil {
@@ -531,6 +539,9 @@ func (s *SQLiteStore) SetRunLifecycle(ctx context.Context, id, stage string) err
 	n, _ := res.RowsAffected()
 	if n == 0 {
 		return ErrNotFound
+	}
+	if before != nil {
+		s.tryWriteRunEvent(ctx, EventRunLifecycle, id, map[string]any{"before": before})
 	}
 	return nil
 }
@@ -1113,6 +1124,9 @@ func (s *SQLiteStore) SetTag(ctx context.Context, runID string, t model.KV) erro
 	if err := assertRunExists(ctx, s.db, runID); err != nil {
 		return err
 	}
+	// v1.5 time-travel: capture the current value (if any) so the
+	// event payload's `before` lets us undo the upsert at as-of read time.
+	beforeVal, hadBefore := s.readTagValue(ctx, runID, t.Key)
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO tags(run_id, key, value) VALUES (?, ?, ?)
 		ON CONFLICT(run_id, key) DO UPDATE SET value = excluded.value
@@ -1120,6 +1134,11 @@ func (s *SQLiteStore) SetTag(ctx context.Context, runID string, t model.KV) erro
 	if err != nil {
 		return err
 	}
+	payload := map[string]any{"key": t.Key, "value": t.Value}
+	if hadBefore {
+		payload["before"] = beforeVal
+	}
+	s.tryWriteRunEvent(ctx, EventTagSet, runID, payload)
 	// Keep parent_run_id column in sync with the MLflow client's tag.
 	if t.Key == "mlflow.parentRunId" && t.Value != "" {
 		return s.syncParentRunIDFromTag(ctx, runID, t.Value)
@@ -1128,9 +1147,19 @@ func (s *SQLiteStore) SetTag(ctx context.Context, runID string, t model.KV) erro
 }
 
 // SetTags upserts multiple tags atomically.
+//
+// v1.5 time-travel: capture each tag's pre-value BEFORE the txn so each
+// tag_set event has a correct `before`. Events are written AFTER commit
+// so a rollback doesn't leave orphan event rows.
 func (s *SQLiteStore) SetTags(ctx context.Context, runID string, ts []model.KV) error {
 	if err := assertRunExists(ctx, s.db, runID); err != nil {
 		return err
+	}
+	beforeVals := make(map[string]string, len(ts))
+	for _, t := range ts {
+		if v, ok := s.readTagValue(ctx, runID, t.Key); ok {
+			beforeVals[t.Key] = v
+		}
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1153,11 +1182,22 @@ func (s *SQLiteStore) SetTags(ctx context.Context, runID string, ts []model.KV) 
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	for _, t := range ts {
+		payload := map[string]any{"key": t.Key, "value": t.Value}
+		if v, ok := beforeVals[t.Key]; ok {
+			payload["before"] = v
+		}
+		s.tryWriteRunEvent(ctx, EventTagSet, runID, payload)
+	}
+	return nil
 }
 
 // DeleteTag removes a tag. Returns ErrNotFound if absent.
 func (s *SQLiteStore) DeleteTag(ctx context.Context, runID, key string) error {
+	beforeVal, hadBefore := s.readTagValue(ctx, runID, key)
 	res, err := s.db.ExecContext(ctx, `DELETE FROM tags WHERE run_id = ? AND key = ?`, runID, key)
 	if err != nil {
 		return err
@@ -1166,7 +1206,26 @@ func (s *SQLiteStore) DeleteTag(ctx context.Context, runID, key string) error {
 	if n == 0 {
 		return ErrNotFound
 	}
+	if hadBefore {
+		s.tryWriteRunEvent(ctx, EventTagDelete, runID, map[string]any{
+			"key":    key,
+			"before": beforeVal,
+		})
+	}
 	return nil
+}
+
+// readTagValue returns (value, true) if a tag exists for (runID, key),
+// or ("", false) otherwise. Used by SetTag/DeleteTag to capture the
+// pre-state for time-travel events.
+func (s *SQLiteStore) readTagValue(ctx context.Context, runID, key string) (string, bool) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT value FROM tags WHERE run_id = ? AND key = ?`, runID, key)
+	var v string
+	if err := row.Scan(&v); err != nil {
+		return "", false
+	}
+	return v, true
 }
 
 // GetMetricHistory returns observations for one metric key on one run.
@@ -1250,16 +1309,39 @@ func (s *SQLiteStore) GetMetricHistoryDownsampled(ctx context.Context, runID, ke
 
 // GetLatestMetrics returns the most recent value of every metric for a run.
 func (s *SQLiteStore) GetLatestMetrics(ctx context.Context, runID string) ([]model.Metric, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	return s.getLatestMetricsAsOf(ctx, runID, 0)
+}
+
+// GetLatestMetricsAsOf returns the latest metric per key whose timestamp
+// is at-or-before asOfMs. asOfMs <= 0 disables the filter (current state).
+//
+// v1.5 time-travel: the naive "GetLatestMetrics + handler-side filter"
+// approach silently drops metric keys whose latest point is post-asOf
+// even when an earlier observation predates asOf — this is what the
+// independent review flagged as critical (C1). The fix: do the per-key
+// "latest observation <= asOf" reduction in SQL.
+func (s *SQLiteStore) GetLatestMetricsAsOf(ctx context.Context, runID string, asOfMs int64) ([]model.Metric, error) {
+	return s.getLatestMetricsAsOf(ctx, runID, asOfMs)
+}
+
+func (s *SQLiteStore) getLatestMetricsAsOf(ctx context.Context, runID string, asOfMs int64) ([]model.Metric, error) {
+	q := `
 		SELECT key, value, timestamp, step FROM metrics m1
 		WHERE run_id = ?
 		  AND (timestamp, step) = (
 			SELECT timestamp, step FROM metrics m2
-			WHERE m2.run_id = m1.run_id AND m2.key = m1.key
+			WHERE m2.run_id = m1.run_id AND m2.key = m1.key`
+	args := []any{runID}
+	if asOfMs > 0 {
+		q += ` AND m2.timestamp <= ?`
+		args = append(args, asOfMs)
+	}
+	q += `
 			ORDER BY timestamp DESC, step DESC LIMIT 1
 		  )
 		ORDER BY key ASC
-	`, runID)
+	`
+	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
