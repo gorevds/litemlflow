@@ -282,6 +282,15 @@ func isPublicPath(p string) bool {
 		"/api/v1/auth/oidc/start", "/api/v1/auth/oidc/callback":
 		return true
 	}
+	// FEDERATION (v1.3): peer-callable endpoints validate themselves via
+	// the X-LiteMLflow-Federate-Sig HMAC header inside their handler.
+	// Skipping the session-auth middleware here is intentional — the
+	// HMAC IS the credential. RBAC also bypasses these by virtue of
+	// the no-role mapping in rbac.go.
+	switch p {
+	case "/api/v1/federate/echo", "/api/v1/federate/search":
+		return true
+	}
 	return false
 }
 

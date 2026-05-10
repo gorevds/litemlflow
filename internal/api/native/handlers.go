@@ -22,6 +22,7 @@ import (
 	"github.com/gorevds/litemlflow/internal/auth"
 	"github.com/gorevds/litemlflow/internal/config"
 	"github.com/gorevds/litemlflow/internal/datasets"
+	"github.com/gorevds/litemlflow/internal/federation"
 	"github.com/gorevds/litemlflow/internal/model"
 	"github.com/gorevds/litemlflow/internal/store"
 	"github.com/gorevds/litemlflow/internal/webhooks"
@@ -38,6 +39,9 @@ type Handler struct {
 	EchoLog      *webhooks.EchoLog
 	// Datasets is the content-addressed CAS for v1.2 dataset uploads.
 	Datasets datasets.Store
+	// FederationCache is the in-memory response cache for federated
+	// search fan-outs. nil disables caching (test-only paths).
+	FederationCache *federation.Cache
 }
 
 // SessionStore is the session-persistence interface used by auth handlers.
@@ -99,7 +103,17 @@ func (h *Handler) Mount(r chi.Router) {
 	r.Put("/api/v1/runs/{runID}/note", h.SetRunNote)
 
 	// SEARCH: cross-experiment search — runs by name, experiments by name, prompts by name.
+	// Pass ?federated=1 to fan out to all connected peers in parallel.
 	r.Get("/api/v1/search", h.GlobalSearch)
+
+	// FEDERATION (v1.3) — peer management + peer-callable endpoints.
+	r.Post("/api/v1/federate/peers", h.AddPeer)
+	r.Get("/api/v1/federate/peers", h.ListPeers)
+	r.Delete("/api/v1/federate/peers/{id}", h.DeletePeer)
+	r.Post("/api/v1/federate/peers/{id}/echo", h.EchoPeer)
+	// Peer-callable, HMAC-validated; bypasses session auth (the HMAC IS auth).
+	r.Post("/api/v1/federate/echo", h.FederateEcho)
+	r.Post("/api/v1/federate/search", h.FederateSearch)
 
 	// ANALYTICS: templated DSL → safe SQL (v1.1).
 	r.Post("/api/v1/analytics/query", h.AnalyticsQuery)
@@ -234,19 +248,30 @@ func (h *Handler) SetRunNote(w http.ResponseWriter, r *http.Request) {
 // ---- global search ----------------------------------------------------------
 
 // searchResultItem is one hit in the /api/v1/search response.
+//
+// `Title` and `Instance` were added in v1.3 for federation: federated
+// queries return results from peer instances and we need to surface
+// the origin in the UI. Title duplicates Name for the federated path
+// (peers don't fill in the SubTitle/ExperimentID context).
 type searchResultItem struct {
 	Kind         string `json:"kind"`                    // "run" | "experiment" | "prompt"
 	ID           string `json:"id"`                      // run_id / experiment_id / prompt name
 	Name         string `json:"name"`                    // display name
+	Title        string `json:"title,omitempty"`         // federation: alias for Name
 	SubTitle     string `json:"subtitle,omitempty"`      // experiment name for runs, etc.
 	Status       string `json:"status,omitempty"`        // run status
 	URL          string `json:"url,omitempty"`           // deep-link hash fragment
 	ExperimentID string `json:"experiment_id,omitempty"` // for runs
+	Instance     string `json:"instance,omitempty"`      // origin peer name (federated only)
 }
 
 type globalSearchResp struct {
 	Items []searchResultItem `json:"items"`
 	Query string             `json:"query"`
+	// v1.3 federation metadata. Only set when ?federated=1.
+	Federated bool     `json:"federated,omitempty"`
+	Instances []string `json:"instances,omitempty"`
+	Partial   bool     `json:"partial,omitempty"`
 }
 
 // GlobalSearch handles GET /api/v1/search?q=...&kind=all|runs|experiments|prompts
@@ -352,7 +377,28 @@ func (h *Handler) GlobalSearch(w http.ResponseWriter, r *http.Request) {
 	if items == nil {
 		items = []searchResultItem{}
 	}
-	writeJSON(w, globalSearchResp{Items: items, Query: q})
+
+	// v1.3 — federated fan-out when ?federated=1 is passed. Local results
+	// are tagged with our own instance name so the UI can render origin
+	// pills uniformly. Peer errors are reflected via the `partial` flag.
+	resp := globalSearchResp{Items: items, Query: q}
+	if r.URL.Query().Get("federated") == "1" {
+		ourName := h.federationOurName()
+		for i := range items {
+			items[i].Instance = ourName
+		}
+		merged, instances, partial := h.federatedFanOut(ctx, ws, q, kind, 10)
+		// Merge + cap.
+		items = append(items, merged...)
+		if len(items) > 50 {
+			items = items[:50]
+		}
+		resp = globalSearchResp{Items: items, Query: q,
+			Federated: true, Instances: append([]string{ourName}, instances...),
+			Partial: partial,
+		}
+	}
+	writeJSON(w, resp)
 }
 
 // ---- health -----------------------------------------------------------------

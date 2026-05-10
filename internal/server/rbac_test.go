@@ -166,6 +166,50 @@ func TestRBACViewerCannotManageMembers(t *testing.T) {
 	}
 }
 
+// TestRBACFederationPeerCRUDIsAdminOnly guards independent-review finding C1.
+// Before the fix, /api/v1/federate/peers had no role requirement, so any
+// authenticated viewer could register a peer and exfiltrate data via a
+// federated search. Viewer must now get 403 on POST/DELETE.
+func TestRBACFederationPeerCRUDIsAdminOnly(t *testing.T) {
+	t.Parallel()
+	const user, pass = "fedviewer", "fedviewerpass"
+	srv := newRBACServer(t, user, pass)
+	adminSetup(t, srv, user, pass, "ws-fed", user, "viewer")
+
+	// POST: add peer.
+	resp, _ := rbacDo(t, srv,
+		http.MethodPost, "/api/v1/federate/peers",
+		"ws-fed", user, pass,
+		map[string]string{"name": "lmf-other", "url": "https://example.com"})
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("viewer POST /federate/peers: want 403, got %d", resp.StatusCode)
+	}
+
+	// DELETE: remove peer.
+	resp, _ = rbacDo(t, srv,
+		http.MethodDelete, "/api/v1/federate/peers/1",
+		"ws-fed", user, pass, nil)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("viewer DELETE /federate/peers/{id}: want 403, got %d", resp.StatusCode)
+	}
+
+	// Echo: probes a peer using its URL — also admin-only.
+	resp, _ = rbacDo(t, srv,
+		http.MethodPost, "/api/v1/federate/peers/1/echo",
+		"ws-fed", user, pass, nil)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("viewer POST /federate/peers/{id}/echo: want 403, got %d", resp.StatusCode)
+	}
+
+	// LIST: GET reads — viewer may see peers' metadata (no secret leak).
+	resp, _ = rbacDo(t, srv,
+		http.MethodGet, "/api/v1/federate/peers",
+		"ws-fed", user, pass, nil)
+	if resp.StatusCode == http.StatusForbidden {
+		t.Errorf("viewer GET /federate/peers: should be allowed, got 403")
+	}
+}
+
 // TestRBACAdminCanManageMembers verifies that an admin can add members.
 func TestRBACAdminCanManageMembers(t *testing.T) {
 	t.Parallel()

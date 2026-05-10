@@ -20,6 +20,7 @@ import (
 	"github.com/gorevds/litemlflow/internal/auth"
 	"github.com/gorevds/litemlflow/internal/config"
 	"github.com/gorevds/litemlflow/internal/datasets"
+	"github.com/gorevds/litemlflow/internal/federation"
 	"github.com/gorevds/litemlflow/internal/grpcotlp"
 	"github.com/gorevds/litemlflow/internal/metrics"
 	"github.com/gorevds/litemlflow/internal/store"
@@ -231,7 +232,11 @@ func buildRouter(cfg config.Config, logger *slog.Logger, st store.Store, art art
 	mlh.Mount(r)
 
 	// AUTH-OIDC: build native handler with full auth wiring.
-	nat := &native.Handler{Store: st, Cfg: cfg, SessionStore: nil, EchoLog: echoLog, Datasets: datasetCAS}
+	nat := &native.Handler{
+		Store: st, Cfg: cfg, SessionStore: nil, EchoLog: echoLog, Datasets: datasetCAS,
+		// v1.3: bounded in-memory cache for federated search responses.
+		FederationCache: federation.NewCache(0, 0),
+	}
 	if sqlSt, ok := st.(*store.SQLiteStore); ok {
 		nat.SessionStore = sqlSt
 	}

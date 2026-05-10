@@ -207,6 +207,15 @@ type Store interface {
 	// Analytics (templated DSL — see analytics.go for the contract).
 	AnalyticsQuery(ctx context.Context, q AnalyticsQuery) (*AnalyticsResult, error)
 
+	// Federation (v1.3) — peer instance management. Mutual HMAC over
+	// HTTP; secrets are stored verbatim per peer (32 bytes hex).
+	CreatePeer(ctx context.Context, p *model.Peer) (int64, error)
+	ListPeers(ctx context.Context, workspaceID string) ([]*model.Peer, error)
+	GetPeer(ctx context.Context, workspaceID string, id int64) (*model.Peer, error)
+	GetPeerByName(ctx context.Context, workspaceID, name string) (*model.Peer, error)
+	DeletePeer(ctx context.Context, workspaceID string, id int64) error
+	UpdatePeerStatus(ctx context.Context, id int64, status, lastError string, lastSeen int64) error
+
 	// Dataset versioning (v1.2). Datasets are content-addressed +
 	// per-workspace + per-name versioned. The Store is responsible for
 	// row CRUD only; the actual content bytes live in the CAS store

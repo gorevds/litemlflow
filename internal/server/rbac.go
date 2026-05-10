@@ -50,6 +50,15 @@ func requiredRole(method, path string) string {
 		}
 	}
 
+	// Federation peer CRUD is admin-only — operators register, probe, or
+	// remove peers; viewers can only LIST (GET) for transparency. The
+	// peer-to-peer endpoints /api/v1/federate/echo and /federate/search
+	// authenticate via mutual HMAC and are exempted in middleware.go's
+	// isPublicPath, not here.
+	if strings.HasPrefix(path, "/api/v1/federate/peers") && method != http.MethodGet {
+		return "admin"
+	}
+
 	// --- Editor operations (mutating MLflow and native write endpoints) ---
 
 	if strings.HasPrefix(path, "/api/2.0/mlflow/") &&

@@ -94,6 +94,20 @@ type Dashboard struct {
 	UpdatedAt   int64  `json:"updated_at"`
 }
 
+// Peer is one row of the federation table — a remote LiteMLflow instance
+// this server can mutual-HMAC query (v1.3).
+type Peer struct {
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	URL         string `json:"url"`
+	Secret      string `json:"-"` // HMAC secret, never serialised
+	WorkspaceID string `json:"workspace_id"`
+	AddedAt     int64  `json:"added_at"`
+	LastSeen    *int64 `json:"last_seen,omitempty"`
+	Status      string `json:"status"`
+	LastError   string `json:"last_error,omitempty"`
+}
+
 // Webhook is a configured notification endpoint.
 type Webhook struct {
 	ID           int64  `json:"id"`

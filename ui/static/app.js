@@ -454,6 +454,9 @@
       el.innerHTML = `
         <div class="palette-modal">
           <input type="text" id="palette-input" placeholder="Search commands or experiments…" autocomplete="off" />
+          <label class="palette-fed" title="Search across federated peers (slower)">
+            <input type="checkbox" id="palette-federated" /> Federated
+          </label>
           <ul class="palette-list" id="palette-list"></ul>
         </div>`;
       document.body.appendChild(el);
@@ -471,6 +474,13 @@
       input.addEventListener("input", () => {
         clearTimeout(this._debTimer);
         this._debTimer = setTimeout(() => this._search(input.value.trim()), 200);
+      });
+      const fed = $("#palette-federated");
+      // Persist the preference so power users don't have to toggle every time.
+      fed.checked = localStorage.getItem("litemlflow.federatedSearch") === "1";
+      fed.addEventListener("change", () => {
+        localStorage.setItem("litemlflow.federatedSearch", fed.checked ? "1" : "0");
+        this._search(input.value.trim());
       });
     },
 
@@ -498,29 +508,54 @@
           let knownPrompts = [];
           try { knownPrompts = JSON.parse(localStorage.getItem("litemlflow.knownPrompts")) || []; } catch {}
           if (knownPrompts.length) qs.set("names", knownPrompts.slice(0, 20).join(","));
+          const fedBox = $("#palette-federated");
+          if (fedBox && fedBox.checked) qs.set("federated", "1");
           const data = await fetchJSON(`/api/v1/search?${qs}`);
+          const tag = inst => inst ? ` <span class="palette-origin">${escapeHTML(inst)}</span>` : "";
           const hits = (data.items || []).map(item => {
             if (item.kind === "experiment") {
+              // Federated hits include `instance` so the user knows which
+              // server owns the row. Local hits get tagged too when the
+              // response is federated, otherwise the pill is suppressed.
+              const remote = item.instance && data.federated;
               return {
                 label: `Experiment: ${item.name}`,
-                action: () => { location.hash = item.url || `#/experiments/${item.id}`; },
+                instance: item.instance,
+                action: () => {
+                  if (remote && item.url && item.url.startsWith("http")) { window.open(item.url, "_blank"); return; }
+                  location.hash = item.url || `#/experiments/${item.id}`;
+                },
+                _badge: tag(remote ? item.instance : ""),
               };
             }
             if (item.kind === "run") {
+              const remote = item.instance && data.federated;
               return {
                 label: `Run: ${item.name || item.id.slice(0, 8)} (${item.subtitle || ""})`,
-                action: () => { location.hash = item.url; },
+                action: () => {
+                  if (remote && item.url && item.url.startsWith("http")) { window.open(item.url, "_blank"); return; }
+                  location.hash = item.url;
+                },
+                _badge: tag(remote ? item.instance : ""),
               };
             }
             if (item.kind === "prompt") {
               return {
                 label: `Prompt: ${item.name}`,
                 action: () => { location.hash = item.url; },
+                _badge: "",
               };
             }
             return null;
           }).filter(Boolean);
           items = [...hits, ...items];
+          if (data.partial) {
+            items.unshift({
+              label: "⚠︎ Some peers failed to respond — results may be incomplete",
+              action: () => { location.hash = "#/federation"; },
+              _badge: "",
+            });
+          }
         } catch {}
       }
 
@@ -539,7 +574,7 @@
       const list = $("#palette-list");
       if (!list) return;
       list.innerHTML = this._items.map((item, i) =>
-        `<li class="palette-item${i === this._cursor ? " palette-item--active" : ""}" data-idx="${i}">${escapeHTML(item.label)}</li>`
+        `<li class="palette-item${i === this._cursor ? " palette-item--active" : ""}" data-idx="${i}">${escapeHTML(item.label)}${item._badge || ""}</li>`
       ).join("");
       $$(".palette-item", list).forEach(li => {
         li.addEventListener("mouseenter", () => {
@@ -935,6 +970,7 @@
       if (hash.startsWith("/webhooks")) return this.renderWebhooks();
       if (hash.startsWith("/dashboards")) return this.renderDashboardsIndex();
       if (hash.startsWith("/analytics")) return this.renderAnalytics();
+      if (hash.startsWith("/federation")) return this.renderFederation();
       const dsDetail = hash.match(/^\/datasets\/(.+)$/);
       if (dsDetail) return this.renderDatasetDetail(decodeURIComponent(dsDetail[1]));
       if (hash.startsWith("/datasets")) return this.renderDatasetsIndex();
@@ -3430,6 +3466,155 @@ requests.post("${location.origin}/api/v1/datasets/my-dataset/versions",
         xhr.onerror = () => { $("#du-err").textContent = "Network error."; };
         $("#du-save").disabled = true;
         xhr.send(fd);
+      });
+    },
+
+    // ── Federation (v1.3) ────────────────────────────────────────────────────
+    async renderFederation() {
+      const main = $("#app");
+      let data;
+      try {
+        data = await fetchJSON("/api/v1/federate/peers");
+      } catch (err) {
+        main.innerHTML = `<div class="empty">Failed to load peers: ${escapeHTML(String(err))}</div>`;
+        return;
+      }
+      const peers = data.peers || [];
+      const rows = peers.map(p => `
+        <tr data-peer-id="${p.id}">
+          <td>${escapeHTML(p.name)}</td>
+          <td class="mono" style="max-width:280px;overflow:hidden;text-overflow:ellipsis" title="${escapeHTML(p.url)}">${escapeHTML(p.url)}</td>
+          <td><span class="status-pill status-${p.status === "connected" ? "FINISHED" : (p.status === "error" ? "FAILED" : "RUNNING")}">${escapeHTML(p.status)}</span></td>
+          <td>${p.last_seen ? formatTime(p.last_seen) : "—"}</td>
+          <td class="u-muted-xs">${escapeHTML(p.last_error || "")}</td>
+          <td>
+            <button class="fed-echo-btn" data-peer-id="${p.id}" title="Probe connectivity">Echo</button>
+            <button class="fed-del-btn btn-danger" data-peer-id="${p.id}">Remove</button>
+          </td>
+        </tr>`).join("");
+
+      main.innerHTML = `
+        <div class="toolbar">
+          <h1 class="u-toolbar-title">Federation</h1>
+          <button id="fed-add-btn" class="btn-primary">+ Add peer</button>
+        </div>
+        <p class="u-muted-sm" style="margin-top:0">
+          Each peer is another LiteMLflow instance this server can query. Auth is mutual HMAC: both
+          servers must store the same 32-byte secret. Add a peer here, copy the secret, paste it
+          into the same form on the remote.
+        </p>
+        ${peers.length ? `
+        <div class="card u-pad-0">
+          <table>
+            <thead><tr><th>Name</th><th>URL</th><th>Status</th><th>Last seen</th><th>Last error</th><th>Actions</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>` : `
+        <div class="empty card">
+          <p>No peers yet. Click <strong>+ Add peer</strong> to register a remote LiteMLflow instance.</p>
+          <p class="u-muted-xs">After adding, copy the generated secret to the same form on the remote server. Probe with the <strong>Echo</strong> button — status should flip to <code>connected</code>.</p>
+        </div>`}`;
+
+      $("#fed-add-btn").addEventListener("click", () => this._showAddPeerModal());
+      $$(".fed-echo-btn", main).forEach(b => b.addEventListener("click", async () => {
+        const id = b.dataset.peerId;
+        b.disabled = true;
+        b.textContent = "…";
+        try {
+          const r = await fetchJSON(`/api/v1/federate/peers/${id}/echo`, { method: "POST", body: "{}" });
+          showToast(r.status === "connected" ? `Connected: ${id}` : `Echo: ${r.error || r.status}`);
+          App.renderFederation();
+        } catch (err) {
+          alert(`Echo failed: ${err}`);
+          b.disabled = false;
+          b.textContent = "Echo";
+        }
+      }));
+      $$(".fed-del-btn", main).forEach(b => b.addEventListener("click", async () => {
+        const id = b.dataset.peerId;
+        if (!await Modal.confirm({
+          title: "Remove peer",
+          message: "This deletes the local row only — the peer's row on its own server stays. Federation will fail for this peer until both sides are removed.",
+          danger: true, primaryLabel: "Remove",
+        })) return;
+        try {
+          await fetch(`/api/v1/federate/peers/${id}`, { method: "DELETE" });
+          showToast("Peer removed.");
+          App.renderFederation();
+        } catch (err) {
+          alert(`Delete failed: ${err}`);
+        }
+      }));
+    },
+
+    _showAddPeerModal() {
+      const wrap = document.createElement("div");
+      wrap.className = "modal-backdrop";
+      wrap.innerHTML = `
+        <div class="card modal" style="max-width:520px">
+          <h2 style="margin-top:0">Add federation peer</h2>
+          <p class="u-muted-sm" style="margin:0 0 12px">
+            Leave the secret blank to have the server generate a fresh one — it will be shown ONCE
+            in the response and you'll need to paste it into the peer's form. Pre-fill the secret
+            if the remote already shared one.
+          </p>
+          <table class="form-table">
+            <tr>
+              <th><label for="ap-name">Name</label></th>
+              <td><input type="text" id="ap-name" placeholder="e.g. lmf-team-b" class="u-w-full"/></td>
+            </tr>
+            <tr>
+              <th><label for="ap-url">URL</label></th>
+              <td><input type="url" id="ap-url" placeholder="https://lmf.team-b.example" class="u-w-full"/></td>
+            </tr>
+            <tr>
+              <th><label for="ap-secret">Secret (optional)</label></th>
+              <td><input type="text" id="ap-secret" placeholder="64-hex-char shared HMAC key" class="u-w-full" maxlength="64"/></td>
+            </tr>
+          </table>
+          <div id="ap-err" style="color:var(--error);min-height:18px;font-size:13px"></div>
+          <div class="u-row-end">
+            <button data-modal-cancel>Cancel</button>
+            <button id="ap-save" class="btn-primary">Add peer</button>
+          </div>
+        </div>`;
+      document.body.appendChild(wrap);
+      $("#ap-name").focus();
+      const close = () => wrap.remove();
+      wrap.addEventListener("click", e => { if (e.target === wrap) close(); });
+      wrap.querySelector("[data-modal-cancel]").addEventListener("click", close);
+      $("#ap-save").addEventListener("click", async () => {
+        const name = $("#ap-name").value.trim();
+        const url = $("#ap-url").value.trim();
+        const secret = $("#ap-secret").value.trim();
+        if (!name || !url) {
+          $("#ap-err").textContent = "Name and URL are required.";
+          return;
+        }
+        try {
+          const body = { name, url };
+          if (secret) body.secret = secret;
+          const resp = await fetchJSON("/api/v1/federate/peers", {
+            method: "POST",
+            body: JSON.stringify(body),
+          });
+          // Show the secret if the server generated one — copy-to-clipboard
+          // affordance so the operator can paste it into the remote.
+          close();
+          if (!secret && resp.secret) {
+            await Modal.confirm({
+              title: "Peer created — copy this secret",
+              message: `Paste this 64-char HMAC secret into the same form on ${escapeHTML(resp.peer.name)}'s server. It is shown ONLY ONCE.\n\n${resp.secret}`,
+              primaryLabel: "I copied it",
+            });
+            try { await navigator.clipboard.writeText(resp.secret); showToast("Secret copied to clipboard."); } catch {}
+          } else {
+            showToast(`Peer ${resp.peer.name} added.`);
+          }
+          App.renderFederation();
+        } catch (err) {
+          $("#ap-err").textContent = String(err);
+        }
       });
     },
 

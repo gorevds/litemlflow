@@ -271,6 +271,22 @@ func (NopStore) GetExperimentByNameInWorkspace(context.Context, string, string) 
 	return nil, store.ErrNotFound
 }
 
+// Federation (v1.3).
+func (NopStore) CreatePeer(context.Context, *model.Peer) (int64, error) {
+	return 0, store.ErrNotFound
+}
+func (NopStore) ListPeers(context.Context, string) ([]*model.Peer, error) { return nil, nil }
+func (NopStore) GetPeer(context.Context, string, int64) (*model.Peer, error) {
+	return nil, store.ErrNotFound
+}
+func (NopStore) GetPeerByName(context.Context, string, string) (*model.Peer, error) {
+	return nil, store.ErrNotFound
+}
+func (NopStore) DeletePeer(context.Context, string, int64) error { return store.ErrNotFound }
+func (NopStore) UpdatePeerStatus(context.Context, int64, string, string, int64) error {
+	return nil
+}
+
 // init pull-in to keep `fmt` used (silences linters in case future panics
 // move under build tags).
 var _ = fmt.Sprintf

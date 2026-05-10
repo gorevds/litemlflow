@@ -60,6 +60,12 @@ type Config struct {
 	// LITEMLFLOW_ENABLE_MULTI_TENANT=1.
 	EnableMultiTenant bool
 
+	// FederationName is the identifier this server presents to peers in
+	// federated requests (X-LiteMLflow-Federate-Peer header). Defaults to
+	// "lmf-self" — operators with multiple instances should set it to a
+	// stable name (e.g. the hostname).
+	FederationName string
+
 	// ArtifactBackend selects the artifact storage backend: "fs" (default) or "s3".
 	ArtifactBackend string
 
@@ -198,6 +204,9 @@ func overlayFromEnv(c Config) Config {
 	if v := os.Getenv("LITEMLFLOW_ENABLE_MULTI_TENANT"); v == "1" || v == "true" {
 		c.EnableMultiTenant = true
 	}
+	if v := os.Getenv("LITEMLFLOW_FEDERATION_NAME"); v != "" && c.FederationName == "" {
+		c.FederationName = v
+	}
 	if v := os.Getenv("LITEMLFLOW_JANITOR_ENABLED"); v == "0" || v == "false" {
 		c.JanitorEnabled = false
 	}
@@ -308,6 +317,12 @@ func overlay(base, explicit Config) Config {
 	}
 	if explicit.RunStaleAfter != 0 {
 		base.RunStaleAfter = explicit.RunStaleAfter
+	}
+	if explicit.EnableMultiTenant {
+		base.EnableMultiTenant = explicit.EnableMultiTenant
+	}
+	if explicit.FederationName != "" {
+		base.FederationName = explicit.FederationName
 	}
 	return base
 }
