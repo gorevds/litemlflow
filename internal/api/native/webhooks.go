@@ -361,6 +361,12 @@ func (h *Handler) GetRunLineage(w http.ResponseWriter, r *http.Request) {
 			"direction must be one of: upstream, downstream, both")
 		return
 	}
+	// depth and fanout: bounds are enforced at the HTTP layer for clear
+	// 4xx feedback, and ALSO clamped in the store so direct Go callers
+	// (SDK, internal services) get sensible defaults instead of zero.
+	// 0 is rejected here because there is no useful interpretation —
+	// "show me 0 levels" — and the store would silently substitute 4,
+	// hiding the operator mistake.
 	if d := r.URL.Query().Get("depth"); d != "" {
 		n, err := strconv.Atoi(d)
 		if err != nil || n < 1 || n > 8 {

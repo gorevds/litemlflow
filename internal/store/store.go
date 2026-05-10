@@ -84,12 +84,17 @@ type RunLineage struct {
 }
 
 // DatasetEdge links a run to a dataset version it consumed.
+//
+// Version and DatasetID are 0 when the run logged a dataset via the
+// legacy v0.3 dataset_inputs path and there is no v1.2 datasets_v2 mirror
+// in the run's workspace. Callers should treat 0 as "unmirrored" and
+// route to the dataset-name index instead of the versioned detail page.
 type DatasetEdge struct {
-	RunID         string `json:"run_id"`
-	Name          string `json:"name"`
-	Version       int64  `json:"version,omitempty"`
-	Digest        string `json:"digest"`
-	DatasetID     int64  `json:"dataset_id,omitempty"`
+	RunID     string `json:"run_id"`
+	Name      string `json:"name"`
+	Version   int64  `json:"version,omitempty"`   // 0 = no v1.2 mirror in this workspace
+	Digest    string `json:"digest"`
+	DatasetID int64  `json:"dataset_id,omitempty"` // 0 = no v1.2 mirror in this workspace
 }
 
 // LineageDirection is the v1.4 query mode.
@@ -102,10 +107,16 @@ const (
 )
 
 // LineageOptions controls GetRunLineage.
+//
+// Zero / negative values are normalized to defaults inside the store —
+// callers that want strict validation (e.g., HTTP handlers) should
+// reject zero values before invoking, since the store substitution is
+// silent. This intentional asymmetry: HTTP gives clear 4xx feedback,
+// while internal Go callers get useful defaults.
 type LineageOptions struct {
 	Direction        LineageDirection
-	DescendantDepth  int // BFS depth for downstream walk; clamped 1..8 (default 4 when 0)
-	MaxNodesPerLevel int // fan-out cap per descendant level; clamped 1..200 (default 50 when 0)
+	DescendantDepth  int // BFS depth for downstream walk; clamped 1..8 (default 4 when ≤0)
+	MaxNodesPerLevel int // fan-out cap per descendant level; clamped 1..200 (default 50 when ≤0)
 }
 
 // Store is the persistence interface.

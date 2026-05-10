@@ -158,6 +158,49 @@ func federatedSearch(t *testing.T, from *fedNode, q string) struct {
 	return got
 }
 
+// createPrompt registers a prompt by name on a node. v1 always.
+func createPrompt(t *testing.T, node *fedNode, name string) {
+	t.Helper()
+	body := fmt.Sprintf(`{"name":%q,"content":"hello %s","description":""}`, name, name)
+	resp, err := http.Post(node.ts.URL+"/api/v1/prompts",
+		"application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("createPrompt: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(resp.Body)
+		t.Fatalf("createPrompt status: %d body=%s", resp.StatusCode, raw)
+	}
+}
+
+// TestFederationSearchPrompts guards v1.3 deferred item M6: a federated
+// search with kind=prompts (or default kind=all) returns prompt hits from
+// peers, not just runs/experiments.
+func TestFederationSearchPrompts(t *testing.T) {
+	t.Parallel()
+	a := startFedNode(t, "lmf-prom-A")
+	b := startFedNode(t, "lmf-prom-B")
+	sec := strings.Repeat("ab", 32)
+	addPeerOn(t, a, b, sec)
+	addPeerOn(t, b, a, sec)
+	echoPeer(t, a, 1)
+
+	// B has the prompt the user is searching for; A has nothing.
+	createPrompt(t, b, "fed-prompt-rag")
+
+	got := federatedSearch(t, a, "fed-prompt-rag")
+	foundRemote := false
+	for _, item := range got.Items {
+		if item.Kind == "prompt" && item.Instance == "lmf-prom-B" {
+			foundRemote = true
+		}
+	}
+	if !foundRemote {
+		t.Errorf("expected to find prompt on lmf-prom-B via federated search; got items=%+v", got.Items)
+	}
+}
+
 // TestFederationAcceptance — the headline: 3 instances, federated search.
 func TestFederationAcceptance(t *testing.T) {
 	t.Parallel()

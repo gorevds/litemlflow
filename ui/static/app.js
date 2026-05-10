@@ -2368,10 +2368,11 @@ mlflow.log_metric("loss", 0.42)</pre>
       const params = new URLSearchParams(location.hash.split("?")[1] || "");
       const direction = params.get("direction") || "both";
       const depth = clampInt(params.get("depth"), 1, 8, 4);
+      const fanout = clampInt(params.get("fanout"), 1, 200, 50);
       let lineage;
       try {
         lineage = await fetchJSON(
-          `/api/v1/runs/${runID}/lineage?direction=${direction}&depth=${depth}`,
+          `/api/v1/runs/${runID}/lineage?direction=${direction}&depth=${depth}&fanout=${fanout}`,
         );
       } catch (err) {
         main.innerHTML = `<div class="empty">Failed to load lineage: ${escapeHTML(String(err))}</div>`;
@@ -2455,7 +2456,9 @@ mlflow.log_metric("loss", 0.42)</pre>
       const dsStartX = (svgW - dsStripW) / 2;
       const currentPos = pos.get(run.id);
 
-      const escAttr = s => String(s).replace(/"/g, "&quot;");
+      // Use the project-wide escapeHTML for both element-content and
+      // attribute contexts — it handles &, <, >, ", and ' uniformly.
+      const escAttr = s => escapeHTML(s);
       const renderRunNode = (r) => {
         const p = pos.get(r.id);
         const isCurrent = r.id === run.id;
@@ -2506,7 +2509,10 @@ mlflow.log_metric("loss", 0.42)</pre>
           <label class="u-muted-xs">Depth
             <input id="lin-depth" type="number" min="1" max="8" value="${depth}" style="width:60px"/>
           </label>
-          ${lineage.truncated ? `<span class="status-pill status-FAILED" title="Increase depth or fanout">truncated</span>` : ""}
+          <label class="u-muted-xs" title="Per-level fan-out cap (1..200)">Fanout
+            <input id="lin-fanout" type="number" min="1" max="200" value="${fanout}" style="width:70px"/>
+          </label>
+          ${lineage.truncated ? `<span class="status-pill status-FAILED" title="Increase depth or fanout to see more">truncated</span>` : ""}
           <span class="u-muted-xs" style="margin-left:auto">${ancestors.length} ancestor${ancestors.length === 1 ? "" : "s"} · ${descendants.length} descendant${descendants.length === 1 ? "" : "s"} · ${datasets.length} dataset${datasets.length === 1 ? "" : "s"}</span>
         </div>
         <div class="card" style="margin-top:12px;padding:0;overflow:auto">
@@ -2535,14 +2541,16 @@ mlflow.log_metric("loss", 0.42)</pre>
         });
       });
 
-      // Direction / depth controls re-route with new query params.
+      // Direction / depth / fanout controls re-route with new query params.
       const reroute = () => {
         const dir = $("#lin-direction").value;
         const dep = clampInt($("#lin-depth").value, 1, 8, 4);
-        location.hash = `#/experiments/${expID}/runs/${runID}/lineage?direction=${dir}&depth=${dep}`;
+        const fan = clampInt($("#lin-fanout").value, 1, 200, 50);
+        location.hash = `#/experiments/${expID}/runs/${runID}/lineage?direction=${dir}&depth=${dep}&fanout=${fan}`;
       };
       $("#lin-direction").addEventListener("change", reroute);
       $("#lin-depth").addEventListener("change", reroute);
+      $("#lin-fanout").addEventListener("change", reroute);
     },
 
     async renderMetricCharts(runID, metrics) {

@@ -358,6 +358,33 @@ func (h *Handler) runLocalSearch(ctx context.Context, workspaceID, q, kind strin
 			}
 		}
 	}
+	if kind == "" || kind == "all" || kind == "prompts" {
+		// Prompts are workspace-global in the current schema; ListPrompts
+		// returns the latest version per name. Server-side substring match
+		// over q (case-insensitive) — peers don't have access to the
+		// caller's localStorage prompt-name index that GlobalSearch relies
+		// on, so the federated path matches against all known names.
+		prompts, err := h.Store.ListPrompts(ctx)
+		if err == nil {
+			ql := strings.ToLower(q)
+			matched := 0
+			for _, p := range prompts {
+				if matched >= max {
+					break
+				}
+				if ql != "" && !strings.Contains(strings.ToLower(p.Name), ql) {
+					continue
+				}
+				out = append(out, searchResultItem{
+					Kind:  "prompt",
+					ID:    p.Name,
+					Title: p.Name,
+					URL:   "#/prompts/" + p.Name,
+				})
+				matched++
+			}
+		}
+	}
 	return out
 }
 
@@ -419,7 +446,11 @@ func (h *Handler) federatedFanOut(ctx context.Context, workspaceID, q, kind stri
 				resCh <- chRes{instance: p.Name, err: err}
 				return
 			}
-			resp, payload, err := client.Do("POST", "/api/v1/federate/search", body)
+			// Propagate the parent request's ctx so that if the user
+			// closes the browser / cancels the search, in-flight peer
+			// fetches are cancelled too instead of running to the 5s
+			// client timeout.
+			resp, payload, err := client.DoCtx(ctx, "POST", "/api/v1/federate/search", body)
 			if err != nil {
 				resCh <- chRes{instance: p.Name, err: err}
 				return

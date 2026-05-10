@@ -431,6 +431,51 @@ func TestLineageFanOutAndDeeperSubtree(t *testing.T) {
 	}
 }
 
+// TestLineageRunDatasetEdgesLegacyV03 guards independent-review #4 (deferred
+// from v1.4-rc1 → closed at stable). Insert a v0.3-style dataset_inputs row
+// directly (bypassing LogInputs which mirrors into datasets_v2) and verify
+// the lineage response surfaces the edge with Version=0 / DatasetID=0.
+func TestLineageRunDatasetEdgesLegacyV03(t *testing.T) {
+	ctx := context.Background()
+	st := newStore(t)
+	expID := mustCreateExpInStore(t, st, "lineage-legacy-ds")
+
+	r := &model.Run{ExperimentID: expID, Name: "r-legacy", StartTime: time.Now().UnixMilli()}
+	if err := st.CreateRun(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	// Insert into the v0.3 datasets+dataset_inputs tables directly. The
+	// FOREIGN KEY (name, digest) → datasets(name, digest) means we have to
+	// seed a datasets row first. v0.3 datasets is workspace-agnostic.
+	if _, err := st.DB().ExecContext(ctx, `
+		INSERT INTO datasets(name, digest, source_type, source, schema, profile)
+		VALUES ('legacy-corpus', 'cafef00d', 'legacy', '', '', '')
+	`); err != nil {
+		t.Fatalf("seed datasets row: %v", err)
+	}
+	if _, err := st.DB().ExecContext(ctx, `
+		INSERT INTO dataset_inputs(run_id, name, digest)
+		VALUES (?, 'legacy-corpus', 'cafef00d')
+	`, r.ID); err != nil {
+		t.Fatalf("seed dataset_inputs row: %v", err)
+	}
+
+	got, err := st.GetRunLineageWithOptions(ctx, r.ID, store.LineageOptions{Direction: store.LineageBoth})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Datasets) != 1 {
+		t.Fatalf("expected 1 dataset edge, got %d", len(got.Datasets))
+	}
+	d := got.Datasets[0]
+	if d.Name != "legacy-corpus" || d.Digest != "cafef00d" {
+		t.Errorf("edge identity: got %+v", d)
+	}
+	if d.Version != 0 || d.DatasetID != 0 {
+		t.Errorf("legacy v0.3 row should leave Version/DatasetID at 0, got version=%d id=%d", d.Version, d.DatasetID)
+	}
+}
+
 // TestLineageRunDatasetEdges verifies dataset_inputs are surfaced in lineage.
 func TestLineageRunDatasetEdges(t *testing.T) {
 	ctx := context.Background()
