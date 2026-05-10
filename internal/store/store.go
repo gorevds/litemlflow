@@ -68,10 +68,44 @@ type MetricHistoryOptions struct {
 }
 
 // RunLineage is the response type for GET /api/v1/runs/{id}/lineage.
+//
+// Direction semantics: ancestors walk up the parent_run_id chain;
+// descendants are a BFS over child runs limited by DescendantDepth in
+// LineageOptions. Datasets are the v1.2 dataset versions the run logged
+// as inputs, joined through dataset_inputs.
 type RunLineage struct {
-	Run         *model.Run   `json:"run"`
-	Ancestors   []*model.Run `json:"ancestors"`
-	Descendants []*model.Run `json:"descendants"`
+	Run         *model.Run    `json:"run"`
+	Ancestors   []*model.Run  `json:"ancestors"`
+	Descendants []*model.Run  `json:"descendants"`
+	Datasets    []DatasetEdge `json:"datasets"`
+	// Truncated reports whether the descendant walk hit the depth cap or
+	// the per-level fan-out limit. UI uses this to render "load more".
+	Truncated bool `json:"truncated"`
+}
+
+// DatasetEdge links a run to a dataset version it consumed.
+type DatasetEdge struct {
+	RunID         string `json:"run_id"`
+	Name          string `json:"name"`
+	Version       int64  `json:"version,omitempty"`
+	Digest        string `json:"digest"`
+	DatasetID     int64  `json:"dataset_id,omitempty"`
+}
+
+// LineageDirection is the v1.4 query mode.
+type LineageDirection string
+
+const (
+	LineageUpstream   LineageDirection = "upstream"
+	LineageDownstream LineageDirection = "downstream"
+	LineageBoth       LineageDirection = "both"
+)
+
+// LineageOptions controls GetRunLineage.
+type LineageOptions struct {
+	Direction        LineageDirection
+	DescendantDepth  int // BFS depth for downstream walk; clamped 1..8 (default 4 when 0)
+	MaxNodesPerLevel int // fan-out cap per descendant level; clamped 1..200 (default 50 when 0)
 }
 
 // Store is the persistence interface.
@@ -185,6 +219,9 @@ type Store interface {
 
 	// Run lineage.
 	GetRunLineage(ctx context.Context, runID string) (*RunLineage, error)
+	// GetRunLineageWithOptions is the v1.4 extended form: directional walk
+	// (upstream/downstream/both) with a configurable descendant depth.
+	GetRunLineageWithOptions(ctx context.Context, runID string, opt LineageOptions) (*RunLineage, error)
 
 	// Janitor.
 	ArchiveStaleRuns(ctx context.Context, staleBefore int64) (int, error)

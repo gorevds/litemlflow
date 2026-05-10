@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/gorevds/litemlflow/internal/model"
+	"github.com/gorevds/litemlflow/internal/store"
 	"github.com/gorevds/litemlflow/internal/webhooks"
 )
 
@@ -339,9 +340,46 @@ func (h *Handler) ListEchoDeliveries(w http.ResponseWriter, r *http.Request) {
 // ---- run lineage ------------------------------------------------------------
 
 // GetRunLineage handles GET /api/v1/runs/{runID}/lineage.
+//
+// v1.4 query params:
+//
+//	?direction=upstream|downstream|both  (default: both)
+//	?depth=N      — descendant BFS depth, clamped 1..8 (default 4)
+//	?fanout=N     — per-level fan-out cap, clamped 1..200 (default 50)
 func (h *Handler) GetRunLineage(w http.ResponseWriter, r *http.Request) {
 	runID := chi.URLParam(r, "runID")
-	lineage, err := h.Store.GetRunLineage(r.Context(), runID)
+	opt := store.LineageOptions{Direction: store.LineageBoth}
+	switch r.URL.Query().Get("direction") {
+	case "upstream":
+		opt.Direction = store.LineageUpstream
+	case "downstream":
+		opt.Direction = store.LineageDownstream
+	case "", "both":
+		opt.Direction = store.LineageBoth
+	default:
+		writeError(w, http.StatusBadRequest, codeInvalidParameter,
+			"direction must be one of: upstream, downstream, both")
+		return
+	}
+	if d := r.URL.Query().Get("depth"); d != "" {
+		n, err := strconv.Atoi(d)
+		if err != nil || n < 1 || n > 8 {
+			writeError(w, http.StatusBadRequest, codeInvalidParameter,
+				"depth must be an integer in [1, 8]")
+			return
+		}
+		opt.DescendantDepth = n
+	}
+	if f := r.URL.Query().Get("fanout"); f != "" {
+		n, err := strconv.Atoi(f)
+		if err != nil || n < 1 || n > 200 {
+			writeError(w, http.StatusBadRequest, codeInvalidParameter,
+				"fanout must be an integer in [1, 200]")
+			return
+		}
+		opt.MaxNodesPerLevel = n
+	}
+	lineage, err := h.Store.GetRunLineageWithOptions(r.Context(), runID, opt)
 	if err != nil {
 		writeStoreErr(w, err)
 		return

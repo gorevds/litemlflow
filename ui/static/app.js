@@ -94,6 +94,14 @@
     return d.toISOString().replace("T", " ").slice(0, 19);
   }
 
+  // clampInt parses `v` as an integer and clamps to [lo, hi]. Falls back
+  // to `dflt` if parse fails. Used by the lineage page's depth/fanout knobs.
+  function clampInt(v, lo, hi, dflt) {
+    const n = parseInt(v, 10);
+    if (Number.isNaN(n)) return dflt;
+    return Math.min(hi, Math.max(lo, n));
+  }
+
   function formatDuration(ms) {
     if (!ms) return "—";
     if (ms < 1000) return ms + "ms";
@@ -953,11 +961,13 @@
 
       const expMatch      = hash.match(/^\/experiments\/(\d+)$/);
       const runMatch      = hash.match(/^\/experiments\/(\d+)\/runs\/([0-9a-f]+)$/);
+      const lineageMatch  = hash.match(/^\/experiments\/(\d+)\/runs\/([0-9a-f]+)\/lineage$/);
       const cmpMatch      = hash.match(/^\/experiments\/(\d+)\/compare/);
       const promptMatch   = hash.match(/^\/prompts\/(.+)$/);
       const wsMembersMatch = hash.match(/^\/workspaces\/([^/]+)\/members$/);
       const dashMatch      = hash.match(/^\/dashboards\/(.+)$/);
 
+      if (lineageMatch)    return this.renderRunLineage(parseInt(lineageMatch[1], 10), lineageMatch[2]);
       if (runMatch)        return this.renderRun(parseInt(runMatch[1], 10), runMatch[2]);
       if (cmpMatch)        return this.renderCompare(parseInt(cmpMatch[1], 10));
       if (expMatch)        return this.renderExperiment(parseInt(expMatch[1], 10));
@@ -2292,12 +2302,26 @@ mlflow.log_metric("loss", 0.42)</pre>
       if (!lineage) return "";
       const ancestors = lineage.ancestors || [];
       const descendants = lineage.descendants || [];
-      if (!ancestors.length && !descendants.length) return "";
+      const datasets = lineage.datasets || [];
+      if (!ancestors.length && !descendants.length && !datasets.length) return "";
 
       const runLink = (r) => {
         const rExpID = r.experiment_id || expID;
         const label = escapeHTML(r.name || r.id.slice(0, 8));
         return `<a href="#/experiments/${rExpID}/runs/${r.id}" class="lineage-node">${label} <span class="mono" style="font-size:11px">${r.id.slice(0, 8)}</span></a>`;
+      };
+      const dsLink = (d) => {
+        const label = escapeHTML(d.name) + (d.version ? ` <span class="mono" style="font-size:11px">v${d.version}</span>` : "");
+        // Deep-link to the specific version when known, fall back to the
+        // dataset detail page (which lands on latest), or the index for
+        // legacy v0.3 inputs that have no datasets_v2 mirror.
+        let href = "#/datasets";
+        if (d.dataset_id && d.version) {
+          href = `#/datasets/${encodeURIComponent(d.name)}/v${d.version}`;
+        } else if (d.dataset_id) {
+          href = `#/datasets/${encodeURIComponent(d.name)}`;
+        }
+        return `<a href="${href}" class="lineage-node lineage-dataset">${label}</a>`;
       };
 
       // Build ancestor chain (outermost ancestor first)
@@ -2315,12 +2339,212 @@ mlflow.log_metric("loss", 0.42)</pre>
           ).join("")}</div>`
         : "";
 
+      // Inputs strip — datasets the run consumed.
+      const datasetsHTML = datasets.length
+        ? `<div class="lineage-datasets-strip">
+             <span class="u-muted-xs">Inputs:</span>
+             ${datasets.map(dsLink).join("")}
+           </div>`
+        : "";
+
       return `
-        <h2>Lineage</h2>
+        <h2 style="display:flex;align-items:baseline;gap:12px">Lineage
+          <a href="#/experiments/${expID}/runs/${runID}/lineage" class="u-muted-xs" style="font-weight:normal;text-decoration:underline">Open full DAG</a>
+        </h2>
         <div class="card lineage-tree">
           ${ancestorChain}${currentNode}${childrenHTML}
+          ${datasetsHTML}
         </div>`;
     },
+
+    // ── Run lineage DAG (v1.4) ───────────────────────────────────────────────
+    //
+    // Layered top-down layout: ancestors at top → current → descendants below.
+    // Datasets appear as a side strip linked to the current run. Each node
+    // is a clickable rect; clicking a run navigates to that run, clicking
+    // a dataset opens the dataset detail page.
+    async renderRunLineage(expID, runID) {
+      const main = $("#app");
+      const params = new URLSearchParams(location.hash.split("?")[1] || "");
+      const direction = params.get("direction") || "both";
+      const depth = clampInt(params.get("depth"), 1, 8, 4);
+      let lineage;
+      try {
+        lineage = await fetchJSON(
+          `/api/v1/runs/${runID}/lineage?direction=${direction}&depth=${depth}`,
+        );
+      } catch (err) {
+        main.innerHTML = `<div class="empty">Failed to load lineage: ${escapeHTML(String(err))}</div>`;
+        return;
+      }
+
+      const run = lineage.run || {};
+      const ancestors = lineage.ancestors || [];
+      const descendants = lineage.descendants || [];
+      const datasets = lineage.datasets || [];
+
+      // Build node levels: ancestors top→bottom (deepest ancestor at the
+      // top), then current, then descendants grouped by their distance
+      // from `run` (BFS order — siblings on the same row).
+      // descendants come back flat; reconstruct levels by re-walking the
+      // parent_run_id chain via a quick child-of-current map.
+      const childrenOf = new Map(); // parentID → [run]
+      for (const d of descendants) {
+        const arr = childrenOf.get(d.parent_run_id) || [];
+        arr.push(d);
+        childrenOf.set(d.parent_run_id, arr);
+      }
+      const descendantLevels = [];
+      let frontier = [run.id];
+      while (frontier.length) {
+        const next = [];
+        const levelRuns = [];
+        for (const pid of frontier) {
+          const kids = childrenOf.get(pid) || [];
+          for (const k of kids) {
+            levelRuns.push(k);
+            next.push(k.id);
+          }
+        }
+        if (!levelRuns.length) break;
+        descendantLevels.push(levelRuns);
+        frontier = next;
+      }
+
+      const levels = [];
+      // Ancestors: top is deepest ancestor, bottom-most is run's direct parent.
+      const ancestorsTopFirst = ancestors.slice().reverse();
+      for (const a of ancestorsTopFirst) levels.push([a]);
+      levels.push([run]);
+      for (const lvl of descendantLevels) levels.push(lvl);
+
+      // SVG layout
+      const nodeW = 180, nodeH = 44, gapX = 24, gapY = 60;
+      const widest = Math.max(...levels.map(l => l.length));
+      const svgW = Math.max(800, widest * (nodeW + gapX) + gapX);
+      const svgH = levels.length * (nodeH + gapY) + 40 + (datasets.length ? 70 : 0);
+
+      // Position lookup: id → {x,y,run}
+      const pos = new Map();
+      levels.forEach((lvl, i) => {
+        const lvlW = lvl.length * nodeW + (lvl.length - 1) * gapX;
+        const startX = (svgW - lvlW) / 2;
+        const y = 20 + i * (nodeH + gapY);
+        lvl.forEach((r, j) => {
+          pos.set(r.id, { x: startX + j * (nodeW + gapX), y, run: r });
+        });
+      });
+
+      // Edges: parent_run_id → child for everything that has both endpoints
+      // on the canvas.
+      const edges = [];
+      for (const [, p] of pos) {
+        const r = p.run;
+        if (r.parent_run_id && pos.has(r.parent_run_id)) {
+          const parent = pos.get(r.parent_run_id);
+          edges.push({
+            x1: parent.x + nodeW / 2, y1: parent.y + nodeH,
+            x2: p.x + nodeW / 2,      y2: p.y,
+          });
+        }
+      }
+      // Edges from current run to datasets, drawn as a strip below.
+      const dsY = 20 + levels.length * (nodeH + gapY);
+      const dsW = 160, dsH = 32, dsGap = 12;
+      const dsStripW = datasets.length * dsW + (datasets.length - 1) * dsGap;
+      const dsStartX = (svgW - dsStripW) / 2;
+      const currentPos = pos.get(run.id);
+
+      const escAttr = s => String(s).replace(/"/g, "&quot;");
+      const renderRunNode = (r) => {
+        const p = pos.get(r.id);
+        const isCurrent = r.id === run.id;
+        const label = (r.name || r.id.slice(0, 8));
+        const sub = r.id.slice(0, 8);
+        const cls = isCurrent ? "lin-node lin-node-current" : "lin-node";
+        const targetExp = r.experiment_id || expID;
+        return `
+          <g class="${cls}" data-href="#/experiments/${targetExp}/runs/${r.id}" tabindex="0" role="link" aria-label="Open run ${escAttr(label)}">
+            <rect x="${p.x}" y="${p.y}" width="${nodeW}" height="${nodeH}" rx="6"></rect>
+            <text x="${p.x + 12}" y="${p.y + 18}" class="lin-node-label">${escapeHTML(label)}</text>
+            <text x="${p.x + 12}" y="${p.y + 34}" class="lin-node-sub">${sub}${isCurrent ? " · this run" : ""}</text>
+          </g>`;
+      };
+      const renderDataset = (d, i) => {
+        const x = dsStartX + i * (dsW + dsGap);
+        let href = "#/datasets";
+        if (d.dataset_id && d.version) {
+          href = `#/datasets/${encodeURIComponent(d.name)}/v${d.version}`;
+        } else if (d.dataset_id) {
+          href = `#/datasets/${encodeURIComponent(d.name)}`;
+        }
+        const label = d.name + (d.version ? ` v${d.version}` : "");
+        return `
+          <g class="lin-node lin-node-dataset" data-href="${href}" tabindex="0" role="link" aria-label="Open dataset ${escAttr(d.name)}">
+            <rect x="${x}" y="${dsY}" width="${dsW}" height="${dsH}" rx="6"></rect>
+            <text x="${x + 10}" y="${dsY + 20}" class="lin-node-label">${escapeHTML(label)}</text>
+          </g>`;
+      };
+      const dsEdges = datasets.map((_, i) => {
+        const x = dsStartX + i * (dsW + dsGap) + dsW / 2;
+        return `<line class="lin-edge lin-edge-dataset" x1="${currentPos.x + nodeW / 2}" y1="${currentPos.y + nodeH}" x2="${x}" y2="${dsY}" />`;
+      }).join("");
+
+      main.innerHTML = `
+        <div class="toolbar">
+          <h1 class="u-toolbar-title">Lineage · <span class="mono">${runID.slice(0, 8)}</span></h1>
+          <a href="#/experiments/${expID}/runs/${runID}" class="btn-ghost">Back to run</a>
+        </div>
+        <div class="card" style="padding:12px;display:flex;gap:14px;align-items:center;flex-wrap:wrap">
+          <label class="u-muted-xs">Direction
+            <select id="lin-direction">
+              <option value="both"${direction === "both" ? " selected" : ""}>both</option>
+              <option value="upstream"${direction === "upstream" ? " selected" : ""}>upstream</option>
+              <option value="downstream"${direction === "downstream" ? " selected" : ""}>downstream</option>
+            </select>
+          </label>
+          <label class="u-muted-xs">Depth
+            <input id="lin-depth" type="number" min="1" max="8" value="${depth}" style="width:60px"/>
+          </label>
+          ${lineage.truncated ? `<span class="status-pill status-FAILED" title="Increase depth or fanout">truncated</span>` : ""}
+          <span class="u-muted-xs" style="margin-left:auto">${ancestors.length} ancestor${ancestors.length === 1 ? "" : "s"} · ${descendants.length} descendant${descendants.length === 1 ? "" : "s"} · ${datasets.length} dataset${datasets.length === 1 ? "" : "s"}</span>
+        </div>
+        <div class="card" style="margin-top:12px;padding:0;overflow:auto">
+          <svg class="lineage-svg" width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}">
+            <defs>
+              <marker id="lin-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+                <path d="M0,0 L8,4 L0,8 z" fill="currentColor"/>
+              </marker>
+            </defs>
+            ${edges.map(e => `<line class="lin-edge" x1="${e.x1}" y1="${e.y1}" x2="${e.x2}" y2="${e.y2}" marker-end="url(#lin-arrow)"/>`).join("")}
+            ${dsEdges}
+            ${levels.flat().map(renderRunNode).join("")}
+            ${datasets.map(renderDataset).join("")}
+          </svg>
+        </div>`;
+
+      // Click + keyboard navigation on nodes.
+      const navigate = el => {
+        const href = el.dataset.href;
+        if (href) location.hash = href;
+      };
+      $$(".lin-node", main).forEach(el => {
+        el.addEventListener("click", () => navigate(el));
+        el.addEventListener("keydown", e => {
+          if (e.key === "Enter" || e.key === " ") { e.preventDefault(); navigate(el); }
+        });
+      });
+
+      // Direction / depth controls re-route with new query params.
+      const reroute = () => {
+        const dir = $("#lin-direction").value;
+        const dep = clampInt($("#lin-depth").value, 1, 8, 4);
+        location.hash = `#/experiments/${expID}/runs/${runID}/lineage?direction=${dir}&depth=${dep}`;
+      };
+      $("#lin-direction").addEventListener("change", reroute);
+      $("#lin-depth").addEventListener("change", reroute);
+    },
+
     async renderMetricCharts(runID, metrics) {
       if (!metrics || metrics.length === 0) return "";
       const charts = [];

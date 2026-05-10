@@ -886,6 +886,76 @@ button.btn-ghost:hover { background: var(--bg-alt); }
 }
 .lineage-node:hover { text-decoration: underline; }
 
+.lineage-dataset {
+  border: 1px solid color-mix(in srgb, var(--warning) 35%, var(--border));
+  background: color-mix(in srgb, var(--warning) 8%, var(--bg-card));
+  border-radius: 6px;
+  padding: 4px 10px;
+  margin-left: 6px;
+  display: inline-block;
+}
+.lineage-datasets-strip {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+/* ── Lineage SVG DAG (v1.4) ─────────────────────────────────────────────── */
+.lineage-svg {
+  display: block;
+  margin: 0 auto;
+  font-family: inherit;
+  background: var(--bg-card);
+}
+.lin-node { cursor: pointer; }
+.lin-node rect {
+  fill: var(--bg-alt);
+  stroke: var(--border);
+  stroke-width: 1;
+  transition: fill 120ms, stroke 120ms;
+}
+.lin-node:hover rect,
+.lin-node:focus rect {
+  fill: color-mix(in srgb, var(--accent) 10%, var(--bg-card));
+  stroke: var(--accent);
+  outline: none;
+}
+.lin-node-current rect {
+  fill: color-mix(in srgb, var(--accent) 14%, var(--bg-card));
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+.lin-node-dataset rect {
+  fill: color-mix(in srgb, var(--warning) 10%, var(--bg-card));
+  stroke: color-mix(in srgb, var(--warning) 50%, var(--border));
+}
+.lin-node-label {
+  fill: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
+  pointer-events: none;
+}
+.lin-node-sub {
+  fill: var(--fg-muted);
+  font-size: 11px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  pointer-events: none;
+}
+.lin-edge {
+  stroke: var(--fg-muted);
+  stroke-width: 1.4;
+  fill: none;
+  color: var(--fg-muted); /* arrowhead inherits */
+}
+.lin-edge-dataset {
+  stroke: color-mix(in srgb, var(--warning) 60%, var(--fg-muted));
+  stroke-dasharray: 4 3;
+}
+
 /* ── Generic modal pattern ─────────────────────────────────────────────────── */
 .modal-backdrop {
   position: fixed;

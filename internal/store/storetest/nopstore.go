@@ -194,6 +194,9 @@ func (NopStore) SearchRunsByName(context.Context, string, string, int) ([]*model
 func (NopStore) GetRunLineage(context.Context, string) (*store.RunLineage, error) {
 	return nil, store.ErrNotFound
 }
+func (NopStore) GetRunLineageWithOptions(context.Context, string, store.LineageOptions) (*store.RunLineage, error) {
+	return nil, store.ErrNotFound
+}
 
 // Janitor.
 func (NopStore) ArchiveStaleRuns(context.Context, int64) (int, error) { return 0, nil }

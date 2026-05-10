@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/gorevds/litemlflow/internal/model"
@@ -46,75 +48,285 @@ func (s *SQLiteStore) syncParentRunIDFromTag(ctx context.Context, runID, tagValu
 	return err
 }
 
-// GetRunLineage returns the run itself, its ancestor chain, and its direct descendants.
+// GetRunLineage is the v1.0 entry point — both directions, immediate
+// children only. Equivalent to GetRunLineageWithOptions with Direction=both,
+// DescendantDepth=1.
 func (s *SQLiteStore) GetRunLineage(ctx context.Context, runID string) (*RunLineage, error) {
+	return s.GetRunLineageWithOptions(ctx, runID, LineageOptions{
+		Direction:       LineageBoth,
+		DescendantDepth: 1,
+	})
+}
+
+// GetRunLineageWithOptions is the v1.4 extended walk:
+//
+//   - Direction=upstream  → Ancestors filled, Descendants empty
+//   - Direction=downstream → Descendants filled (BFS to opt.DescendantDepth)
+//   - Direction=both       → both
+//
+// Datasets is always populated when the run has logged inputs.
+//
+// Workspace isolation: every walk and join is constrained to the
+// experiment's workspace_id. parent_run_id is a user-settable tag
+// (mlflow.parentRunId), so without this filter an editor in workspace B
+// could set parent_run_id pointing into workspace A and exfiltrate
+// run names/timing/users via lineage queries. See independent-review
+// findings #1 and #2 for v1.4-rc1.
+func (s *SQLiteStore) GetRunLineageWithOptions(ctx context.Context, runID string, opt LineageOptions) (*RunLineage, error) {
 	run, err := s.GetRun(ctx, runID)
 	if err != nil {
 		return nil, err
 	}
+	exp, err := s.GetExperiment(ctx, run.ExperimentID)
+	if err != nil {
+		return nil, fmt.Errorf("lineage workspace lookup: %w", err)
+	}
+	workspaceID := exp.WorkspaceID
+	if workspaceID == "" {
+		workspaceID = "default"
+	}
 
-	// Walk ancestors upward (iterative to avoid unbounded recursion).
-	//
-	// Cycle defense: a malicious or buggy client can set tags such that
-	// parent_run_id forms a cycle (A → B → A). We track visited IDs and
-	// also cap the walk depth so that even non-cycle pathological chains
-	// (e.g., a 100k-deep tag-injected chain) cannot DoS the request.
-	const maxLineageDepth = 256
-	visited := make(map[string]struct{}, maxLineageDepth)
-	visited[runID] = struct{}{}
-	var ancestors []*model.Run
+	if opt.Direction == "" {
+		opt.Direction = LineageBoth
+	}
+	depth := opt.DescendantDepth
+	if depth <= 0 {
+		depth = 4
+	}
+	if depth > 8 {
+		depth = 8
+	}
+	fanOut := opt.MaxNodesPerLevel
+	if fanOut <= 0 {
+		fanOut = 50
+	}
+	if fanOut > 200 {
+		fanOut = 200
+	}
+
+	// Initialize empty (non-nil) slices so the JSON wire shape is always
+	// {"ancestors":[], "descendants":[], "datasets":[]} — not null. Old
+	// SDKs unmarshalling into typed slices choke on null.
+	out := &RunLineage{
+		Run:         run,
+		Ancestors:   []*model.Run{},
+		Descendants: []*model.Run{},
+		Datasets:    []DatasetEdge{},
+	}
+
+	// ----- ancestors (upstream) -----
+	if opt.Direction == LineageUpstream || opt.Direction == LineageBoth {
+		out.Ancestors = s.walkAncestors(ctx, run, runID, workspaceID)
+	}
+
+	// ----- descendants (downstream BFS) -----
+	if opt.Direction == LineageDownstream || opt.Direction == LineageBoth {
+		desc, truncated, err := s.walkDescendants(ctx, runID, workspaceID, depth, fanOut)
+		if err != nil {
+			return nil, err
+		}
+		if desc == nil {
+			desc = []*model.Run{}
+		}
+		out.Descendants = desc
+		out.Truncated = truncated
+	}
+
+	// ----- run → dataset edges (always) -----
+	edges, err := s.runDatasetEdges(ctx, runID, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	if edges != nil {
+		out.Datasets = edges
+	}
+
+	return out, nil
+}
+
+// walkAncestors traces parent_run_id upward with cycle + depth defenses,
+// constrained to runs in workspaceID (so a tag-injected cross-workspace
+// parent_run_id stops the walk instead of leaking).
+//
+// Transient errors from getRunInWorkspace are logged and break the walk;
+// returning a partial chain is preferable to a 500 for a read-only view,
+// but operators get an audit trail via slog.
+func (s *SQLiteStore) walkAncestors(ctx context.Context, run *model.Run, selfID, workspaceID string) []*model.Run {
+	const maxAncestorDepth = 256
+	visited := make(map[string]struct{}, maxAncestorDepth)
+	visited[selfID] = struct{}{}
+	ancestors := []*model.Run{}
 	cur := run.ParentRunID
 	for cur != "" {
 		if _, seen := visited[cur]; seen {
-			break // cycle detected — stop walking
+			break
 		}
-		if len(ancestors) >= maxLineageDepth {
-			break // depth cap — stop walking
+		if len(ancestors) >= maxAncestorDepth {
+			break
 		}
 		visited[cur] = struct{}{}
-		p, err := s.GetRun(ctx, cur)
+		p, err := s.getRunInWorkspace(ctx, cur, workspaceID)
 		if err != nil {
 			if errors.Is(err, ErrNotFound) {
+				// Either the run does not exist or it's in a different
+				// workspace. Treat both identically — do not leak which.
 				break
 			}
-			return nil, err
+			slog.Warn("lineage ancestor walk aborted on transient error",
+				"run_id", selfID, "next_id", cur, "depth_so_far", len(ancestors), "err", err.Error())
+			break
 		}
 		ancestors = append(ancestors, p)
 		cur = p.ParentRunID
 	}
+	return ancestors
+}
 
-	// Direct descendants (immediate children only; deep tree on demand).
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, experiment_id, COALESCE(name,''), status, start_time, end_time, artifact_uri,
-		       lifecycle_stage, COALESCE(user_id,''), COALESCE(source_type,''), COALESCE(source_name,''), run_kind,
-		       COALESCE(parent_run_id,'')
-		FROM runs WHERE parent_run_id = ? AND lifecycle_stage = 'active'
-		ORDER BY start_time ASC
-	`, runID)
-	if err != nil {
+// getRunInWorkspace returns ErrNotFound if the run is missing OR belongs
+// to a different workspace. Constant-shape error means callers cannot
+// distinguish the two cases, which is intentional for cross-workspace
+// information leakage prevention.
+func (s *SQLiteStore) getRunInWorkspace(ctx context.Context, runID, workspaceID string) (*model.Run, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT r.id, r.experiment_id, COALESCE(r.name,''), r.status,
+		       r.start_time, r.end_time, r.artifact_uri, r.lifecycle_stage,
+		       COALESCE(r.user_id,''), COALESCE(r.source_type,''),
+		       COALESCE(r.source_name,''), r.run_kind,
+		       COALESCE(r.parent_run_id,'')
+		FROM runs r
+		JOIN experiments e ON e.id = r.experiment_id
+		WHERE r.id = ? AND e.workspace_id = ?
+	`, runID, workspaceID)
+	var r model.Run
+	var endTime sql.NullInt64
+	if err := row.Scan(&r.ID, &r.ExperimentID, &r.Name, &r.Status,
+		&r.StartTime, &endTime, &r.ArtifactURI, &r.LifecycleStage,
+		&r.UserID, &r.SourceType, &r.SourceName, &r.Kind, &r.ParentRunID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
 		return nil, err
+	}
+	if endTime.Valid {
+		v := endTime.Int64
+		r.EndTime = &v
+	}
+	return &r, nil
+}
+
+// walkDescendants does a BFS starting from rootID, capped at maxDepth
+// levels and maxFanOut children per level. Children outside workspaceID
+// are excluded so a tag-injected parent_run_id from another workspace
+// cannot surface here.
+func (s *SQLiteStore) walkDescendants(ctx context.Context, rootID, workspaceID string, maxDepth, maxFanOut int) ([]*model.Run, bool, error) {
+	visited := map[string]struct{}{rootID: {}}
+	out := []*model.Run{}
+	frontier := []string{rootID}
+	truncated := false
+	for level := 0; level < maxDepth && len(frontier) > 0; level++ {
+		// Single query per level: WHERE parent_run_id IN (...).
+		// Keeps round-trips down to O(depth) instead of O(nodes).
+		placeholders := make([]string, len(frontier))
+		args := make([]any, 0, len(frontier)+2)
+		for i, id := range frontier {
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		args = append(args, workspaceID, int64(maxFanOut+1))
+		q := `SELECT r.id, r.experiment_id, COALESCE(r.name,''), r.status, r.start_time, r.end_time,
+		             r.artifact_uri, r.lifecycle_stage, COALESCE(r.user_id,''),
+		             COALESCE(r.source_type,''), COALESCE(r.source_name,''), r.run_kind,
+		             COALESCE(r.parent_run_id,'')
+		      FROM runs r
+		      JOIN experiments e ON e.id = r.experiment_id
+		      WHERE r.parent_run_id IN (` + strings.Join(placeholders, ",") + `)
+		            AND r.lifecycle_stage = 'active'
+		            AND e.workspace_id = ?
+		      ORDER BY r.start_time ASC
+		      LIMIT ?`
+		rows, err := s.db.QueryContext(ctx, q, args...)
+		if err != nil {
+			return nil, false, err
+		}
+		nextFrontier := make([]string, 0, len(frontier))
+		for rows.Next() {
+			var r model.Run
+			var endTime sql.NullInt64
+			if err := rows.Scan(&r.ID, &r.ExperimentID, &r.Name, &r.Status, &r.StartTime, &endTime,
+				&r.ArtifactURI, &r.LifecycleStage, &r.UserID, &r.SourceType, &r.SourceName, &r.Kind, &r.ParentRunID); err != nil {
+				_ = rows.Close()
+				return nil, false, err
+			}
+			if endTime.Valid {
+				v := endTime.Int64
+				r.EndTime = &v
+			}
+			if _, seen := visited[r.ID]; seen {
+				continue
+			}
+			// We over-fetched by 1 (LIMIT maxFanOut+1) precisely to detect
+			// truncation. If we already have maxFanOut new nodes at this
+			// level, stop appending — the extra row only signals "more
+			// existed."
+			if len(nextFrontier) >= maxFanOut {
+				truncated = true
+				continue
+			}
+			visited[r.ID] = struct{}{}
+			out = append(out, &r)
+			nextFrontier = append(nextFrontier, r.ID)
+		}
+		_ = rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, false, err
+		}
+		frontier = nextFrontier
+	}
+	if len(frontier) > 0 {
+		// Frontier still has nodes but we hit maxDepth — there is more to walk.
+		truncated = true
+	}
+	return out, truncated, nil
+}
+
+// runDatasetEdges joins dataset_inputs (run→name+digest) with datasets_v2
+// (name+content_hash → version + id) so the lineage response can render
+// run→dataset edges.
+//
+// The datasets_v2 mirror is workspace-scoped: the same (name, digest) pair
+// can exist in multiple workspaces, so we MUST filter by the run's
+// workspace to avoid (a) row explosion on the LEFT JOIN and (b) leaking
+// a sibling workspace's dataset version. Falls back to Version=0 /
+// DatasetID=0 when no v1.2 mirror exists for this workspace (legacy
+// v0.3 data) — UI degrades the link to the dataset list page.
+func (s *SQLiteStore) runDatasetEdges(ctx context.Context, runID, workspaceID string) ([]DatasetEdge, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT di.run_id,
+		       di.name,
+		       di.digest,
+		       COALESCE(d2.version, 0)  AS version,
+		       COALESCE(d2.id, 0)       AS dataset_id
+		FROM dataset_inputs AS di
+		LEFT JOIN datasets_v2 AS d2
+		       ON d2.name = di.name
+		      AND d2.content_hash = di.digest
+		      AND d2.workspace_id = ?
+		WHERE di.run_id = ?
+		ORDER BY di.id ASC
+	`, workspaceID, runID)
+	if err != nil {
+		return nil, fmt.Errorf("run dataset edges: %w", err)
 	}
 	defer rows.Close()
-
-	var descendants []*model.Run
+	out := []DatasetEdge{}
 	for rows.Next() {
-		var r model.Run
-		var endTime sql.NullInt64
-		if err := rows.Scan(&r.ID, &r.ExperimentID, &r.Name, &r.Status, &r.StartTime, &endTime,
-			&r.ArtifactURI, &r.LifecycleStage, &r.UserID, &r.SourceType, &r.SourceName, &r.Kind, &r.ParentRunID); err != nil {
+		var e DatasetEdge
+		if err := rows.Scan(&e.RunID, &e.Name, &e.Digest, &e.Version, &e.DatasetID); err != nil {
 			return nil, err
 		}
-		if endTime.Valid {
-			v := endTime.Int64
-			r.EndTime = &v
-		}
-		descendants = append(descendants, &r)
+		out = append(out, e)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	return &RunLineage{Run: run, Ancestors: ancestors, Descendants: descendants}, nil
+	return out, rows.Err()
 }
 
 // ----- janitor -----
