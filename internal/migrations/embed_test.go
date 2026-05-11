@@ -3,7 +3,10 @@ package migrations_test
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"testing"
 
 	"github.com/gorevds/litemlflow/internal/migrations"
@@ -79,4 +82,107 @@ func TestApplyAndRollback(t *testing.T) {
 	if v4 != v1 {
 		t.Fatalf("re-apply should restore version, got %d", v4)
 	}
+}
+
+// TestSquashEquivalence (v2.1 T4.18) verifies that applying the
+// hand-checked-in baseline file produces the same schema as applying
+// 001..NN sequentially. Any drift fails CI so the squash candidate
+// stays accurate; regenerate via `go run ./scripts/gen-baseline-schema`.
+func TestSquashEquivalence(t *testing.T) {
+	t.Parallel()
+
+	// Schema A: apply migrations 001..NN in sequence.
+	dbA, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbA.Close()
+	if err := migrations.Apply(context.Background(), dbA); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+	schemaA, err := dumpSchema(dbA)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Schema B: apply the baseline file to a fresh DB.
+	baseline, err := os.ReadFile("baseline/v2_baseline.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbB, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbB.Close()
+	if _, err := dbB.ExecContext(context.Background(), string(baseline)); err != nil {
+		t.Fatalf("apply baseline: %v", err)
+	}
+	schemaB, err := dumpSchema(dbB)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Compare object-by-object so the test message points to the
+	// specific drift rather than dumping the whole schema.
+	if len(schemaA) != len(schemaB) {
+		t.Fatalf("schema object count differs: migrations=%d baseline=%d\n"+
+			"hint: regenerate baseline via `go run ./scripts/gen-baseline-schema > internal/migrations/baseline/v2_baseline.sql`",
+			len(schemaA), len(schemaB))
+	}
+	for name, sqlA := range schemaA {
+		sqlB, ok := schemaB[name]
+		if !ok {
+			t.Errorf("baseline missing %q (present in migrations)", name)
+			continue
+		}
+		if normalizeSchemaSQL(sqlA) != normalizeSchemaSQL(sqlB) {
+			t.Errorf("schema mismatch for %q:\n  migrations: %s\n  baseline:   %s",
+				name, sqlA, sqlB)
+		}
+	}
+	for name := range schemaB {
+		if _, ok := schemaA[name]; !ok {
+			t.Errorf("baseline has %q absent from migrations", name)
+		}
+	}
+}
+
+// dumpSchema returns a name → CREATE statement map for the live DB,
+// excluding sqlite internal tables and per-connection temp probes.
+func dumpSchema(db *sql.DB) (map[string]string, error) {
+	rows, err := db.QueryContext(context.Background(), `
+		SELECT name, sql FROM sqlite_schema
+		WHERE sql IS NOT NULL
+		  AND name NOT LIKE 'sqlite_%'
+		  AND name NOT LIKE '__lmf_%'
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var name, ddl string
+		if err := rows.Scan(&name, &ddl); err != nil {
+			return nil, err
+		}
+		out[name] = ddl
+	}
+	return out, rows.Err()
+}
+
+// normalizeSchemaSQL collapses whitespace and the order of
+// whitespace-separated column-list contents so semantically equivalent
+// DDL compares equal.
+func normalizeSchemaSQL(s string) string {
+	// Replace runs of whitespace with single space, strip leading/trailing.
+	fields := strings.Fields(s)
+	// Within parenthesized lists, sort comma-separated items so column
+	// ordering differences (which are NOT semantically meaningful when
+	// applied to a fresh DB) don't trigger drift alerts. But cancel that:
+	// column order IS semantically meaningful when CREATE TABLE binds
+	// positional defaults. So just normalize whitespace.
+	_ = sort.StringSlice(nil)
+	return strings.Join(fields, " ")
 }

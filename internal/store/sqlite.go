@@ -1725,6 +1725,13 @@ func (s *SQLiteStore) GetRunNote(ctx context.Context, runID string) (content, up
 // LogInputs records dataset linkages for a run. Each dataset is upserted
 // (idempotent on name+digest); the input row and its tags are inserted fresh
 // each call to match MLflow's semantics (duplicate calls are additive).
+//
+// v2.1 T4.17: writes by default go to the v1.2 surface (datasets_v2 +
+// dataset_inputs_v2). The v0.3 tables (datasets, dataset_inputs,
+// dataset_input_tags) are written ONLY when the operator opts in via
+// LITEMLFLOW_ENABLE_DATASETS_V03_WRITES — preserved for external tools
+// that query the v0.3 schema directly. GetRunDatasets reads from both
+// sources and deduplicates by (name, digest).
 func (s *SQLiteStore) LogInputs(ctx context.Context, runID string, inputs []model.DatasetInput) error {
 	if len(inputs) == 0 {
 		return nil
@@ -1732,15 +1739,82 @@ func (s *SQLiteStore) LogInputs(ctx context.Context, runID string, inputs []mode
 	if err := assertRunExists(ctx, s.db, runID); err != nil {
 		return err
 	}
+	// SQLite WAL mode: two deferred txns that both do "SELECT for existence
+	// check, then INSERT" can race — the second commits hit SQLITE_BUSY_SNAPSHOT
+	// (517) because its read-snapshot pre-dates the first's WAL write.
+	// Retry the whole LogInputs op on these transient errors. The operation
+	// is idempotent on (workspace, name, digest) so a retry is safe.
+	// Verified under TestLogInputsConcurrentMirror (8 goroutines, same key).
+	const maxAttempts = 6
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		err := s.logInputsOnce(ctx, runID, inputs)
+		if err == nil {
+			return nil
+		}
+		if !isSnapshotRaceErr(err) {
+			return err
+		}
+		// Brief backoff before retry; final attempt returns the underlying err.
+		if attempt < maxAttempts-1 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Duration(1<<attempt) * 5 * time.Millisecond):
+			}
+		}
+	}
+	return fmt.Errorf("LogInputs: snapshot-race retries exhausted (%d attempts)", maxAttempts)
+}
+
+// isSnapshotRaceErr matches SQLite transient busy/snapshot errors that
+// indicate a writer-pairing race rather than a real failure. Retry is
+// safe for any idempotent operation.
+func isSnapshotRaceErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "database is locked") ||
+		strings.Contains(msg, "SQLITE_BUSY") ||
+		strings.Contains(msg, "(517)") || // SQLITE_BUSY_SNAPSHOT
+		strings.Contains(msg, "(5)")      // SQLITE_BUSY
+}
+
+func (s *SQLiteStore) logInputsOnce(ctx context.Context, runID string, inputs []model.DatasetInput) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	writeV03 := datasetsV03WritesEnabled()
+
 	for _, inp := range inputs {
 		ds := inp.Dataset
-		// Upsert dataset record (name+digest are PK).
+
+		// v1.2 + v2.1 primary path: ensure a datasets_v2 row exists and
+		// link it through dataset_inputs_v2.
+		datasetID, err := mirrorIntoDatasetsV2Returning(ctx, tx, runID, ds.Name, ds.Digest)
+		if err != nil {
+			return fmt.Errorf("mirror to datasets_v2: %w", err)
+		}
+		tagsJSON, err := encodeTagsJSON(inp.Tags)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO dataset_inputs_v2(run_id, dataset_id, tags_json)
+			VALUES (?, ?, ?)
+		`, runID, datasetID, tagsJSON); err != nil {
+			return fmt.Errorf("insert dataset_input_v2: %w", err)
+		}
+
+		// MLflow client compat: source_type / source / schema / profile
+		// are part of the wire shape on `runs/get`. The v1.2 datasets_v2
+		// schema doesn't carry them, so we keep upserting into the
+		// v0.3 `datasets` metadata cache — it's a thin (name, digest, …)
+		// table with no run-linkage cost. GetRunDatasets joins the
+		// primary path to this table to recover the metadata fields.
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO datasets(name, digest, source_type, source, schema, profile)
 			VALUES (?, ?, ?, ?, ?, ?)
@@ -1751,73 +1825,76 @@ func (s *SQLiteStore) LogInputs(ctx context.Context, runID string, inputs []mode
 			  profile     = COALESCE(excluded.profile,     profile)
 		`, ds.Name, ds.Digest, nilIfEmpty(ds.SourceType), nilIfEmpty(ds.Source),
 			nilIfEmpty(ds.Schema), nilIfEmpty(ds.Profile)); err != nil {
-			return fmt.Errorf("upsert dataset: %w", err)
+			return fmt.Errorf("upsert dataset metadata: %w", err)
 		}
 
-		// Insert dataset_input row and get its id.
-		res, err := tx.ExecContext(ctx, `
-			INSERT INTO dataset_inputs(run_id, name, digest) VALUES (?, ?, ?)
-		`, runID, ds.Name, ds.Digest)
-		if err != nil {
-			return fmt.Errorf("insert dataset_input: %w", err)
-		}
-		inputID, err := res.LastInsertId()
-		if err != nil {
-			return err
-		}
-
-		for _, tag := range inp.Tags {
-			if _, err := tx.ExecContext(ctx, `
-				INSERT INTO dataset_input_tags(dataset_input_id, key, value) VALUES (?, ?, ?)
-				ON CONFLICT(dataset_input_id, key) DO UPDATE SET value = excluded.value
-			`, inputID, tag.Key, tag.Value); err != nil {
-				return fmt.Errorf("insert dataset_input_tag: %w", err)
+		// v0.3 link table writes — opt-in via LITEMLFLOW_ENABLE_DATASETS_V03_WRITES.
+		// Kept for external tools that query the legacy dataset_inputs link
+		// table directly. Removal scheduled for v3.0 alongside the v1 sunset.
+		if writeV03 {
+			res, err := tx.ExecContext(ctx, `
+				INSERT INTO dataset_inputs(run_id, name, digest) VALUES (?, ?, ?)
+			`, runID, ds.Name, ds.Digest)
+			if err != nil {
+				return fmt.Errorf("insert dataset_input (v0.3): %w", err)
 			}
-		}
-
-		// v1.2 compat shim: also mirror this (name, digest) into datasets_v2
-		// so it shows up on the new Datasets UI alongside content-uploaded
-		// versions. We treat the digest as content_hash; size is 0 because
-		// log_input doesn't carry bytes. If a row already exists with the
-		// same (workspace, name, content_hash) we reuse it.
-		//
-		// Workspace is taken from the experiment that owns the run — same
-		// rule the analytics layer uses.
-		//
-		// T4.17 (soft): operators can disable the mirror via the env var
-		// LITEMLFLOW_DISABLE_DATASETS_V03_MIRROR=1 (e.g. when migrating
-		// off the v0.3 dataset_inputs path ahead of the v2.0 removal).
-		// When the mirror is disabled, log_input continues to write to
-		// the v0.3 tables only.
-		if !datasetsV03MirrorDisabled() {
-			if err := mirrorIntoDatasetsV2(ctx, tx, runID, ds.Name, ds.Digest); err != nil {
-				return fmt.Errorf("mirror to datasets_v2: %w", err)
+			inputID, err := res.LastInsertId()
+			if err != nil {
+				return err
+			}
+			for _, tag := range inp.Tags {
+				if _, err := tx.ExecContext(ctx, `
+					INSERT INTO dataset_input_tags(dataset_input_id, key, value) VALUES (?, ?, ?)
+					ON CONFLICT(dataset_input_id, key) DO UPDATE SET value = excluded.value
+				`, inputID, tag.Key, tag.Value); err != nil {
+					return fmt.Errorf("insert dataset_input_tag (v0.3): %w", err)
+				}
 			}
 		}
 	}
 	return tx.Commit()
 }
 
-// datasetsV03MirrorDisabled reports whether the operator opted out of the
-// v0.3 → v1.2 datasets forward-fill mirror via env. T4.17 escape hatch.
-//
-// Env var name was renamed in the T1-T4 final review pass: the original
-// LITEMLFLOW_DISABLE_DATASETS_V03_MIRROR read as "disable v0.3" but
-// actually disables the *forward-fill of v0.3 log_input → datasets_v2*.
-// The legacy name is honoured for one minor for backwards compat.
-func datasetsV03MirrorDisabled() bool {
-	if v := os.Getenv("LITEMLFLOW_DISABLE_V03_TO_V2_MIRROR"); v == "1" || v == "true" {
-		return true
+// encodeTagsJSON serializes the per-input tag list for storage in
+// dataset_inputs_v2.tags_json. Returns "[]" when there are no tags so
+// downstream readers can rely on a non-NULL parseable column.
+func encodeTagsJSON(tags []model.KV) (string, error) {
+	if len(tags) == 0 {
+		return "[]", nil
 	}
-	// Deprecated alias.
-	if v := os.Getenv("LITEMLFLOW_DISABLE_DATASETS_V03_MIRROR"); v == "1" || v == "true" {
+	b, err := json.Marshal(tags)
+	if err != nil {
+		return "", fmt.Errorf("encode dataset input tags: %w", err)
+	}
+	return string(b), nil
+}
+
+// datasetsV03WritesEnabled reports whether the operator opted IN to
+// continued v0.3 table writes via env. v2.1 T4.17 flipped the default
+// — the v1.2 surface (datasets_v2 + dataset_inputs_v2) is the primary
+// path, and the v0.3 tables are write-only for external-tool compat.
+//
+// The previous LITEMLFLOW_DISABLE_DATASETS_V03_MIRROR / _V03_TO_V2_MIRROR
+// envs targeted the OUTBOUND mirror, which no longer exists — the
+// datasets_v2 write is now unconditional. Honoured for one minor as
+// no-op so existing operator configs don't break.
+func datasetsV03WritesEnabled() bool {
+	if v := os.Getenv("LITEMLFLOW_ENABLE_DATASETS_V03_WRITES"); v == "1" || v == "true" {
 		return true
 	}
 	return false
 }
 
-// mirrorIntoDatasetsV2 inserts a row into datasets_v2 if one with the same
-// (workspace, name, content_hash) doesn't already exist. Idempotent.
+// mirrorIntoDatasetsV2 is the original signature (returns error only).
+// Retained for callers that don't need the id; new v2.1 code uses
+// mirrorIntoDatasetsV2Returning.
+func mirrorIntoDatasetsV2(ctx context.Context, tx *sql.Tx, runID, name, digest string) error {
+	_, err := mirrorIntoDatasetsV2Returning(ctx, tx, runID, name, digest)
+	return err
+}
+
+// mirrorIntoDatasetsV2Returning ensures a datasets_v2 row exists for
+// (workspace, name, content_hash) and returns its id. Idempotent.
 //
 // Why a free-function: it runs inside the LogInputs transaction so the
 // mirror is atomic with the dataset_inputs insert.
@@ -1832,7 +1909,7 @@ func datasetsV03MirrorDisabled() bool {
 //
 // We bound the retry loop to 3 attempts so a misbehaving constraint
 // can't loop forever; in practice 1-2 attempts is the worst case.
-func mirrorIntoDatasetsV2(ctx context.Context, tx *sql.Tx, runID, name, digest string) error {
+func mirrorIntoDatasetsV2Returning(ctx context.Context, tx *sql.Tx, runID, name, digest string) (int64, error) {
 	// Resolve the run's workspace via experiments.
 	var workspace string
 	err := tx.QueryRowContext(ctx, `
@@ -1841,7 +1918,7 @@ func mirrorIntoDatasetsV2(ctx context.Context, tx *sql.Tx, runID, name, digest s
 		WHERE r.id = ?
 	`, runID).Scan(&workspace)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if workspace == "" {
 		workspace = "default"
@@ -1856,16 +1933,16 @@ func mirrorIntoDatasetsV2(ctx context.Context, tx *sql.Tx, runID, name, digest s
 			WHERE workspace_id = ? AND name = ? AND content_hash = ?
 		`, workspace, name, digest).Scan(&existing)
 		if err == nil {
-			return nil // peer mirrored already (or we did on the previous attempt)
+			return existing, nil // peer mirrored already (or we did on the previous attempt)
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
-			return err
+			return 0, err
 		}
 
 		// SAVEPOINT so a UNIQUE constraint failure doesn't poison the
 		// outer LogInputs transaction.
 		if _, err := tx.ExecContext(ctx, "SAVEPOINT lmf_mirror"); err != nil {
-			return err
+			return 0, err
 		}
 
 		var maxVer sql.NullInt64
@@ -1874,29 +1951,34 @@ func mirrorIntoDatasetsV2(ctx context.Context, tx *sql.Tx, runID, name, digest s
 			workspace, name,
 		).Scan(&maxVer); err != nil {
 			_, _ = tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT lmf_mirror")
-			return err
+			return 0, err
 		}
 
-		_, err = tx.ExecContext(ctx, `
+		res, err := tx.ExecContext(ctx, `
 			INSERT INTO datasets_v2(name, version, content_hash, size_bytes,
 			                        workspace_id, created_at, lifecycle_stage)
 			VALUES (?, ?, ?, 0, ?, ?, 'active')
 		`, name, maxVer.Int64+1, digest, workspace, time.Now().UnixMilli())
 		if err == nil {
+			id, idErr := res.LastInsertId()
+			if idErr != nil {
+				_, _ = tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT lmf_mirror")
+				return 0, idErr
+			}
 			_, _ = tx.ExecContext(ctx, "RELEASE SAVEPOINT lmf_mirror")
-			return nil
+			return id, nil
 		}
 
 		// Roll back the savepoint so the outer txn stays usable.
 		_, _ = tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT lmf_mirror")
 		if !isUniqueConstraintErr(err) {
-			return err
+			return 0, err
 		}
 		// fall through to next attempt — peer's row will be visible
 	}
 	// Three constraint failures in a row means the contract is broken;
 	// surface that rather than loop forever.
-	return fmt.Errorf("mirror_to_datasets_v2: UNIQUE constraint contention exhausted retries (%d)", maxAttempts)
+	return 0, fmt.Errorf("mirror_to_datasets_v2: UNIQUE constraint contention exhausted retries (%d)", maxAttempts)
 }
 
 // isUniqueConstraintErr returns true if err is a SQLite UNIQUE failure.
@@ -1913,8 +1995,70 @@ func isUniqueConstraintErr(err error) bool {
 }
 
 // GetRunDatasets returns all dataset inputs linked to a run.
+//
+// v2.1 reads from BOTH paths and deduplicates by (name, digest) so:
+//   - Legacy rows logged before v2.1 (only in dataset_inputs) still surface.
+//   - New rows logged by v2.1+ writers (only in dataset_inputs_v2) surface.
+//   - Operators who opted in to v0.3 writes (LITEMLFLOW_ENABLE_DATASETS_V03_WRITES=1)
+//     see each input exactly once.
+//
+// MLflow-compat metadata (source_type, source, schema, profile) is read
+// from the always-on `datasets` table via LEFT JOIN — v1.2 datasets_v2
+// does not carry these fields. Missing rows degrade to empty strings.
 func (s *SQLiteStore) GetRunDatasets(ctx context.Context, runID string) ([]model.DatasetInput, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	// Primary: v2.1 link table joined to datasets_v2 (+ metadata cache).
+	rowsNew, err := s.db.QueryContext(ctx, `
+		SELECT di2.id, d2.name, d2.content_hash, di2.tags_json,
+		       COALESCE(d.source_type,''), COALESCE(d.source,''),
+		       COALESCE(d.schema,''), COALESCE(d.profile,'')
+		FROM dataset_inputs_v2 di2
+		JOIN datasets_v2 d2 ON d2.id = di2.dataset_id
+		LEFT JOIN datasets d ON d.name = d2.name AND d.digest = d2.content_hash
+		WHERE di2.run_id = ?
+		ORDER BY di2.id ASC
+	`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rowsNew.Close()
+
+	seen := map[string]bool{} // key = name|digest
+	var inputs []model.DatasetInput
+	for rowsNew.Next() {
+		var (
+			id          int64
+			name        string
+			contentHash string
+			tagsJSON    string
+			srcType     string
+			src         string
+			schema      string
+			profile     string
+		)
+		if err := rowsNew.Scan(&id, &name, &contentHash, &tagsJSON,
+			&srcType, &src, &schema, &profile); err != nil {
+			return nil, err
+		}
+		di := model.DatasetInput{Dataset: model.Dataset{
+			Name: name, Digest: contentHash,
+			SourceType: srcType, Source: src, Schema: schema, Profile: profile,
+		}}
+		if tagsJSON != "" && tagsJSON != "[]" {
+			if err := json.Unmarshal([]byte(tagsJSON), &di.Tags); err != nil {
+				return nil, fmt.Errorf("decode dataset input tags (id=%d): %w", id, err)
+			}
+		}
+		inputs = append(inputs, di)
+		seen[name+"|"+contentHash] = true
+	}
+	if err := rowsNew.Err(); err != nil {
+		return nil, err
+	}
+
+	// Legacy path: rows from v0.3 dataset_inputs (still present for
+	// historical runs and opt-in v0.3 writes). Skip any (name, digest)
+	// already returned from the primary path.
+	rowsOld, err := s.db.QueryContext(ctx, `
 		SELECT di.id, d.name, d.digest,
 		       COALESCE(d.source_type,''), COALESCE(d.source,''),
 		       COALESCE(d.schema,''), COALESCE(d.profile,'')
@@ -1926,27 +2070,31 @@ func (s *SQLiteStore) GetRunDatasets(ctx context.Context, runID string) ([]model
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rowsOld.Close()
 
-	var inputs []model.DatasetInput
-	var ids []int64
-	for rows.Next() {
+	var legacyIDs []int64
+	var legacyIdx []int // positions in `inputs` of newly appended legacy rows
+	for rowsOld.Next() {
 		var id int64
 		var di model.DatasetInput
-		if err := rows.Scan(&id, &di.Dataset.Name, &di.Dataset.Digest,
+		if err := rowsOld.Scan(&id, &di.Dataset.Name, &di.Dataset.Digest,
 			&di.Dataset.SourceType, &di.Dataset.Source,
 			&di.Dataset.Schema, &di.Dataset.Profile); err != nil {
 			return nil, err
 		}
+		if seen[di.Dataset.Name+"|"+di.Dataset.Digest] {
+			continue
+		}
 		inputs = append(inputs, di)
-		ids = append(ids, id)
+		legacyIDs = append(legacyIDs, id)
+		legacyIdx = append(legacyIdx, len(inputs)-1)
 	}
-	if err := rows.Err(); err != nil {
+	if err := rowsOld.Err(); err != nil {
 		return nil, err
 	}
 
-	// Load tags per input.
-	for i, id := range ids {
+	// Load legacy tags from dataset_input_tags for the legacy rows we kept.
+	for k, id := range legacyIDs {
 		tagRows, err := s.db.QueryContext(ctx, `
 			SELECT key, value FROM dataset_input_tags WHERE dataset_input_id = ? ORDER BY key
 		`, id)
@@ -1959,7 +2107,7 @@ func (s *SQLiteStore) GetRunDatasets(ctx context.Context, runID string) ([]model
 				_ = tagRows.Close()
 				return nil, err
 			}
-			inputs[i].Tags = append(inputs[i].Tags, kv)
+			inputs[legacyIdx[k]].Tags = append(inputs[legacyIdx[k]].Tags, kv)
 		}
 		_ = tagRows.Close()
 		if err := tagRows.Err(); err != nil {

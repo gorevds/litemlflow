@@ -312,18 +312,49 @@ func (s *SQLiteStore) walkDescendants(ctx context.Context, rootID, workspaceID s
 	return out, truncated, nil
 }
 
-// runDatasetEdges joins dataset_inputs (run→name+digest) with datasets_v2
-// (name+content_hash → version + id) so the lineage response can render
-// run→dataset edges.
+// runDatasetEdges surfaces run→dataset links for the lineage response.
 //
-// The datasets_v2 mirror is workspace-scoped: the same (name, digest) pair
-// can exist in multiple workspaces, so we MUST filter by the run's
-// workspace to avoid (a) row explosion on the LEFT JOIN and (b) leaking
-// a sibling workspace's dataset version. Falls back to Version=0 /
-// DatasetID=0 when no v1.2 mirror exists for this workspace (legacy
-// v0.3 data) — UI degrades the link to the dataset list page.
+// v2.1 reads BOTH:
+//   - dataset_inputs_v2 (the v2.1 primary link table) joined to datasets_v2
+//   - dataset_inputs (v0.3 legacy) — for runs that pre-date v2.1 or for
+//     operators who opted in to LITEMLFLOW_ENABLE_DATASETS_V03_WRITES
+//
+// Workspace filter on the datasets_v2 JOIN prevents row explosion and
+// cross-workspace leakage. Deduplication by (name, digest) ensures
+// operators with v0.3 writes enabled don't see each input twice.
+// Legacy rows fall back to Version=0 / DatasetID=0 when no v1.2 mirror
+// exists for this workspace.
 func (s *SQLiteStore) runDatasetEdges(ctx context.Context, runID, workspaceID string) ([]DatasetEdge, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	out := []DatasetEdge{}
+	seen := map[string]bool{}
+
+	// Primary: v2.1 link table.
+	rowsNew, err := s.db.QueryContext(ctx, `
+		SELECT di2.run_id, d2.name, d2.content_hash, d2.version, d2.id
+		FROM dataset_inputs_v2 di2
+		JOIN datasets_v2 d2 ON d2.id = di2.dataset_id
+		WHERE di2.run_id = ? AND d2.workspace_id = ?
+		ORDER BY di2.id ASC
+	`, runID, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("run dataset edges (v2): %w", err)
+	}
+	for rowsNew.Next() {
+		var e DatasetEdge
+		if err := rowsNew.Scan(&e.RunID, &e.Name, &e.Digest, &e.Version, &e.DatasetID); err != nil {
+			_ = rowsNew.Close()
+			return nil, err
+		}
+		out = append(out, e)
+		seen[e.Name+"|"+e.Digest] = true
+	}
+	_ = rowsNew.Close()
+	if err := rowsNew.Err(); err != nil {
+		return nil, err
+	}
+
+	// Legacy: v0.3 link table (for pre-v2.1 runs or opt-in writes).
+	rowsOld, err := s.db.QueryContext(ctx, `
 		SELECT di.run_id,
 		       di.name,
 		       di.digest,
@@ -338,18 +369,20 @@ func (s *SQLiteStore) runDatasetEdges(ctx context.Context, runID, workspaceID st
 		ORDER BY di.id ASC
 	`, workspaceID, runID)
 	if err != nil {
-		return nil, fmt.Errorf("run dataset edges: %w", err)
+		return nil, fmt.Errorf("run dataset edges (v0.3): %w", err)
 	}
-	defer rows.Close()
-	out := []DatasetEdge{}
-	for rows.Next() {
+	defer rowsOld.Close()
+	for rowsOld.Next() {
 		var e DatasetEdge
-		if err := rows.Scan(&e.RunID, &e.Name, &e.Digest, &e.Version, &e.DatasetID); err != nil {
+		if err := rowsOld.Scan(&e.RunID, &e.Name, &e.Digest, &e.Version, &e.DatasetID); err != nil {
 			return nil, err
+		}
+		if seen[e.Name+"|"+e.Digest] {
+			continue
 		}
 		out = append(out, e)
 	}
-	return out, rows.Err()
+	return out, rowsOld.Err()
 }
 
 // ----- janitor -----
