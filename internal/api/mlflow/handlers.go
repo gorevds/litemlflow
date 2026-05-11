@@ -1199,16 +1199,18 @@ func writeJSON(w http.ResponseWriter, v any) {
 // that still call the legacy alias get a heads-up via:
 //
 //	Deprecation: true
-//	Sunset: Sat, 11 May 2027 00:00:00 GMT
+//	Sunset: Tue, 11 May 2027 00:00:00 GMT
 //	Link: <docs URL>; rel="deprecation"
 //
 // We don't change the response body so the wire contract is unchanged
 // for the client — only headers are added.
 //
 // Sunset semantics per ADR 0003: v1 endpoints are supported for 12 months
-// after v2.0 GA (2026-05-11), so the Sunset date is 2027-05-11. Routes
-// flagged as legacy at v2.0 are removed at that date.
-const v2SunsetIMF = "Sat, 11 May 2027 00:00:00 GMT"
+// after v2.0 GA (2026-05-11), so the Sunset date is 2027-05-11.
+// 2027-05-11 falls on a Tuesday — RFC 7231 IMF-fixdate requires the
+// day-of-week to be correct (strict parsers reject mismatched dates).
+// Routes flagged as legacy at v2.0 are removed at that date.
+const v2SunsetIMF = "Tue, 11 May 2027 00:00:00 GMT"
 
 func deprecated(next http.HandlerFunc, removeAt string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

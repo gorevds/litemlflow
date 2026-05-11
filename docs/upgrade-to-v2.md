@@ -156,6 +156,32 @@ Link: </docs/upgrade-to-v2.md>; rel="deprecation"; type="text/markdown"
 X-LiteMLflow-Removed-At: v2.0
 ```
 
+## Federation (v1.3) — pen-test status
+
+The federation surface (`/api/v1/federate/*`) has had four rounds of
+in-tree independent review during v1.3.0-rc1 → v1.3.0 stable. Confirmed-fixed
+findings:
+
+- **C1** — RBAC bypass on peer CRUD endpoints (any authenticated viewer could
+  register a peer).
+- **C2** — unbounded `io.ReadAll` on peer responses (OOM vector via hostile
+  peer).
+- **H1** — TTL cache could evict fresh entries after Get-then-Put (correctness).
+- **H2** — auth-error shape leaked whether a peer name was registered
+  (enumeration).
+
+An **external pen test** on the federation protocol has NOT been performed.
+For v2.0 LTS we ship federation with this caveat:
+
+- ✅ **Safe to deploy** across servers you control — single trust domain,
+  same operator, same security posture. The defenses above hold against
+  in-tree threats.
+- ⚠️ **Not yet recommended** for cross-organization federation where the
+  remote operator is adversarial. Independent in-tree review is not a
+  substitute for an external paid audit.
+- ⏭️ **Next step for v2.1 / v3.0**: contract an external firm to attack the
+  HMAC protocol and the cache+search fan-out. Budget 4 weeks of fixes.
+
 ## Sign-off + ownership
 
 The plans in this document were the audit output of six independent

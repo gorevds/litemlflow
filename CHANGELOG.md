@@ -2,6 +2,21 @@
 
 All notable changes to LiteMLflow are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/) starting at v1.0.
 
+## [v2.0.0] — 2026-05-11
+
+LTS stable. Promotes v2.0.0-rc1 with four pre-stable fixes from independent review:
+
+### Fixed
+- **C1**: Sunset header day-of-week was `Sat, 11 May 2027` but 2027-05-11 is a **Tuesday**. RFC 7231 strict parsers reject the mismatched IMF-fixdate or parse it as the following Saturday. Corrected to `Tue, 11 May 2027 00:00:00 GMT` and updated the assertion in `internal/server/v2_alias_test.go`.
+- **H2**: CHANGELOG entries for v1.3 / v1.4 / v1.5 backfilled below.
+- **H6**: `apiV2AliasMiddleware` now rewrites `EscapedPath()` (raw, still encoded) and re-decodes after, so percent-encoded segments in `/api/v2/...` paths route to the same prompt/run as `/api/v1/...`. Without this, `%2F` in a prompt name was silently decoded to a path separator. New test `TestV2AliasPreservesPercentEncoding`.
+- **M13**: ADR table promised deprecation headers on `DELETE registered-models/delete` and `DELETE model-versions/delete` — verified that both routes (already wrapped with the `deprecated()` helper) emit the corrected Sunset. New test `TestMlflowDeprecatedRoutesEmitSunset` covers all four flagged routes.
+- **M11**: ADR softened — `Store` interface lives in `internal/store`, which is not a Go public API. Removed the "embedders pin to major" claim; the LTS contract is HTTP-wire-only.
+- **M12**: README and `docs/upgrade-to-v2.md` now state explicitly that federation has not had an external pen test and should be deployed in single-trust-domain environments only.
+
+### Tests
+`go test -count=1 -race ./...` — all 13 packages green. New: `TestV2AliasPreservesRouteVariables`, `TestV2AliasPreservesPercentEncoding`. Updated: `TestMlflowDeprecatedRoutesEmitSunset` (now covers 4 routes × Deprecation+Sunset+Link assertion).
+
 ## [v2.0.0-rc1] — 2026-05-11
 
 End-of-Y2 release. Theme: **LTS** — the v1 wire contract is frozen for at least 12 months, the v2 namespace is now a stable alias, and the MLflow-compat sunset clock is set.
@@ -41,6 +56,63 @@ May change without a major bump:
 Drop-in binary upgrade. Existing clients keep working unchanged. Pin to `/api/v2/...` in new code if you want the explicit LTS namespace stamp.
 
 Full report: [docs/adr/0003-v2-lts-charter.md](docs/adr/0003-v2-lts-charter.md).
+
+## [v1.5.0] — 2026-05-11
+
+Y2 Q4 release (time-travel half — the lineage half shipped in v1.4). Theme: **read-side time-travel** via an append-only event log.
+
+### Added
+- Migration `013_events.sql`: `events(ts_ms, kind, entity_type, entity_id, payload)` with composite index for replay queries.
+- `Store.GetRunAsOf` / `GetRunAsOfInWorkspace` / `GetLatestMetricsAsOf` — reconstruct a run's state at any unix-ms.
+- All run mutations (`UpdateRun`, `SetRunLifecycle`, `SetTag`, `SetTags`, `DeleteTag`, `setParentRunID`, `syncParentRunIDFromTag`, `ArchiveStaleRuns`) mirror to the event log via `tryWriteRunEvent` (logs failures via `slog.Warn`).
+- `GET /api/2.0/mlflow/runs/get?as_of=<ms>` and `metrics/get-history?as_of=<ms>` (free filter — metrics are append-only).
+- `POST /api/2.0/mlflow/runs/search?as_of=<ms>` and `GET /api/v1/runs/{id}/data?as_of=<ms>` (added in v1.5.0 stable).
+- UI date-picker on the run detail page (datetime-local input + snapshot banner).
+- `LITEMLFLOW_EVENTS_RETENTION` env var + janitor sweep for the events table.
+- Replay row cap `MaxEventsPerReplay = 50_000` (returns `ErrReplayLimitExceeded`).
+
+### Pre-tag fixes from independent review
+- **C1**: per-key metric reduction was done by filtering the already-collapsed `GetLatestMetrics` list — dropped keys whose latest postdated as_of. New `GetLatestMetricsAsOf` does the SQL reduction.
+- **C2**: `setParentRunID` and `ArchiveStaleRuns` inserted tags via raw SQL bypassing the event log. Both now capture before-state and write events.
+- **H3**: `GetRunAsOf` was workspace-blind — same exfiltration vector as v1.4 lineage. New `GetRunAsOfInWorkspace` gates the lookup.
+- **H1**: `SetTags` bulk path wrote zero events.
+- **M1/M3/M4**: future-as_of rejection, 50k replay cap, retention janitor.
+
+Report: [docs/reports/2026-05-11-v1-5-stable.md](docs/reports/2026-05-11-v1-5-stable.md).
+
+## [v1.4.0] — 2026-05-10
+
+Y2 Q4 release (lineage half). Theme: **lineage DAG** with directional walks and dataset edges. Time-travel deferred to v1.5.
+
+### Added
+- `GET /api/v1/runs/{id}/lineage?direction=upstream|downstream|both&depth=N&fanout=N`. New fields in the response: `datasets[]` (run→dataset edges) and `truncated`.
+- SVG layered DAG view at `#/experiments/{id}/runs/{id}/lineage` — ancestors top, current middle, descendants bottom, dataset chips below the current node. Click + keyboard navigation, depth/direction/fanout toolbar.
+- Inline lineage card on the run detail page now includes dataset chips and a "View full DAG" link.
+
+### Pre-tag fixes from independent review
+- **C1 + C2**: workspace isolation on every walk and on dataset edges. `parent_run_id` is a user-settable tag, so without the JOIN on `experiments.workspace_id` an editor in ws-B could exfiltrate ws-A run names/timing/users via lineage queries. New `getRunInWorkspace` helper; dataset join filters by workspace_id too (the legacy `dataset_inputs ⨝ datasets_v2` would otherwise row-explode across workspaces with the same `(name, digest)` pair).
+
+Report: [docs/reports/2026-05-10-v1-4-rc1.md](docs/reports/2026-05-10-v1-4-rc1.md).
+
+## [v1.3.0] — 2026-05-10
+
+Y2 Q3 release. Theme: **federated multi-server** — multiple LiteMLflow instances behind one UI.
+
+### Added
+- Mutual HMAC-SHA256 federation (canonical `method\npath\nts\nbody`), bounded TTL response cache (256×30s default).
+- Migration `012_peers.sql`: peers table with name, URL, secret, workspace_id, status, last_seen, last_error.
+- Native API: peer CRUD + echo probe + peer-callable `/federate/{echo,search}` (HMAC is the auth — exempt from session middleware).
+- `GET /api/v1/search?federated=1` fan-out, origin-tagged hits, partial-failure surface.
+- UI: `#/federation` page with add-peer modal (one-time secret reveal + clipboard copy); Cmd+K palette toggle with origin pills.
+- `LITEMLFLOW_FEDERATION_NAME` + `LITEMLFLOW_ENABLE_MULTI_TENANT` env vars.
+
+### Pre-tag fixes from independent review
+- **C1**: RBAC bypass on peer CRUD — admin-only gate added for non-GET `/api/v1/federate/peers*`.
+- **C2**: unbounded `io.ReadAll` on peer responses → 8 MiB cap via `io.LimitReader`.
+- **H1**: cache TTL eviction could wipe fresh entries after re-Put — eager FIFO key removal.
+- **H2**: auth-error shape leaked whether a peer name was registered — collapsed to opaque 401 body.
+
+Report: [docs/reports/2026-05-08-v1-3-rc1.md](docs/reports/2026-05-08-v1-3-rc1.md).
 
 ## [v1.2.0-rc1] — 2026-05-08
 

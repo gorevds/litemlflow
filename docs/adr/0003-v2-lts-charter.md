@@ -37,10 +37,11 @@ Within v2.x (until v3.0 ships), the following are **frozen**:
 
 Within v2.x we explicitly **may** change:
 
-- Internal Go package layout (`internal/...`) — third-party embedders pin to
-  major.
-- The `Store` interface — adding methods is non-breaking for our concrete
-  store, breaking for embedders.
+- Internal Go package layout (`internal/...`). Per Go's import path rules,
+  packages under `internal/...` are NOT a public API — third-party code
+  cannot import them. The LTS contract is HTTP-wire-only; there is no
+  Go-embedder contract because the import path doesn't grant one.
+- The `Store` interface — adding methods is routine.
 - UI layout and JS bundle structure.
 - Tracing, logging, metrics shapes.
 - Default values of env-var configs (with a CHANGELOG note).
@@ -93,7 +94,7 @@ the upstream MLflow contract.
 - ADR 0003 (this doc) committed.
 - `/api/v2/...` route aliases mounted for every endpoint currently at `/api/v1/...`.
 - The MLflow-compat `deprecated()` wrapper now emits an RFC 7231 IMF-fixdate
-  `Sunset` header (`Sat, 11 May 2027 00:00:00 GMT`).
+  `Sunset` header (`Tue, 11 May 2027 00:00:00 GMT` — 2027-05-11 is a Tuesday).
 - CHANGELOG.md gains a `[v2.0.0-rc1]` section that links here.
 
 ### Still deferred to v2.1 / v3.0

@@ -87,6 +87,18 @@ Open http://localhost:5000 — you're done. No Postgres. No S3. No reverse proxy
 
 ---
 
+## Stability
+
+LiteMLflow follows semver starting at v1.0. **v2.0 is the LTS stream.**
+
+- The HTTP wire shape of `/api/v1/...` and `/api/v2/...` is frozen for v2.x. Additive changes only (new optional fields/endpoints) — see [ADR 0003](docs/adr/0003-v2-lts-charter.md).
+- v1-flagged legacy MLflow-compat aliases ship with `Sunset: Tue, 11 May 2027 00:00:00 GMT` headers — 12 months of advance notice.
+- Pin to `/api/v2/...` paths in new code if you want the explicit LTS namespace stamp; existing v1 clients keep working unchanged.
+
+**Federation caveat (`/api/v1/federate/...`)**: in-tree independent reviews caught and fixed RBAC bypass (C1), unbounded-response OOM (C2), peer-name enumeration (H2), and cache-correctness (H1) issues. An external pen test on the federation protocol has NOT been performed. Deploy federation only across servers you control (single trust domain). Cross-organization federation should wait for the pen-test pass tracked in [docs/upgrade-to-v2.md](docs/upgrade-to-v2.md).
+
+---
+
 ## What works today (v1.0)
 
 - **MLflow REST API** — experiments, runs, metrics, params, tags, artifacts (upload/download/delete), metric history, search with full filter grammar (`=`/`!=`/`<`/`>`/`LIKE`/`IN`/`BETWEEN`), `log_batch`, `log_inputs`, pagination, Model Registry

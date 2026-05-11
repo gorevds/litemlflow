@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -40,12 +41,29 @@ const (
 //
 // The rewrite happens BEFORE logging/auth so downstream handlers, audit
 // logs, and metrics all see the canonical v1 path. The `X-API-Version`
-// response header records that the request entered through v2.
+// response header records that the request entered through v2. Query
+// string is preserved unchanged.
+//
+// Percent-encoded segments: we rewrite EscapedPath() (raw, still encoded)
+// so a path like /api/v2/prompts/my%2Fname does NOT silently route to
+// /api/v1/prompts/my/name. Without this, the slice would operate on the
+// already-decoded r.URL.Path and an encoded forward-slash would split
+// into two path segments — a different prompt name than the v1 caller
+// would see (independent-review H6 for v2.0-rc1).
 func apiV2AliasMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/v2/") {
-			r.URL.Path = "/api/v1/" + r.URL.Path[len("/api/v2/"):]
-			r.URL.RawPath = ""
+		esc := r.URL.EscapedPath()
+		if strings.HasPrefix(esc, "/api/v2/") {
+			newEsc := "/api/v1/" + esc[len("/api/v2/"):]
+			r.URL.RawPath = newEsc
+			if decoded, err := url.PathUnescape(newEsc); err == nil {
+				r.URL.Path = decoded
+			} else {
+				// Malformed encoding — surface as 400 rather than silently
+				// passing through with a corrupt path.
+				http.Error(w, "invalid percent-encoding in path", http.StatusBadRequest)
+				return
+			}
 			w.Header().Set("X-API-Version", "2")
 		}
 		next.ServeHTTP(w, r)
