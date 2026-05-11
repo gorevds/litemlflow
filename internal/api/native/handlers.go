@@ -523,12 +523,38 @@ func (h *Handler) GetRunTraces(w http.ResponseWriter, r *http.Request) {
 // response would be more confusing than a clear failure.
 func (h *Handler) GetRunData(w http.ResponseWriter, r *http.Request) {
 	runID := chi.URLParam(r, "runID")
-	run, err := h.Store.GetRun(r.Context(), runID)
+
+	// v1.5 stable: ?as_of=<unix_ms> reconstructs run + tags + latest-metrics
+	// at the given timestamp. Spans and params are returned unfiltered for now.
+	var asOf int64
+	if v := r.URL.Query().Get("as_of"); v != "" {
+		ts, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || ts <= 0 {
+			writeError(w, http.StatusBadRequest, codeInvalidParameter,
+				"as_of must be positive unix milliseconds")
+			return
+		}
+		asOf = ts
+	}
+
+	var run *model.Run
+	var tags []model.KV
+	var err error
+	if asOf > 0 {
+		run, tags, err = h.Store.GetRunAsOfInWorkspace(r.Context(), runID, workspaceFromReq(r), asOf)
+	} else {
+		run, err = h.Store.GetRun(r.Context(), runID)
+	}
 	if err != nil {
 		writeStoreErr(w, err)
 		return
 	}
-	metrics, err := h.Store.GetLatestMetrics(r.Context(), runID)
+	var metrics []model.Metric
+	if asOf > 0 {
+		metrics, err = h.Store.GetLatestMetricsAsOf(r.Context(), runID, asOf)
+	} else {
+		metrics, err = h.Store.GetLatestMetrics(r.Context(), runID)
+	}
 	if err != nil {
 		writeStoreErr(w, err)
 		return
@@ -538,10 +564,12 @@ func (h *Handler) GetRunData(w http.ResponseWriter, r *http.Request) {
 		writeStoreErr(w, err)
 		return
 	}
-	tags, err := h.Store.GetTags(r.Context(), runID)
-	if err != nil {
-		writeStoreErr(w, err)
-		return
+	if asOf == 0 {
+		tags, err = h.Store.GetTags(r.Context(), runID)
+		if err != nil {
+			writeStoreErr(w, err)
+			return
+		}
 	}
 	spans, err := h.Store.GetSpansByRun(r.Context(), runID)
 	if err != nil {

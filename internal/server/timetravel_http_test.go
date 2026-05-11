@@ -226,6 +226,99 @@ func TestTimeTravelInvalidAsOf(t *testing.T) {
 	}
 }
 
+// TestTimeTravelSearchRunsAsOf — v1.5 stable: search loop honors as_of.
+// Creates two runs (one before T, one after), then searches with as_of=T.
+// Only the pre-T run should appear; its name should be the pre-T value.
+func TestTimeTravelSearchRunsAsOf(t *testing.T) {
+	t.Parallel()
+	ts, _ := newTestServer(t, config.Config{})
+	expID := createExperimentReturning(t, ts.URL, "v15-tt-search")
+
+	// Run A: created before T, mutated after T → should appear with old name.
+	body := fmt.Sprintf(`{"experiment_id":%q,"start_time":1000}`, expID)
+	resp, err := http.Post(ts.URL+"/api/2.0/mlflow/runs/create",
+		"application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	var created struct {
+		Run struct {
+			Info struct {
+				ID string `json:"run_id"`
+			} `json:"info"`
+		} `json:"run"`
+	}
+	_ = json.Unmarshal(raw, &created)
+	runA := created.Run.Info.ID
+	updateRun(t, ts.URL, runA, "", "alpha-before", 0)
+
+	tBefore := time.Now().UnixMilli()
+	time.Sleep(10 * time.Millisecond)
+
+	updateRun(t, ts.URL, runA, "", "alpha-after", 0)
+
+	// Run B: created after T → should be excluded from as_of=tBefore search.
+	body = fmt.Sprintf(`{"experiment_id":%q,"start_time":%d}`, expID, tBefore+1000)
+	resp, _ = http.Post(ts.URL+"/api/2.0/mlflow/runs/create",
+		"application/json", strings.NewReader(body))
+	resp.Body.Close()
+
+	// Search with as_of=tBefore.
+	url := fmt.Sprintf("%s/api/2.0/mlflow/runs/search?as_of=%d", ts.URL, tBefore)
+	searchBody := fmt.Sprintf(`{"experiment_ids":[%q],"max_results":10}`, expID)
+	resp, err = http.Post(url, "application/json", strings.NewReader(searchBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	raw, _ = io.ReadAll(resp.Body)
+	var got struct {
+		Runs []struct {
+			Info struct {
+				ID      string `json:"run_id"`
+				RunName string `json:"run_name"`
+			} `json:"info"`
+		} `json:"runs"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode: %v body=%s", err, raw)
+	}
+	if len(got.Runs) != 1 {
+		t.Fatalf("expected 1 run, got %d (%s)", len(got.Runs), raw)
+	}
+	if got.Runs[0].Info.ID != runA {
+		t.Errorf("expected runA, got %q", got.Runs[0].Info.ID)
+	}
+	if got.Runs[0].Info.RunName != "alpha-before" {
+		t.Errorf("expected name=alpha-before, got %q", got.Runs[0].Info.RunName)
+	}
+}
+
+// TestTimeTravelFutureAsOfRejected — independent-review M1: an as_of
+// timestamp clearly in the future should return 400, not silently alias
+// to "now".
+func TestTimeTravelFutureAsOfRejected(t *testing.T) {
+	t.Parallel()
+	ts, _ := newTestServer(t, config.Config{})
+	expID := createExperimentReturning(t, ts.URL, "v15-tt-future")
+	runID := createRunReturning(t, ts.URL, expID, "")
+
+	// 1 day in the future.
+	future := time.Now().Add(24 * time.Hour).UnixMilli()
+	url := fmt.Sprintf("%s/api/2.0/mlflow/runs/get?run_id=%s&as_of=%d", ts.URL, runID, future)
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		raw, _ := io.ReadAll(resp.Body)
+		t.Errorf("future as_of: want 400, got %d (%s)", resp.StatusCode, raw)
+	}
+}
+
 // runResp matches the MLflow GetRun response shape we care about.
 type runResp struct {
 	Run struct {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -65,6 +66,18 @@ func (s *SQLiteStore) tryWriteRunEvent(ctx context.Context, kind, runID string, 
 	if err := s.writeRunEvent(ctx, kind, runID, payload); err != nil {
 		slog.Warn("event write failed", "run_id", runID, "kind", kind, "err", err.Error())
 	}
+}
+
+// PruneEventsBefore deletes event rows with ts_ms < beforeMs. Used by
+// the janitor to bound monotonic growth of the events table when
+// LITEMLFLOW_EVENTS_RETENTION_DAYS is configured. Returns the row count.
+func (s *SQLiteStore) PruneEventsBefore(ctx context.Context, beforeMs int64) (int, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM events WHERE ts_ms < ?`, beforeMs)
+	if err != nil {
+		return 0, fmt.Errorf("prune events: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
 }
 
 // runEvent is one row from the events table, decoded for replay.
@@ -148,6 +161,18 @@ func (s *SQLiteStore) GetRunAsOfInWorkspace(ctx context.Context, runID, workspac
 	return s.getRunAsOfImpl(ctx, runID, workspaceID, asOfMs)
 }
 
+// MaxEventsPerReplay caps how many event rows GetRunAsOf will scan for
+// a single run. A pathological writer can spam SetTag and turn every
+// as-of read into an O(N) walk; this bound keeps the replay path
+// predictable. The cap is generous enough for legitimate workloads
+// (each tag set/delete + run mutation is one row).
+const MaxEventsPerReplay = 50_000
+
+// ErrReplayLimitExceeded is returned when a run has more event rows
+// than MaxEventsPerReplay — the caller should narrow the as-of window
+// or accept the current state.
+var ErrReplayLimitExceeded = errors.New("run has too many events to replay; narrow the as-of window")
+
 func (s *SQLiteStore) getRunAsOfImpl(ctx context.Context, runID, workspaceID string, asOfMs int64) (*model.Run, []model.KV, error) {
 	var (
 		run *model.Run
@@ -168,19 +193,27 @@ func (s *SQLiteStore) getRunAsOfImpl(ctx context.Context, runID, workspaceID str
 	// All events on this run, oldest first. We need both directions:
 	// events at ts_ms <= asOfMs are kept-as-is, events at ts_ms > asOfMs
 	// are undone via the `before` payload.
+	//
+	// LIMIT +1 lets us detect overflow without slurping unbounded rows.
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, ts_ms, kind, payload
 		FROM events
 		WHERE entity_type = 'run' AND entity_id = ?
 		ORDER BY ts_ms ASC, id ASC
-	`, runID)
+		LIMIT ?
+	`, runID, int64(MaxEventsPerReplay+1))
 	if err != nil {
 		return nil, nil, fmt.Errorf("event scan: %w", err)
 	}
 	defer rows.Close()
 
 	var newer []runEvent
+	scanned := 0
 	for rows.Next() {
+		scanned++
+		if scanned > MaxEventsPerReplay {
+			return nil, nil, ErrReplayLimitExceeded
+		}
 		var e runEvent
 		var rawPayload string
 		if err := rows.Scan(&e.ID, &e.TsMs, &e.Kind, &rawPayload); err != nil {

@@ -133,7 +133,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 	// Start the background janitor if enabled.
 	if s.cfg.JanitorEnabled {
-		StartJanitor(ctx, s.store, s.cfg.JanitorInterval, s.cfg.RunStaleAfter, s.logger)
+		StartJanitor(ctx, s.store, s.cfg.JanitorInterval, s.cfg.RunStaleAfter, s.cfg.EventsRetention, s.logger)
 	}
 
 	// Start HTTP server.

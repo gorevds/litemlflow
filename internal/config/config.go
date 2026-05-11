@@ -94,6 +94,12 @@ type Config struct {
 	// to FAILED with the tag lmf.auto_archived=stale (default 24h).
 	// Configure via LITEMLFLOW_RUN_STALE_AFTER env var or --run-stale-after flag.
 	RunStaleAfter time.Duration
+
+	// EventsRetention bounds the lifetime of v1.5 time-travel event rows.
+	// 0 (default) keeps events forever; positive values cause the janitor
+	// to delete rows older than now-EventsRetention on each tick.
+	// Configure via LITEMLFLOW_EVENTS_RETENTION env var.
+	EventsRetention time.Duration
 }
 
 // FromEnv returns a Config populated from environment variables, then
@@ -220,6 +226,11 @@ func overlayFromEnv(c Config) Config {
 			c.RunStaleAfter = d
 		}
 	}
+	if v := os.Getenv("LITEMLFLOW_EVENTS_RETENTION"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			c.EventsRetention = d
+		}
+	}
 	return c
 }
 
@@ -317,6 +328,9 @@ func overlay(base, explicit Config) Config {
 	}
 	if explicit.RunStaleAfter != 0 {
 		base.RunStaleAfter = explicit.RunStaleAfter
+	}
+	if explicit.EventsRetention != 0 {
+		base.EventsRetention = explicit.EventsRetention
 	}
 	if explicit.EnableMultiTenant {
 		base.EnableMultiTenant = explicit.EnableMultiTenant

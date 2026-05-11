@@ -208,7 +208,8 @@ func (NopStore) GetLatestMetricsAsOf(context.Context, string, int64) ([]model.Me
 }
 
 // Janitor.
-func (NopStore) ArchiveStaleRuns(context.Context, int64) (int, error) { return 0, nil }
+func (NopStore) ArchiveStaleRuns(context.Context, int64) (int, error)    { return 0, nil }
+func (NopStore) PruneEventsBefore(context.Context, int64) (int, error)   { return 0, nil }
 
 // Webhooks.
 func (NopStore) CreateWebhook(context.Context, *model.Webhook) (int64, error) {

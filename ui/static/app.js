@@ -1970,9 +1970,16 @@ mlflow.log_metric("loss", 0.42)</pre>
       const main = $("#app");
       const STARRED_TAG = "lmf.starred";
 
+      // v1.5 time-travel: optional ?as_of=<unix_ms> in the hash. The
+      // picker below lets the user pick a wall-clock datetime; we convert
+      // to unix-ms for the API call.
+      const hashParams = new URLSearchParams(location.hash.split("?")[1] || "");
+      const asOfMs = parseInt(hashParams.get("as_of"), 10) || 0;
+
       try {
+        const dataURL = `/api/v1/runs/${runID}/data` + (asOfMs > 0 ? `?as_of=${asOfMs}` : "");
         const [data, noteRes, lineageRes] = await Promise.all([
-          fetchJSON(`/api/v1/runs/${runID}/data`),
+          fetchJSON(dataURL),
           fetchJSON(`/api/v1/runs/${runID}/note`).catch(() => null),
           fetchJSON(`/api/v1/runs/${runID}/lineage`).catch(() => null),
         ]);
@@ -2003,6 +2010,9 @@ mlflow.log_metric("loss", 0.42)</pre>
             </h1>
             <button id="share-btn" class="btn-ghost" style="white-space:nowrap" title="Copy link">🔗 Share</button>
           </div>
+
+          ${this._renderTimeTravelBar(expID, runID, asOfMs, data)}
+
           <div class="card">
             <div class="kv-table">
               <table>
@@ -2042,6 +2052,9 @@ mlflow.log_metric("loss", 0.42)</pre>
             <div id="artifacts-list"><span style="color:var(--fg-muted);font-size:13px">Loading…</span></div>
           </div>
         `;
+        // ── Time-travel picker ───────────────────────────────────────────────
+        this._wireTimeTravelBar(expID, runID);
+
         // ── Star toggle ───────────────────────────────────────────────────────
         let currentlyStarred = isStarred;
         const starBtn = $("#star-btn");
@@ -2296,6 +2309,54 @@ mlflow.log_metric("loss", 0.42)</pre>
       } catch {
         container.innerHTML = `<span style="color:var(--fg-muted);font-size:13px">Could not list artifacts.</span>`;
       }
+    },
+
+    // v1.5 time-travel: bar above the run detail card. Shows whether the
+    // page is rendering current state or a historical snapshot, and lets
+    // the user pick a datetime to time-travel to. Picker uses native
+    // <input type="datetime-local"> for cross-browser support; the value
+    // is converted to unix-ms before being put on the hash.
+    _renderTimeTravelBar(expID, runID, asOfMs, data) {
+      const inputValue = asOfMs > 0
+        ? new Date(asOfMs).toISOString().slice(0, 16)
+        : "";
+      // Default datetime-local max to "now" — picking the future is
+      // rejected server-side anyway (M1).
+      const maxValue = new Date().toISOString().slice(0, 16);
+      const banner = asOfMs > 0
+        ? `<span class="tt-banner">Snapshot as of <strong>${formatTime(asOfMs)}</strong> · current view is read-only</span>`
+        : `<span class="u-muted-xs">Current state. Pick a datetime to view this run as it was at that moment.</span>`;
+      const clearBtn = asOfMs > 0
+        ? `<button id="tt-clear" class="btn-ghost" title="Return to current state">Clear</button>`
+        : "";
+      return `
+        <div class="card tt-bar" style="margin-bottom:10px;padding:10px 14px;display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+          ${banner}
+          <label class="u-muted-xs" style="margin-left:auto;display:flex;align-items:center;gap:6px">
+            Time-travel
+            <input id="tt-picker" type="datetime-local" value="${inputValue}" max="${maxValue}" step="1" style="font-family:inherit"/>
+          </label>
+          ${clearBtn}
+        </div>`;
+    },
+
+    _wireTimeTravelBar(expID, runID) {
+      const picker = $("#tt-picker");
+      if (!picker) return;
+      picker.addEventListener("change", () => {
+        const v = picker.value;
+        if (!v) {
+          location.hash = `#/experiments/${expID}/runs/${runID}`;
+          return;
+        }
+        const ms = new Date(v).getTime();
+        if (Number.isNaN(ms) || ms <= 0) return;
+        location.hash = `#/experiments/${expID}/runs/${runID}?as_of=${ms}`;
+      });
+      const clear = $("#tt-clear");
+      if (clear) clear.addEventListener("click", () => {
+        location.hash = `#/experiments/${expID}/runs/${runID}`;
+      });
     },
 
     _renderLineage(expID, runID, lineage) {

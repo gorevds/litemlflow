@@ -248,6 +248,7 @@ type Store interface {
 
 	// Janitor.
 	ArchiveStaleRuns(ctx context.Context, staleBefore int64) (int, error)
+	PruneEventsBefore(ctx context.Context, beforeMs int64) (int, error)
 
 	// Webhooks.
 	CreateWebhook(ctx context.Context, w *model.Webhook) (int64, error)

@@ -10,6 +10,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -426,7 +427,9 @@ func (h *Handler) GetRun(w http.ResponseWriter, r *http.Request) {
 
 // parseAsOf reads the ?as_of= query param and returns the timestamp in
 // unix-ms. Returns (0, nil) if absent. Returns an error for malformed
-// values or values that don't fit a reasonable epoch range.
+// values, non-positive values, or timestamps more than 60s in the
+// future (which usually indicates a typo'd extra digit and would
+// silently alias to "now" — independent-review M1).
 func parseAsOf(r *http.Request) (int64, error) {
 	v := r.URL.Query().Get("as_of")
 	if v == "" {
@@ -439,8 +442,18 @@ func parseAsOf(r *http.Request) (int64, error) {
 	if ts <= 0 {
 		return 0, fmt.Errorf("as_of must be positive unix milliseconds")
 	}
+	// Allow a small clock-skew window so legitimate "as of now" queries
+	// against a server with slightly slower wall clock still succeed.
+	skewMs := int64(60 * 1000)
+	if ts > timeNowMs()+skewMs {
+		return 0, fmt.Errorf("as_of is in the future")
+	}
 	return ts, nil
 }
+
+// timeNowMs is split out for tests; production uses time.Now().UnixMilli().
+var timeNowMs = func() int64 { return timeNowFn().UnixMilli() }
+var timeNowFn = func() time.Time { return time.Now() }
 
 // collectRunData loads metrics, params, and tags for a run.
 //
@@ -595,6 +608,12 @@ type searchRunsResp struct {
 }
 
 // SearchRuns handles POST .../runs/search.
+//
+// v1.5 stable: ?as_of=<unix_ms> filters out runs whose start_time > as_of
+// (didn't exist at T) and reconstructs each surviving run's state via the
+// event log. Per-run reconstruction uses GetRunAsOfInWorkspace so a
+// cross-workspace run_id can't be revealed even if a search filter
+// matches it by accident.
 func (h *Handler) SearchRuns(w http.ResponseWriter, r *http.Request) {
 	var req searchRunsReq
 	_ = decodeJSON(r, &req)
@@ -606,6 +625,11 @@ func (h *Handler) SearchRuns(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		expIDs = append(expIDs, n)
+	}
+	asOf, err := parseAsOf(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", err.Error())
+		return
 	}
 	res, err := h.Store.SearchRuns(r.Context(), store.SearchOptions{
 		ExperimentIDs:  expIDs,
@@ -628,8 +652,26 @@ func (h *Handler) SearchRuns(w http.ResponseWriter, r *http.Request) {
 	}
 	runs := make([]runDTO, 0, len(res.Items))
 	for _, run := range res.Items {
-		// Search results don't carry as_of yet — defer to v1.5 stable.
-		data, err := h.collectRunData(r, run.ID, 0, nil)
+		// v1.5 stable: filter out runs that did not exist at as_of and
+		// reconstruct per-run state via the event log.
+		var runForDTO = run
+		var asOfTags []model.KV
+		if asOf > 0 {
+			if run.StartTime > asOf {
+				continue
+			}
+			replayed, tags, err := h.Store.GetRunAsOfInWorkspace(r.Context(), run.ID, currentWorkspace(r), asOf)
+			if err != nil {
+				if errors.Is(err, store.ErrNotFound) {
+					continue
+				}
+				writeStoreErr(w, err)
+				return
+			}
+			runForDTO = replayed
+			asOfTags = tags
+		}
+		data, err := h.collectRunData(r, run.ID, asOf, asOfTags)
 		if err != nil {
 			writeStoreErr(w, err)
 			return
@@ -639,7 +681,7 @@ func (h *Handler) SearchRuns(w http.ResponseWriter, r *http.Request) {
 			writeStoreErr(w, err)
 			return
 		}
-		runs = append(runs, runDTO{Info: runInfoToDTO(run), Data: data, Inputs: inputs})
+		runs = append(runs, runDTO{Info: runInfoToDTO(runForDTO), Data: data, Inputs: inputs})
 	}
 	writeJSON(w, searchRunsResp{Runs: runs, NextPageToken: res.NextPageToken})
 }

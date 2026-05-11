@@ -252,6 +252,98 @@ func TestEventsRunAsOfWorkspaceIsolation(t *testing.T) {
 	}
 }
 
+// TestEventsPruneBeforeRemovesOlderRows guards the v1.5 stable janitor:
+// PruneEventsBefore must delete rows older than the cutoff and leave
+// newer rows alone.
+func TestEventsPruneBeforeRemovesOlderRows(t *testing.T) {
+	ctx := context.Background()
+	st := newStore(t)
+	expID := mustCreateExpInStore(t, st, "events-prune")
+	r := &model.Run{ExperimentID: expID, Name: "r", StartTime: 1}
+	if err := st.CreateRun(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+
+	// Tag set → emits event A.
+	if err := st.SetTag(ctx, r.ID, model.KV{Key: "k", Value: "v1"}); err != nil {
+		t.Fatal(err)
+	}
+	cutoff := time.Now().UnixMilli()
+	time.Sleep(10 * time.Millisecond)
+
+	// Tag delete → emits event B.
+	if err := st.DeleteTag(ctx, r.ID, "k"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Prune everything older than cutoff. Should drop event A.
+	n, err := st.PruneEventsBefore(ctx, cutoff)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n < 1 {
+		t.Errorf("expected >=1 row pruned, got %d", n)
+	}
+
+	// Replay from current: event A is gone, only event B (tag_delete)
+	// remains. As-of before cutoff would now over-report the current tag
+	// set (we lost the audit trail for the SET) — that's the intentional
+	// tradeoff of pruning, documented in the migration.
+	asOf, tags, err := st.GetRunAsOf(ctx, r.ID, time.Now().UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if asOf == nil {
+		t.Fatal("run should still exist after prune")
+	}
+	if len(tags) != 0 {
+		t.Errorf("after delete, expected no tags, got %v", tags)
+	}
+}
+
+// TestEventsReplayLimitExceeded guards independent-review M3: a run
+// with more events than MaxEventsPerReplay returns ErrReplayLimitExceeded
+// instead of slurping unbounded rows.
+//
+// This test cheats by inserting raw event rows to avoid actually doing
+// 50k mutations — the production code path's cap behavior is identical
+// regardless of how the rows got there.
+func TestEventsReplayLimitExceeded(t *testing.T) {
+	ctx := context.Background()
+	st := newStore(t)
+	expID := mustCreateExpInStore(t, st, "events-limit")
+	r := &model.Run{ExperimentID: expID, Name: "r", StartTime: 1}
+	if err := st.CreateRun(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+
+	// Insert MaxEventsPerReplay+10 events directly.
+	tx, err := st.DB().BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO events(ts_ms, kind, entity_type, entity_id, payload)
+		VALUES (?, 'tag_set', 'run', ?, '{}')
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < store.MaxEventsPerReplay+10; i++ {
+		if _, err := stmt.ExecContext(ctx, int64(i+1), r.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = st.GetRunAsOf(ctx, r.ID, time.Now().UnixMilli())
+	if !errors.Is(err, store.ErrReplayLimitExceeded) {
+		t.Errorf("expected ErrReplayLimitExceeded, got %v", err)
+	}
+}
+
 func findTag(tags []model.KV, key string) string {
 	for _, t := range tags {
 		if t.Key == key {

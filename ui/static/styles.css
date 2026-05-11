@@ -894,6 +894,29 @@ button.btn-ghost:hover { background: var(--bg-alt); }
   margin-left: 6px;
   display: inline-block;
 }
+.tt-bar {
+  border-left: 3px solid var(--accent);
+}
+.tt-banner {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--fg);
+}
+.tt-banner strong {
+  font-variant-numeric: tabular-nums;
+}
+#tt-picker {
+  font-size: 12px;
+  padding: 3px 6px;
+  background: var(--bg-card);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color-scheme: dark light;
+}
+
 .lineage-datasets-strip {
   margin-top: 12px;
   padding-top: 10px;

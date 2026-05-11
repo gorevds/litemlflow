@@ -156,7 +156,7 @@ func TestStartJanitor(t *testing.T) {
 	// Run janitor with very short interval.
 	janitorCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	server.StartJanitor(janitorCtx, st, 50*time.Millisecond, 24*time.Hour, nil)
+	server.StartJanitor(janitorCtx, st, 50*time.Millisecond, 24*time.Hour, 0, nil)
 
 	// Wait for janitor to fire.
 	deadline := time.Now().Add(2 * time.Second)
