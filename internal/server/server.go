@@ -196,6 +196,11 @@ func buildRouter(cfg config.Config, logger *slog.Logger, st store.Store, art art
 	r := chi.NewRouter()
 	r.Use(requestIDMiddleware)
 	r.Use(recoveryMiddleware(logger))
+	// v2.0: rewrite /api/v2/... → /api/v1/... before the router matches.
+	// Both namespaces resolve to the same handler; v2 is a stable alias
+	// per ADR 0003 — clients pinning to the LTS contract use v2, existing
+	// v1 clients keep working unchanged.
+	r.Use(apiV2AliasMiddleware)
 	r.Use(loggingMiddleware(logger))
 	// Metrics middleware runs before auth so it captures every request,
 	// including unauthenticated ones that are rejected by auth.

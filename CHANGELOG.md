@@ -2,6 +2,46 @@
 
 All notable changes to LiteMLflow are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/) starting at v1.0.
 
+## [v2.0.0-rc1] — 2026-05-11
+
+End-of-Y2 release. Theme: **LTS** — the v1 wire contract is frozen for at least 12 months, the v2 namespace is now a stable alias, and the MLflow-compat sunset clock is set.
+
+### Added
+
+- **`/api/v2/...` namespace** as an alias to `/api/v1/...`. Mounted via a request-rewrite middleware so handlers don't fork. Responses through `/api/v2/...` carry `X-API-Version: 2`. See [ADR 0003 — v2.0 LTS charter](docs/adr/0003-v2-lts-charter.md).
+- **Concrete `Sunset` date** (`Sat, 11 May 2027 00:00:00 GMT` per RFC 7231) on the deprecated MLflow-compat aliases (`/api/2.0/mlflow/experiments/list`). 12 months after the v2.0 GA target.
+
+### Stability contract (v2.x → v3.0)
+
+Frozen:
+- HTTP wire shape of `/api/v1/...` and `/api/v2/...`. Additive changes only (new optional fields/params/endpoints).
+- MLflow client compat at the 31/31 test-suite level.
+- Migration ordering — strictly append.
+- Single-binary, no-CGO distribution.
+
+May change without a major bump:
+- Internal Go package layout (`internal/...`).
+- The `Store` interface (additive for the concrete store; embedders pin to major).
+- UI layout, JS bundle structure, tracing/logging/metrics shapes.
+- Default values of env-var configs (with a CHANGELOG note).
+
+### Deferred to v2.1+
+
+- T4.17: stop writing v0.3 `dataset_inputs` rows by default. The forward-fill mirror is already in v1.x; removing the v0.3 write entirely deserves a cross-version client test matrix before flipping the default.
+- T4.18: migration squash (`001_v2_baseline.sql`).
+- T4.20: tag-bag table consolidation (six tables → `attributes`).
+- External pen test on the federation protocol.
+
+### Tests
+
+`go test -count=1 -race ./...` — all 13 packages green. New: `TestV2AliasResolvesToV1`, `TestMlflowDeprecatedRoutesEmitSunset`.
+
+### Upgrade
+
+Drop-in binary upgrade. Existing clients keep working unchanged. Pin to `/api/v2/...` in new code if you want the explicit LTS namespace stamp.
+
+Full report: [docs/adr/0003-v2-lts-charter.md](docs/adr/0003-v2-lts-charter.md).
+
 ## [v1.2.0-rc1] — 2026-05-08
 
 Y2 Q2 release. Theme: **dataset versioning** — first-class versioned, content-addressed datasets with explicit lineage.

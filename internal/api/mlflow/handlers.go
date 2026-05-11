@@ -1199,17 +1199,21 @@ func writeJSON(w http.ResponseWriter, v any) {
 // that still call the legacy alias get a heads-up via:
 //
 //	Deprecation: true
-//	Sunset: <RFC 7231 date — set to v2.0 GA>
+//	Sunset: Sat, 11 May 2027 00:00:00 GMT
 //	Link: <docs URL>; rel="deprecation"
 //
 // We don't change the response body so the wire contract is unchanged
 // for the client — only headers are added.
+//
+// Sunset semantics per ADR 0003: v1 endpoints are supported for 12 months
+// after v2.0 GA (2026-05-11), so the Sunset date is 2027-05-11. Routes
+// flagged as legacy at v2.0 are removed at that date.
+const v2SunsetIMF = "Sat, 11 May 2027 00:00:00 GMT"
+
 func deprecated(next http.HandlerFunc, removeAt string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Deprecation", "true")
-		// Sunset is the RFC 7231 IMF-fixdate when the endpoint will be
-		// removed. We don't have a hard date for v2.0 yet; per RFC 8594
-		// it's optional. We omit Sunset and use a free-form Link header.
+		w.Header().Set("Sunset", v2SunsetIMF)
 		// Absolute URL — `/docs/...` was relative-to-host but the server
 		// doesn't serve `/docs/*`, so clients following the pointer used
 		// to get 404. (Caught by the T1-T4 final review.)

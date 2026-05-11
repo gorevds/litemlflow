@@ -34,6 +34,24 @@ const (
 	ctxKeyRole
 )
 
+// apiV2AliasMiddleware rewrites /api/v2/... → /api/v1/... before the
+// router matches. This lets v2 clients use the explicit LTS namespace
+// without forcing handlers to register every route twice. See ADR 0003.
+//
+// The rewrite happens BEFORE logging/auth so downstream handlers, audit
+// logs, and metrics all see the canonical v1 path. The `X-API-Version`
+// response header records that the request entered through v2.
+func apiV2AliasMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/v2/") {
+			r.URL.Path = "/api/v1/" + r.URL.Path[len("/api/v2/"):]
+			r.URL.RawPath = ""
+			w.Header().Set("X-API-Version", "2")
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // requestIDMiddleware attaches a short request id to context and response.
 func requestIDMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
