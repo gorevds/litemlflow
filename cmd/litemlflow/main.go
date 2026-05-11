@@ -186,14 +186,28 @@ func runUp(args []string) error {
 			slog.String("scheduled_removal", "v2.0"),
 		)
 	}
-	// Surface the v0.3-to-v2 mirror opt-out so operators are reminded that
-	// new MLflow log_input rows will not flow into the v1.2 datasets UI.
-	if os.Getenv("LITEMLFLOW_DISABLE_V03_TO_V2_MIRROR") == "1" ||
-		os.Getenv("LITEMLFLOW_DISABLE_DATASETS_V03_MIRROR") == "1" {
+	// v2.1: the legacy v0.3 → v1.2 mirror was removed (T4.17). The v1.2
+	// path is now the primary; the old env vars are no-ops. Warn loudly
+	// so operators upgrading from v1.x with the disable-flag set don't
+	// silently get the new semantics.
+	if v1 := os.Getenv("LITEMLFLOW_DISABLE_V03_TO_V2_MIRROR"); v1 != "" {
 		logger.Warn(
-			"v0.3 → v1.2 datasets mirror is DISABLED. " +
-				"MLflow log_input will not appear in the new Datasets UI. " +
-				"Unset to re-enable. See docs/upgrade-to-v2.md#t417.",
+			"LITEMLFLOW_DISABLE_V03_TO_V2_MIRROR is a no-op as of v2.1. " +
+				"The v1.2 datasets path is now primary by default. " +
+				"To restore v0.3 link-table writes for legacy tooling, " +
+				"set LITEMLFLOW_ENABLE_DATASETS_V03_WRITES=1. " +
+				"See docs/upgrade-to-v2.md#status-as-of-v21.",
+			slog.String("env_value", v1),
+		)
+	}
+	if v2 := os.Getenv("LITEMLFLOW_DISABLE_DATASETS_V03_MIRROR"); v2 != "" {
+		logger.Warn(
+			"LITEMLFLOW_DISABLE_DATASETS_V03_MIRROR is a no-op as of v2.1. " +
+				"The v1.2 datasets path is now primary by default. " +
+				"To restore v0.3 link-table writes for legacy tooling, " +
+				"set LITEMLFLOW_ENABLE_DATASETS_V03_WRITES=1. " +
+				"See docs/upgrade-to-v2.md#status-as-of-v21.",
+			slog.String("env_value", v2),
 		)
 	}
 	srv, err := server.New(context.Background(), cfg, logger)

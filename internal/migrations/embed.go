@@ -188,7 +188,23 @@ func applyOne(ctx context.Context, db *sql.DB, m Migration) error {
 
 // Rollback runs the DOWN of the latest applied migration. Use for disaster
 // recovery only; DOWN scripts are tested but not part of the normal flow.
+//
+// Safety: refuses to rollback a migration whose DOWN drops tables that
+// currently hold rows the application uses, unless force is true.
+// Without the guard an operator running rollback against a busy DB
+// would silently destroy production data (v2.1 review C1).
 func Rollback(ctx context.Context, db *sql.DB) error {
+	return rollbackImpl(ctx, db, false)
+}
+
+// RollbackForce is the destructive-allowed variant. Used by the
+// "litemlflow rollback --force" CLI path. Existing tests use this
+// because they reset clean DBs.
+func RollbackForce(ctx context.Context, db *sql.DB) error {
+	return rollbackImpl(ctx, db, true)
+}
+
+func rollbackImpl(ctx context.Context, db *sql.DB, force bool) error {
 	all, err := Load()
 	if err != nil {
 		return err
@@ -213,6 +229,29 @@ func Rollback(ctx context.Context, db *sql.DB) error {
 	if target.Down == "" {
 		return fmt.Errorf("migration %d has no DOWN block", cur)
 	}
+
+	// Safety check: if the DOWN drops a table that has rows, refuse
+	// unless the caller passed --force. Parse "DROP TABLE [IF EXISTS] <name>"
+	// out of the DOWN script and count rows.
+	if !force {
+		dropped := extractDroppedTables(target.Down)
+		for _, tbl := range dropped {
+			var n int64
+			row := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+quoteIdent(tbl))
+			if scanErr := row.Scan(&n); scanErr != nil {
+				// Table doesn't exist (already rolled back) → not a hazard.
+				continue
+			}
+			if n > 0 {
+				return fmt.Errorf(
+					"rollback aborted: DOWN of migration %d (%s) would drop table %q with %d rows. "+
+						"Use Rollback(force=true) / `litemlflow rollback --force` to override. "+
+						"v2.1 added this guard (v2.1-rc1 review C1)",
+					cur, target.Name, tbl, n)
+			}
+		}
+	}
+
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -225,4 +264,40 @@ func Rollback(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// extractDroppedTables returns the table names referenced by `DROP TABLE`
+// statements in the DOWN script. Best-effort regex match: matches both
+// `DROP TABLE name;` and `DROP TABLE IF EXISTS name;`, case-insensitively.
+func extractDroppedTables(downSQL string) []string {
+	var out []string
+	for _, line := range strings.Split(downSQL, ";") {
+		s := strings.TrimSpace(line)
+		if !strings.HasPrefix(strings.ToUpper(s), "DROP TABLE") {
+			continue
+		}
+		// Strip the "DROP TABLE [IF EXISTS]" prefix.
+		s = s[len("DROP TABLE"):]
+		s = strings.TrimSpace(s)
+		s = strings.TrimPrefix(s, "IF EXISTS ")
+		s = strings.TrimPrefix(s, "if exists ")
+		s = strings.TrimSpace(s)
+		// Drop a trailing comment or anything after the first whitespace.
+		if i := strings.IndexAny(s, " \t\n("); i >= 0 {
+			s = s[:i]
+		}
+		s = strings.Trim(s, `"`+"`'")
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// quoteIdent wraps an identifier in double quotes and escapes any
+// embedded double-quote with a doubled one. Used so the row-count
+// safety check can't be tricked by a table name that contains weird
+// characters (defense-in-depth — table names are operator-controlled).
+func quoteIdent(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }

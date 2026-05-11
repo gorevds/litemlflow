@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -1769,15 +1770,18 @@ func (s *SQLiteStore) LogInputs(ctx context.Context, runID string, inputs []mode
 // isSnapshotRaceErr matches SQLite transient busy/snapshot errors that
 // indicate a writer-pairing race rather than a real failure. Retry is
 // safe for any idempotent operation.
+//
+// Substring match is kept narrow: bare "(5)" or "(517)" would also
+// match unrelated parser errors like "syntax error at column (5)".
+// modernc.org/sqlite's busy errors always include the explicit
+// "SQLITE_BUSY" symbol or "database is locked" prose; nothing else does.
 func isSnapshotRaceErr(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := err.Error()
-	return strings.Contains(msg, "database is locked") ||
-		strings.Contains(msg, "SQLITE_BUSY") ||
-		strings.Contains(msg, "(517)") || // SQLITE_BUSY_SNAPSHOT
-		strings.Contains(msg, "(5)")      // SQLITE_BUSY
+	return strings.Contains(msg, "SQLITE_BUSY") ||
+		strings.Contains(msg, "database is locked")
 }
 
 func (s *SQLiteStore) logInputsOnce(ctx context.Context, runID string, inputs []model.DatasetInput) error {
@@ -2047,6 +2051,10 @@ func (s *SQLiteStore) GetRunDatasets(ctx context.Context, runID string) ([]model
 			if err := json.Unmarshal([]byte(tagsJSON), &di.Tags); err != nil {
 				return nil, fmt.Errorf("decode dataset input tags (id=%d): %w", id, err)
 			}
+			// Sort by key so v2.1-path rows match the v0.3-path
+			// (ORDER BY key) ordering — wire-shape clients sometimes
+			// assert order. See independent-review H3 for v2.1-rc1.
+			sort.Slice(di.Tags, func(i, j int) bool { return di.Tags[i].Key < di.Tags[j].Key })
 		}
 		inputs = append(inputs, di)
 		seen[name+"|"+contentHash] = true

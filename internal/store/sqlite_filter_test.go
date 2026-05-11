@@ -325,6 +325,96 @@ func TestLogInputsAndGetRunDatasets(t *testing.T) {
 	}
 }
 
+// TestLogInputs_V03OptIn (v2.1 review L1) verifies that setting
+// LITEMLFLOW_ENABLE_DATASETS_V03_WRITES=1 restores writes to the v0.3
+// link tables, and that GetRunDatasets still returns ONE row per input
+// (not duplicated across the two paths).
+func TestLogInputs_V03OptIn(t *testing.T) {
+	t.Setenv("LITEMLFLOW_ENABLE_DATASETS_V03_WRITES", "1")
+	s := newStore(t)
+	ctx := context.Background()
+	expID, _ := s.CreateExperiment(ctx, &model.Experiment{Name: "v03-optin"})
+	r := &model.Run{ExperimentID: expID}
+	_ = s.CreateRun(ctx, r)
+
+	in := []model.DatasetInput{{Dataset: model.Dataset{Name: "ds", Digest: "h1", SourceType: "http"}}}
+	if err := s.LogInputs(ctx, r.ID, in); err != nil {
+		t.Fatalf("LogInputs: %v", err)
+	}
+
+	// Both link tables should have rows.
+	var n03, n21 int
+	if err := s.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM dataset_inputs WHERE run_id = ?", r.ID).Scan(&n03); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM dataset_inputs_v2 WHERE run_id = ?", r.ID).Scan(&n21); err != nil {
+		t.Fatal(err)
+	}
+	if n03 != 1 || n21 != 1 {
+		t.Errorf("expected 1 row in each link table, got v0.3=%d v2.1=%d", n03, n21)
+	}
+
+	// GetRunDatasets must dedupe: 1 row, not 2.
+	got, err := s.GetRunDatasets(ctx, r.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Errorf("dedup failed: want 1, got %d", len(got))
+	}
+	if got[0].Dataset.SourceType != "http" {
+		t.Errorf("source_type lost: got %q", got[0].Dataset.SourceType)
+	}
+}
+
+// TestGetRunDatasets_LegacyPlusV21 (v2.1 review L2) verifies that a run
+// with a synthetic legacy-only row (v0.3) plus a v2.1-logged row surfaces
+// both. Simulates a v1.x run that lived through the v2.1 upgrade.
+func TestGetRunDatasets_LegacyPlusV21(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	ctx := context.Background()
+	expID, _ := s.CreateExperiment(ctx, &model.Experiment{Name: "legacy-plus"})
+	r := &model.Run{ExperimentID: expID}
+	_ = s.CreateRun(ctx, r)
+
+	// Synthetic legacy row: insert directly into v0.3 tables (bypasses LogInputs).
+	if _, err := s.DB().ExecContext(ctx,
+		`INSERT INTO datasets(name, digest, source_type, source, schema, profile)
+		 VALUES ('legacy', 'l1', 'legacy-fs', '/var/data', '', '')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB().ExecContext(ctx,
+		`INSERT INTO dataset_inputs(run_id, name, digest) VALUES (?, 'legacy', 'l1')`, r.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// v2.1 path: log a different input via the normal entry point.
+	if err := s.LogInputs(ctx, r.ID, []model.DatasetInput{
+		{Dataset: model.Dataset{Name: "fresh", Digest: "f1", SourceType: "s3"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.GetRunDatasets(ctx, r.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 inputs (legacy + fresh), got %d: %+v", len(got), got)
+	}
+	names := map[string]string{}
+	for _, di := range got {
+		names[di.Dataset.Name] = di.Dataset.SourceType
+	}
+	if names["legacy"] != "legacy-fs" {
+		t.Errorf("legacy input lost: got %v", names)
+	}
+	if names["fresh"] != "s3" {
+		t.Errorf("fresh input lost: got %v", names)
+	}
+}
+
 // TestLogInputsIdempotent verifies upsert on name+digest is idempotent.
 func TestLogInputsIdempotent(t *testing.T) {
 	t.Parallel()

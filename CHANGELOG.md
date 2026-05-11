@@ -2,6 +2,29 @@
 
 All notable changes to LiteMLflow are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/) starting at v1.0.
 
+## [v2.1.0] — 2026-05-11
+
+Stable. Promotes v2.1.0-rc1 with 5 fixes from independent review.
+
+### Fixed
+
+- **C1**: `Rollback()` now refuses to DROP a non-empty table without `--force`. Previously, running `litemlflow rollback` against a busy DB silently destroyed every dataset linkage logged since the v2.1 upgrade (the read path falls back to the empty v0.3 table, masking the loss). New `RollbackForce(ctx, db)` is the destructive-allowed variant for disaster recovery. Test: `TestRollbackRefusesNonEmpty`.
+- **H1**: `LITEMLFLOW_DISABLE_V03_TO_V2_MIRROR` / `LITEMLFLOW_DISABLE_DATASETS_V03_MIRROR` were no-ops in v2.1-rc1. Now emit a `slog.Warn` at startup explaining the rename to `LITEMLFLOW_ENABLE_DATASETS_V03_WRITES=1` (opt-IN instead of opt-OUT). Operators upgrading from v1.x with the old vars set see a clear migration message.
+- **H2**: `isSnapshotRaceErr` matched the bare substring `"(5)"`, which would false-positive against any SQL parser error containing `(5)` (line/column reference). Tightened to require explicit `"SQLITE_BUSY"` or `"database is locked"`.
+- **H3**: Tag ordering inconsistency between v2.1 path (JSON insertion order) and v0.3 path (`ORDER BY key`). `GetRunDatasets` now sorts tags by key after JSON decode so the wire shape is identical across the two read paths.
+- **M2**: Baseline file header still said `001_v2_baseline.sql` after the path move. Corrected the generator + regenerated the file.
+
+### Tests
+`go test -count=1 -race ./...` — all 13 packages green. New:
+- `TestRollbackRefusesNonEmpty` / `TestRollbackAllowsEmpty` (rollback guard)
+- `TestLogInputs_V03OptIn` (opt-in env restores v0.3 writes, dedupe still works)
+- `TestGetRunDatasets_LegacyPlusV21` (synthetic legacy row + fresh v2.1 row both surface)
+
+### Deferred (still v3.0)
+- T4.20 tag-bag table collapse (`experiment_tags + tags + … → attributes`).
+- T4.18 runner switch (CLI to apply baseline on fresh installs vs `001..NN`).
+- Drop of the v0.3 `dataset_inputs` + `dataset_input_tags` tables.
+
 ## [v2.1.0-rc1] — 2026-05-11
 
 Closes two of the three T4 cleanup items deferred from v2.0: T4.17 (drop v0.3 dataset_inputs dual-write) and T4.18 partial (canonical baseline schema). T4.20 (tag-bag table collapse) re-deferred to v3.0 — the FK-CASCADE migration risk outweighs the ~80-LOC savings at v2.x.
