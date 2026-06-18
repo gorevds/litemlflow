@@ -74,6 +74,10 @@ class Client:
         url: base URL of the server, e.g., "http://localhost:5000".
         auth: optional (username, password) tuple for basic auth.
         timeout: request timeout in seconds (default 30).
+        workspace: optional workspace to scope all requests to. Sent as the
+            ``X-Workspace`` header on every request; the server validates it and
+            isolates experiments/runs/registry per workspace. Defaults to the
+            ``LITEMLFLOW_WORKSPACE`` env var, else the server's "default".
     """
 
     def __init__(
@@ -82,12 +86,16 @@ class Client:
         *,
         auth: tuple[str, str] | None = None,
         timeout: float = 30.0,
+        workspace: str | None = None,
     ) -> None:
         self.url = (url or os.environ.get("LITEMLFLOW_URL", "http://localhost:5000")).rstrip("/")
         self.timeout = timeout
+        self.workspace = workspace or os.environ.get("LITEMLFLOW_WORKSPACE") or None
         self._session = requests.Session()
         if auth is not None:
             self._session.auth = auth
+        if self.workspace:
+            self._session.headers["X-Workspace"] = self.workspace
 
     # ------------------------------------------------------------------ http
 
