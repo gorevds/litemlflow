@@ -14,7 +14,7 @@ import (
 func newRegisteredModel(t *testing.T, s *store.SQLiteStore, name string) {
 	t.Helper()
 	ctx := context.Background()
-	if err := s.CreateRegisteredModel(ctx, &model.RegisteredModel{Name: name}); err != nil {
+	if err := s.CreateRegisteredModel(ctx, "default", &model.RegisteredModel{Name: name}); err != nil {
 		t.Fatalf("CreateRegisteredModel(%q): %v", name, err)
 	}
 }
@@ -22,7 +22,7 @@ func newRegisteredModel(t *testing.T, s *store.SQLiteStore, name string) {
 func newModelVersion(t *testing.T, s *store.SQLiteStore, name, source string) *model.ModelVersion {
 	t.Helper()
 	ctx := context.Background()
-	mv, err := s.CreateModelVersion(ctx, &model.ModelVersion{
+	mv, err := s.CreateModelVersion(ctx, "default", &model.ModelVersion{
 		Name:   name,
 		Source: source,
 	})
@@ -40,7 +40,7 @@ func TestRegisteredModelCRUD(t *testing.T) {
 	ctx := context.Background()
 
 	// Create.
-	if err := s.CreateRegisteredModel(ctx, &model.RegisteredModel{
+	if err := s.CreateRegisteredModel(ctx, "default", &model.RegisteredModel{
 		Name:        "mymodel",
 		Description: "desc",
 	}); err != nil {
@@ -48,12 +48,12 @@ func TestRegisteredModelCRUD(t *testing.T) {
 	}
 
 	// Duplicate name.
-	if err := s.CreateRegisteredModel(ctx, &model.RegisteredModel{Name: "mymodel"}); !errors.Is(err, store.ErrAlreadyExists) {
+	if err := s.CreateRegisteredModel(ctx, "default", &model.RegisteredModel{Name: "mymodel"}); !errors.Is(err, store.ErrAlreadyExists) {
 		t.Fatalf("want ErrAlreadyExists, got %v", err)
 	}
 
 	// Get.
-	m, err := s.GetRegisteredModel(ctx, "mymodel")
+	m, err := s.GetRegisteredModel(ctx, "default", "mymodel")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -68,13 +68,13 @@ func TestRegisteredModelCRUD(t *testing.T) {
 	}
 
 	// Not found.
-	if _, err := s.GetRegisteredModel(ctx, "ghost"); !errors.Is(err, store.ErrNotFound) {
+	if _, err := s.GetRegisteredModel(ctx, "default", "ghost"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("want ErrNotFound, got %v", err)
 	}
 
 	// Update description.
 	desc := "updated"
-	m2, err := s.UpdateRegisteredModel(ctx, "mymodel", &desc)
+	m2, err := s.UpdateRegisteredModel(ctx, "default", "mymodel", &desc)
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
@@ -83,14 +83,14 @@ func TestRegisteredModelCRUD(t *testing.T) {
 	}
 
 	// Delete.
-	if err := s.DeleteRegisteredModel(ctx, "mymodel"); err != nil {
+	if err := s.DeleteRegisteredModel(ctx, "default", "mymodel"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	if _, err := s.GetRegisteredModel(ctx, "mymodel"); !errors.Is(err, store.ErrNotFound) {
+	if _, err := s.GetRegisteredModel(ctx, "default", "mymodel"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("want ErrNotFound after delete, got %v", err)
 	}
 	// Double-delete.
-	if err := s.DeleteRegisteredModel(ctx, "mymodel"); !errors.Is(err, store.ErrNotFound) {
+	if err := s.DeleteRegisteredModel(ctx, "default", "mymodel"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("want ErrNotFound on double delete, got %v", err)
 	}
 }
@@ -107,7 +107,7 @@ func TestRenameRegisteredModel(t *testing.T) {
 	newModelVersion(t, s, "alpha", "s3://bucket/model")
 
 	// Rename.
-	m, err := s.RenameRegisteredModel(ctx, "alpha", "beta")
+	m, err := s.RenameRegisteredModel(ctx, "default", "alpha", "beta")
 	if err != nil {
 		t.Fatalf("rename: %v", err)
 	}
@@ -116,12 +116,12 @@ func TestRenameRegisteredModel(t *testing.T) {
 	}
 
 	// Old name gone.
-	if _, err := s.GetRegisteredModel(ctx, "alpha"); !errors.Is(err, store.ErrNotFound) {
+	if _, err := s.GetRegisteredModel(ctx, "default", "alpha"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("old name should not exist after rename")
 	}
 
 	// Version should be under new name.
-	res, err := s.SearchModelVersions(ctx, "name = 'beta'", 10, "")
+	res, err := s.SearchModelVersions(ctx, "default", "name = 'beta'", 10, "")
 	if err != nil {
 		t.Fatalf("search after rename: %v", err)
 	}
@@ -131,12 +131,12 @@ func TestRenameRegisteredModel(t *testing.T) {
 
 	// Rename to existing name fails.
 	newRegisteredModel(t, s, "gamma")
-	if _, err := s.RenameRegisteredModel(ctx, "beta", "gamma"); !errors.Is(err, store.ErrAlreadyExists) {
+	if _, err := s.RenameRegisteredModel(ctx, "default", "beta", "gamma"); !errors.Is(err, store.ErrAlreadyExists) {
 		t.Fatalf("want ErrAlreadyExists, got %v", err)
 	}
 
 	// Rename non-existent.
-	if _, err := s.RenameRegisteredModel(ctx, "ghost", "delta"); !errors.Is(err, store.ErrNotFound) {
+	if _, err := s.RenameRegisteredModel(ctx, "default", "ghost", "delta"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("want ErrNotFound, got %v", err)
 	}
 }
@@ -151,7 +151,7 @@ func TestVersionAutoIncrement(t *testing.T) {
 	newRegisteredModel(t, s, "versioned")
 
 	for i := 1; i <= 5; i++ {
-		mv, err := s.CreateModelVersion(ctx, &model.ModelVersion{
+		mv, err := s.CreateModelVersion(ctx, "default", &model.ModelVersion{
 			Name:   "versioned",
 			Source: "s3://bucket/v" + string(rune('0'+i)),
 		})
@@ -164,7 +164,7 @@ func TestVersionAutoIncrement(t *testing.T) {
 	}
 
 	// First version is 1.
-	mv1, err := s.GetModelVersion(ctx, "versioned", 1)
+	mv1, err := s.GetModelVersion(ctx, "default", "versioned", 1)
 	if err != nil {
 		t.Fatalf("get v1: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestVersionAutoIncrement(t *testing.T) {
 
 	// Create for a different model starts at 1 again.
 	newRegisteredModel(t, s, "another")
-	mv, err := s.CreateModelVersion(ctx, &model.ModelVersion{Name: "another", Source: "s3://x"})
+	mv, err := s.CreateModelVersion(ctx, "default", &model.ModelVersion{Name: "another", Source: "s3://x"})
 	if err != nil {
 		t.Fatalf("create another v1: %v", err)
 	}
@@ -195,12 +195,12 @@ func TestAliasRoundtrip(t *testing.T) {
 	mv2 := newModelVersion(t, s, "aliased", "s3://b/v2")
 
 	// Set alias on v1.
-	if err := s.SetModelAlias(ctx, "aliased", "champion", mv1.Version); err != nil {
+	if err := s.SetModelAlias(ctx, "default", "aliased", "champion", mv1.Version); err != nil {
 		t.Fatalf("set alias: %v", err)
 	}
 
 	// Resolve alias.
-	resolved, err := s.GetModelByAlias(ctx, "aliased", "champion")
+	resolved, err := s.GetModelByAlias(ctx, "default", "aliased", "champion")
 	if err != nil {
 		t.Fatalf("get by alias: %v", err)
 	}
@@ -209,10 +209,10 @@ func TestAliasRoundtrip(t *testing.T) {
 	}
 
 	// Re-point alias to v2 (upsert).
-	if err := s.SetModelAlias(ctx, "aliased", "champion", mv2.Version); err != nil {
+	if err := s.SetModelAlias(ctx, "default", "aliased", "champion", mv2.Version); err != nil {
 		t.Fatalf("update alias: %v", err)
 	}
-	resolved2, err := s.GetModelByAlias(ctx, "aliased", "champion")
+	resolved2, err := s.GetModelByAlias(ctx, "default", "aliased", "champion")
 	if err != nil {
 		t.Fatalf("get updated alias: %v", err)
 	}
@@ -221,15 +221,15 @@ func TestAliasRoundtrip(t *testing.T) {
 	}
 
 	// Delete alias.
-	if err := s.DeleteModelAlias(ctx, "aliased", "champion"); err != nil {
+	if err := s.DeleteModelAlias(ctx, "default", "aliased", "champion"); err != nil {
 		t.Fatalf("delete alias: %v", err)
 	}
-	if _, err := s.GetModelByAlias(ctx, "aliased", "champion"); !errors.Is(err, store.ErrNotFound) {
+	if _, err := s.GetModelByAlias(ctx, "default", "aliased", "champion"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("want ErrNotFound after delete, got %v", err)
 	}
 
 	// Alias on non-existent version.
-	if err := s.SetModelAlias(ctx, "aliased", "ghost", 999); !errors.Is(err, store.ErrNotFound) {
+	if err := s.SetModelAlias(ctx, "default", "aliased", "ghost", 999); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("want ErrNotFound for unknown version, got %v", err)
 	}
 }
@@ -257,13 +257,13 @@ func TestGetLatestModelVersionsPerStage(t *testing.T) {
 		{v3.Version, model.StageStaging},
 		{v4.Version, model.StageProduction},
 	} {
-		if _, err := s.TransitionModelStage(ctx, "stages", pair.ver, pair.stage, false); err != nil {
+		if _, err := s.TransitionModelStage(ctx, "default", "stages", pair.ver, pair.stage, false); err != nil {
 			t.Fatalf("transition v%d -> %s: %v", pair.ver, pair.stage, err)
 		}
 	}
 
 	// GetLatestModelVersions with no stage filter: one per stage.
-	latest, err := s.GetLatestModelVersions(ctx, "stages", nil)
+	latest, err := s.GetLatestModelVersions(ctx, "default", "stages", nil)
 	if err != nil {
 		t.Fatalf("get latest: %v", err)
 	}
@@ -279,7 +279,7 @@ func TestGetLatestModelVersionsPerStage(t *testing.T) {
 	}
 
 	// Filter to Production only.
-	prod, err := s.GetLatestModelVersions(ctx, "stages", []string{model.StageProduction})
+	prod, err := s.GetLatestModelVersions(ctx, "default", "stages", []string{model.StageProduction})
 	if err != nil {
 		t.Fatalf("get latest production: %v", err)
 	}
@@ -304,22 +304,22 @@ func TestTransitionWithArchive(t *testing.T) {
 	v3 := newModelVersion(t, s, "archive-test", "s3://b/v3")
 
 	// Put v1 and v2 into Production.
-	if _, err := s.TransitionModelStage(ctx, "archive-test", v1.Version, model.StageProduction, false); err != nil {
+	if _, err := s.TransitionModelStage(ctx, "default", "archive-test", v1.Version, model.StageProduction, false); err != nil {
 		t.Fatalf("transition v1: %v", err)
 	}
-	if _, err := s.TransitionModelStage(ctx, "archive-test", v2.Version, model.StageProduction, false); err != nil {
+	if _, err := s.TransitionModelStage(ctx, "default", "archive-test", v2.Version, model.StageProduction, false); err != nil {
 		t.Fatalf("transition v2: %v", err)
 	}
 
 	// Transition v3 to Production WITH archive_existing_versions=true.
-	if _, err := s.TransitionModelStage(ctx, "archive-test", v3.Version, model.StageProduction, true); err != nil {
+	if _, err := s.TransitionModelStage(ctx, "default", "archive-test", v3.Version, model.StageProduction, true); err != nil {
 		t.Fatalf("transition v3 with archive: %v", err)
 	}
 
 	// v1 and v2 should now be Archived; v3 should be Production.
-	got1, _ := s.GetModelVersion(ctx, "archive-test", v1.Version)
-	got2, _ := s.GetModelVersion(ctx, "archive-test", v2.Version)
-	got3, _ := s.GetModelVersion(ctx, "archive-test", v3.Version)
+	got1, _ := s.GetModelVersion(ctx, "default", "archive-test", v1.Version)
+	got2, _ := s.GetModelVersion(ctx, "default", "archive-test", v2.Version)
+	got3, _ := s.GetModelVersion(ctx, "default", "archive-test", v3.Version)
 
 	if got1.CurrentStage != model.StageArchived {
 		t.Fatalf("v1: want Archived, got %s", got1.CurrentStage)
@@ -343,10 +343,10 @@ func TestTagUpsert(t *testing.T) {
 	mv := newModelVersion(t, s, "tagged", "s3://b/v1")
 
 	// Set model tag.
-	if err := s.SetRegisteredModelTag(ctx, "tagged", "team", "mlops"); err != nil {
+	if err := s.SetRegisteredModelTag(ctx, "default", "tagged", "team", "mlops"); err != nil {
 		t.Fatalf("set model tag: %v", err)
 	}
-	m, err := s.GetRegisteredModel(ctx, "tagged")
+	m, err := s.GetRegisteredModel(ctx, "default", "tagged")
 	if err != nil {
 		t.Fatalf("get after tag: %v", err)
 	}
@@ -355,28 +355,28 @@ func TestTagUpsert(t *testing.T) {
 	}
 
 	// Upsert (same key, different value).
-	if err := s.SetRegisteredModelTag(ctx, "tagged", "team", "platform"); err != nil {
+	if err := s.SetRegisteredModelTag(ctx, "default", "tagged", "team", "platform"); err != nil {
 		t.Fatalf("upsert model tag: %v", err)
 	}
-	m2, _ := s.GetRegisteredModel(ctx, "tagged")
+	m2, _ := s.GetRegisteredModel(ctx, "default", "tagged")
 	if m2.Tags[0].Value != "platform" {
 		t.Fatalf("want value=platform, got %s", m2.Tags[0].Value)
 	}
 
 	// Delete model tag.
-	if err := s.DeleteRegisteredModelTag(ctx, "tagged", "team"); err != nil {
+	if err := s.DeleteRegisteredModelTag(ctx, "default", "tagged", "team"); err != nil {
 		t.Fatalf("delete model tag: %v", err)
 	}
-	m3, _ := s.GetRegisteredModel(ctx, "tagged")
+	m3, _ := s.GetRegisteredModel(ctx, "default", "tagged")
 	if len(m3.Tags) != 0 {
 		t.Fatalf("expected no tags, got %v", m3.Tags)
 	}
 
 	// Version tags.
-	if err := s.SetModelVersionTag(ctx, "tagged", mv.Version, "env", "prod"); err != nil {
+	if err := s.SetModelVersionTag(ctx, "default", "tagged", mv.Version, "env", "prod"); err != nil {
 		t.Fatalf("set version tag: %v", err)
 	}
-	got, err := s.GetModelVersion(ctx, "tagged", mv.Version)
+	got, err := s.GetModelVersion(ctx, "default", "tagged", mv.Version)
 	if err != nil {
 		t.Fatalf("get version: %v", err)
 	}
@@ -385,19 +385,19 @@ func TestTagUpsert(t *testing.T) {
 	}
 
 	// Upsert version tag.
-	if err := s.SetModelVersionTag(ctx, "tagged", mv.Version, "env", "staging"); err != nil {
+	if err := s.SetModelVersionTag(ctx, "default", "tagged", mv.Version, "env", "staging"); err != nil {
 		t.Fatalf("upsert version tag: %v", err)
 	}
-	got2, _ := s.GetModelVersion(ctx, "tagged", mv.Version)
+	got2, _ := s.GetModelVersion(ctx, "default", "tagged", mv.Version)
 	if got2.Tags[0].Value != "staging" {
 		t.Fatalf("want value=staging, got %s", got2.Tags[0].Value)
 	}
 
 	// Delete version tag.
-	if err := s.DeleteModelVersionTag(ctx, "tagged", mv.Version, "env"); err != nil {
+	if err := s.DeleteModelVersionTag(ctx, "default", "tagged", mv.Version, "env"); err != nil {
 		t.Fatalf("delete version tag: %v", err)
 	}
-	got3, _ := s.GetModelVersion(ctx, "tagged", mv.Version)
+	got3, _ := s.GetModelVersion(ctx, "default", "tagged", mv.Version)
 	if len(got3.Tags) != 0 {
 		t.Fatalf("expected no version tags, got %v", got3.Tags)
 	}
@@ -415,7 +415,7 @@ func TestSearchRegisteredModels(t *testing.T) {
 	}
 
 	// Empty filter returns all.
-	res, err := s.SearchRegisteredModels(ctx, "", 100, "")
+	res, err := s.SearchRegisteredModels(ctx, "default", "", 100, "")
 	if err != nil {
 		t.Fatalf("search empty: %v", err)
 	}
@@ -424,7 +424,7 @@ func TestSearchRegisteredModels(t *testing.T) {
 	}
 
 	// name LIKE filter.
-	res2, err := s.SearchRegisteredModels(ctx, "name LIKE 'a%'", 100, "")
+	res2, err := s.SearchRegisteredModels(ctx, "default", "name LIKE 'a%'", 100, "")
 	if err != nil {
 		t.Fatalf("search LIKE: %v", err)
 	}
@@ -433,10 +433,10 @@ func TestSearchRegisteredModels(t *testing.T) {
 	}
 
 	// Tag filter.
-	if err := s.SetRegisteredModelTag(ctx, "beta", "owner", "alice"); err != nil {
+	if err := s.SetRegisteredModelTag(ctx, "default", "beta", "owner", "alice"); err != nil {
 		t.Fatalf("set tag: %v", err)
 	}
-	res3, err := s.SearchRegisteredModels(ctx, "tags.owner = 'alice'", 100, "")
+	res3, err := s.SearchRegisteredModels(ctx, "default", "tags.owner = 'alice'", 100, "")
 	if err != nil {
 		t.Fatalf("search tag: %v", err)
 	}
@@ -456,12 +456,12 @@ func TestSearchModelVersions(t *testing.T) {
 	_ = v2
 
 	// Tag v1.
-	if err := s.SetModelVersionTag(ctx, "mvsearch", v1.Version, "approved", "yes"); err != nil {
+	if err := s.SetModelVersionTag(ctx, "default", "mvsearch", v1.Version, "approved", "yes"); err != nil {
 		t.Fatalf("set version tag: %v", err)
 	}
 
 	// Search by name.
-	res, err := s.SearchModelVersions(ctx, "name = 'mvsearch'", 100, "")
+	res, err := s.SearchModelVersions(ctx, "default", "name = 'mvsearch'", 100, "")
 	if err != nil {
 		t.Fatalf("search by name: %v", err)
 	}
@@ -470,7 +470,7 @@ func TestSearchModelVersions(t *testing.T) {
 	}
 
 	// Search by tag.
-	res2, err := s.SearchModelVersions(ctx, "tags.approved = 'yes'", 100, "")
+	res2, err := s.SearchModelVersions(ctx, "default", "tags.approved = 'yes'", 100, "")
 	if err != nil {
 		t.Fatalf("search by tag: %v", err)
 	}
@@ -490,16 +490,16 @@ func TestDeleteModelCascadesVersions(t *testing.T) {
 	mv := newModelVersion(t, s, "cascade", "s3://b/v1")
 
 	// Set an alias and tag so we test full cascade.
-	_ = s.SetModelAlias(ctx, "cascade", "prod", mv.Version)
-	_ = s.SetModelVersionTag(ctx, "cascade", mv.Version, "k", "v")
+	_ = s.SetModelAlias(ctx, "default", "cascade", "prod", mv.Version)
+	_ = s.SetModelVersionTag(ctx, "default", "cascade", mv.Version, "k", "v")
 
 	// Delete the model; versions, aliases, tags should go with it.
-	if err := s.DeleteRegisteredModel(ctx, "cascade"); err != nil {
+	if err := s.DeleteRegisteredModel(ctx, "default", "cascade"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 
 	// Version should be gone.
-	if _, err := s.GetModelVersion(ctx, "cascade", mv.Version); !errors.Is(err, store.ErrNotFound) {
+	if _, err := s.GetModelVersion(ctx, "default", "cascade", mv.Version); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("version should not exist after model delete, got %v", err)
 	}
 }
@@ -514,7 +514,7 @@ func TestInvalidStageRejected(t *testing.T) {
 	newRegisteredModel(t, s, "invalid-stage")
 	mv := newModelVersion(t, s, "invalid-stage", "s3://b/v1")
 
-	if _, err := s.TransitionModelStage(ctx, "invalid-stage", mv.Version, "Banana", false); err == nil {
+	if _, err := s.TransitionModelStage(ctx, "default", "invalid-stage", mv.Version, "Banana", false); err == nil {
 		t.Fatal("expected error for invalid stage, got nil")
 	}
 }

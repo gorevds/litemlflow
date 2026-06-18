@@ -15,7 +15,11 @@ import (
 
 // CreateRegisteredModel inserts a new registered model.
 // Returns ErrAlreadyExists when the name is already taken.
-func (s *SQLiteStore) CreateRegisteredModel(ctx context.Context, m *model.RegisteredModel) error {
+func (s *SQLiteStore) CreateRegisteredModel(ctx context.Context, workspaceID string, m *model.RegisteredModel) error {
+	if workspaceID == "" {
+		workspaceID = "default"
+	}
+	m.WorkspaceID = workspaceID
 	if err := model.ValidName(m.Name, 250); err != nil {
 		return err
 	}
@@ -27,9 +31,9 @@ func (s *SQLiteStore) CreateRegisteredModel(ctx context.Context, m *model.Regist
 		m.LastUpdateTime = now
 	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO registered_models(name, description, creation_time, last_update_time)
-		VALUES (?, ?, ?, ?)
-	`, m.Name, nilIfEmpty(m.Description), m.CreationTime, m.LastUpdateTime)
+		INSERT INTO registered_models(workspace_id, name, description, creation_time, last_update_time)
+		VALUES (?, ?, ?, ?, ?)
+	`, workspaceID, m.Name, nilIfEmpty(m.Description), m.CreationTime, m.LastUpdateTime)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return ErrAlreadyExists
@@ -40,16 +44,19 @@ func (s *SQLiteStore) CreateRegisteredModel(ctx context.Context, m *model.Regist
 }
 
 // GetRegisteredModel returns the registered model with its tags.
-func (s *SQLiteStore) GetRegisteredModel(ctx context.Context, name string) (*model.RegisteredModel, error) {
+func (s *SQLiteStore) GetRegisteredModel(ctx context.Context, workspaceID, name string) (*model.RegisteredModel, error) {
+	if workspaceID == "" {
+		workspaceID = "default"
+	}
 	row := s.db.QueryRowContext(ctx, `
 		SELECT name, COALESCE(description,''), creation_time, last_update_time
-		FROM registered_models WHERE name = ?
-	`, name)
-	m, err := scanRegisteredModel(row)
+		FROM registered_models WHERE workspace_id = ? AND name = ?
+	`, workspaceID, name)
+	m, err := scanRegisteredModel(row, workspaceID)
 	if err != nil {
 		return nil, err
 	}
-	tags, err := s.getRegisteredModelTags(ctx, name)
+	tags, err := s.getRegisteredModelTags(ctx, workspaceID, name)
 	if err != nil {
 		return nil, err
 	}
@@ -57,7 +64,7 @@ func (s *SQLiteStore) GetRegisteredModel(ctx context.Context, name string) (*mod
 	return m, nil
 }
 
-func scanRegisteredModel(row *sql.Row) (*model.RegisteredModel, error) {
+func scanRegisteredModel(row *sql.Row, workspaceID string) (*model.RegisteredModel, error) {
 	var m model.RegisteredModel
 	if err := row.Scan(&m.Name, &m.Description, &m.CreationTime, &m.LastUpdateTime); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -65,12 +72,13 @@ func scanRegisteredModel(row *sql.Row) (*model.RegisteredModel, error) {
 		}
 		return nil, err
 	}
+	m.WorkspaceID = workspaceID
 	return &m, nil
 }
 
-func (s *SQLiteStore) getRegisteredModelTags(ctx context.Context, name string) ([]model.KV, error) {
+func (s *SQLiteStore) getRegisteredModelTags(ctx context.Context, workspaceID, name string) ([]model.KV, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT key, value FROM registered_model_tags WHERE name = ? ORDER BY key`, name)
+		`SELECT key, value FROM registered_model_tags WHERE workspace_id = ? AND name = ? ORDER BY key`, workspaceID, name)
 	if err != nil {
 		return nil, err
 	}
@@ -92,7 +100,10 @@ func (s *SQLiteStore) getRegisteredModelTags(ctx context.Context, name string) (
 // around this by acquiring a dedicated connection, disabling FK enforcement on
 // that connection (PRAGMA foreign_keys is per-connection), updating the PK
 // and all FK columns, running a FK integrity check, and only then committing.
-func (s *SQLiteStore) RenameRegisteredModel(ctx context.Context, name, newName string) (*model.RegisteredModel, error) {
+func (s *SQLiteStore) RenameRegisteredModel(ctx context.Context, workspaceID, name, newName string) (*model.RegisteredModel, error) {
+	if workspaceID == "" {
+		workspaceID = "default"
+	}
 	if err := model.ValidName(newName, 250); err != nil {
 		return nil, err
 	}
@@ -107,7 +118,7 @@ func (s *SQLiteStore) RenameRegisteredModel(ctx context.Context, name, newName s
 
 	// Check source exists.
 	var dummy string
-	if err := conn.QueryRowContext(ctx, `SELECT name FROM registered_models WHERE name = ?`, name).Scan(&dummy); err != nil {
+	if err := conn.QueryRowContext(ctx, `SELECT name FROM registered_models WHERE workspace_id = ? AND name = ?`, workspaceID, name).Scan(&dummy); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -116,7 +127,7 @@ func (s *SQLiteStore) RenameRegisteredModel(ctx context.Context, name, newName s
 
 	// Check target name doesn't already exist.
 	var existCheck string
-	checkErr := conn.QueryRowContext(ctx, `SELECT name FROM registered_models WHERE name = ?`, newName).Scan(&existCheck)
+	checkErr := conn.QueryRowContext(ctx, `SELECT name FROM registered_models WHERE workspace_id = ? AND name = ?`, workspaceID, newName).Scan(&existCheck)
 	if checkErr == nil {
 		return nil, ErrAlreadyExists
 	} else if !errors.Is(checkErr, sql.ErrNoRows) {
@@ -139,14 +150,14 @@ func (s *SQLiteStore) RenameRegisteredModel(ctx context.Context, name, newName s
 
 	// Update child tables first (so they don't reference the old PK once it changes).
 	for _, tbl := range []string{"model_versions", "registered_model_tags", "model_aliases"} {
-		if _, err := tx.ExecContext(ctx, `UPDATE `+tbl+` SET name = ? WHERE name = ?`, newName, name); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE `+tbl+` SET name = ? WHERE workspace_id = ? AND name = ?`, newName, workspaceID, name); err != nil {
 			return nil, fmt.Errorf("rename cascade %s: %w", tbl, err)
 		}
 	}
 
 	// Now update the PK.
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE registered_models SET name = ?, last_update_time = ? WHERE name = ?`, newName, now, name); err != nil {
+		`UPDATE registered_models SET name = ?, last_update_time = ? WHERE workspace_id = ? AND name = ?`, newName, now, workspaceID, name); err != nil {
 		if isUniqueViolation(err) {
 			return nil, ErrAlreadyExists
 		}
@@ -156,18 +167,21 @@ func (s *SQLiteStore) RenameRegisteredModel(ctx context.Context, name, newName s
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	return s.GetRegisteredModel(ctx, newName)
+	return s.GetRegisteredModel(ctx, workspaceID, newName)
 }
 
 // UpdateRegisteredModel updates the description of a registered model.
-func (s *SQLiteStore) UpdateRegisteredModel(ctx context.Context, name string, description *string) (*model.RegisteredModel, error) {
+func (s *SQLiteStore) UpdateRegisteredModel(ctx context.Context, workspaceID, name string, description *string) (*model.RegisteredModel, error) {
+	if workspaceID == "" {
+		workspaceID = "default"
+	}
 	if description == nil {
-		return s.GetRegisteredModel(ctx, name)
+		return s.GetRegisteredModel(ctx, workspaceID, name)
 	}
 	now := time.Now().UnixMilli()
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE registered_models SET description = ?, last_update_time = ? WHERE name = ?`,
-		nilIfEmpty(*description), now, name)
+		`UPDATE registered_models SET description = ?, last_update_time = ? WHERE workspace_id = ? AND name = ?`,
+		nilIfEmpty(*description), now, workspaceID, name)
 	if err != nil {
 		return nil, err
 	}
@@ -175,12 +189,15 @@ func (s *SQLiteStore) UpdateRegisteredModel(ctx context.Context, name string, de
 	if n == 0 {
 		return nil, ErrNotFound
 	}
-	return s.GetRegisteredModel(ctx, name)
+	return s.GetRegisteredModel(ctx, workspaceID, name)
 }
 
 // DeleteRegisteredModel removes a model and all its versions (via FK CASCADE).
-func (s *SQLiteStore) DeleteRegisteredModel(ctx context.Context, name string) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM registered_models WHERE name = ?`, name)
+func (s *SQLiteStore) DeleteRegisteredModel(ctx context.Context, workspaceID, name string) error {
+	if workspaceID == "" {
+		workspaceID = "default"
+	}
+	res, err := s.db.ExecContext(ctx, `DELETE FROM registered_models WHERE workspace_id = ? AND name = ?`, workspaceID, name)
 	if err != nil {
 		return err
 	}
@@ -193,17 +210,20 @@ func (s *SQLiteStore) DeleteRegisteredModel(ctx context.Context, name string) er
 
 // SearchRegisteredModels lists models matching a simple filter.
 // Supported filters: empty, `name LIKE '...'`, `name = '...'`, `tags.X = '...'`.
-func (s *SQLiteStore) SearchRegisteredModels(ctx context.Context, filter string, maxResults int, pageToken string) (SearchResult[*model.RegisteredModel], error) {
+func (s *SQLiteStore) SearchRegisteredModels(ctx context.Context, workspaceID, filter string, maxResults int, pageToken string) (SearchResult[*model.RegisteredModel], error) {
+	if workspaceID == "" {
+		workspaceID = "default"
+	}
 	if maxResults <= 0 {
 		maxResults = 100
 	}
 	if maxResults > 10000 {
 		maxResults = 10000
 	}
-	args := []any{}
-	where := []string{}
+	args := []any{workspaceID}
+	where := []string{"workspace_id = ?"}
 	if f := strings.TrimSpace(filter); f != "" {
-		clause, fargs, err := parseRegistryFilter(f)
+		clause, fargs, err := parseRegistryFilter(workspaceID, f)
 		if err != nil {
 			return SearchResult[*model.RegisteredModel]{}, err
 		}
@@ -232,6 +252,7 @@ func (s *SQLiteStore) SearchRegisteredModels(ctx context.Context, filter string,
 		if err := rows.Scan(&m.Name, &m.Description, &m.CreationTime, &m.LastUpdateTime); err != nil {
 			return SearchResult[*model.RegisteredModel]{}, err
 		}
+		m.WorkspaceID = workspaceID
 		out = append(out, &m)
 	}
 	if err := rows.Err(); err != nil {
@@ -243,7 +264,7 @@ func (s *SQLiteStore) SearchRegisteredModels(ctx context.Context, filter string,
 		token = out[len(out)-1].Name
 	}
 	for _, m := range out {
-		tags, err := s.getRegisteredModelTags(ctx, m.Name)
+		tags, err := s.getRegisteredModelTags(ctx, workspaceID, m.Name)
 		if err != nil {
 			return SearchResult[*model.RegisteredModel]{}, err
 		}
@@ -263,7 +284,7 @@ func (s *SQLiteStore) SearchRegisteredModels(ctx context.Context, filter string,
 // don't store prompts as registered models, so that condition is always
 // satisfied; strip it before parsing so we don't have to support AND + tag.X
 // + != + backticks.
-func parseRegistryFilter(f string) (string, []any, error) {
+func parseRegistryFilter(workspaceID, f string) (string, []any, error) {
 	f = stripPromptExclusion(f)
 	// tags.X = 'value'
 	if strings.HasPrefix(strings.ToLower(f), "tags.") {
@@ -274,7 +295,7 @@ func parseRegistryFilter(f string) (string, []any, error) {
 		key := strings.TrimSpace(f[5:idx])
 		val := strings.TrimSpace(f[idx+1:])
 		val = strings.Trim(val, "'\"")
-		return `name IN (SELECT name FROM registered_model_tags WHERE key = ? AND value = ?)`, []any{key, val}, nil
+		return `name IN (SELECT name FROM registered_model_tags WHERE workspace_id = ? AND key = ? AND value = ?)`, []any{workspaceID, key, val}, nil
 	}
 	parts := strings.Fields(f)
 	if len(parts) >= 3 && strings.ToLower(parts[0]) == "name" {
@@ -316,14 +337,17 @@ func stripPromptExclusion(f string) string {
 
 // GetLatestModelVersions returns the highest-versioned model version per stage.
 // If stages is empty, one version per stage (all stages) is returned.
-func (s *SQLiteStore) GetLatestModelVersions(ctx context.Context, name string, stages []string) ([]*model.ModelVersion, error) {
+func (s *SQLiteStore) GetLatestModelVersions(ctx context.Context, workspaceID, name string, stages []string) ([]*model.ModelVersion, error) {
+	if workspaceID == "" {
+		workspaceID = "default"
+	}
 	// Confirm model exists.
-	if _, err := s.GetRegisteredModel(ctx, name); err != nil {
+	if _, err := s.GetRegisteredModel(ctx, workspaceID, name); err != nil {
 		return nil, err
 	}
 
 	// Build WHERE for stage filter.
-	args := []any{name}
+	args := []any{workspaceID, name}
 	stageWhere := ""
 	if len(stages) > 0 {
 		marks := strings.TrimRight(strings.Repeat("?,", len(stages)), ",")
@@ -339,10 +363,11 @@ func (s *SQLiteStore) GetLatestModelVersions(ctx context.Context, name string, s
 		       source, COALESCE(run_id,''), status, COALESCE(status_message,''),
 		       creation_time, last_update_time
 		FROM model_versions
-		WHERE name = ?` + stageWhere + `
+		WHERE workspace_id = ? AND name = ?` + stageWhere + `
 		  AND version = (
 			SELECT MAX(version) FROM model_versions mv2
-			WHERE mv2.name = model_versions.name
+			WHERE mv2.workspace_id = model_versions.workspace_id
+			  AND mv2.name = model_versions.name
 			  AND mv2.current_stage = model_versions.current_stage
 		  )
 		ORDER BY current_stage ASC
@@ -358,27 +383,34 @@ func (s *SQLiteStore) GetLatestModelVersions(ctx context.Context, name string, s
 		if err != nil {
 			return nil, err
 		}
+		mv.WorkspaceID = workspaceID
 		out = append(out, mv)
 	}
 	return out, rows.Err()
 }
 
 // SetRegisteredModelTag upserts a tag on a registered model.
-func (s *SQLiteStore) SetRegisteredModelTag(ctx context.Context, name, key, value string) error {
-	if _, err := s.GetRegisteredModel(ctx, name); err != nil {
+func (s *SQLiteStore) SetRegisteredModelTag(ctx context.Context, workspaceID, name, key, value string) error {
+	if workspaceID == "" {
+		workspaceID = "default"
+	}
+	if _, err := s.GetRegisteredModel(ctx, workspaceID, name); err != nil {
 		return err
 	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO registered_model_tags(name, key, value) VALUES (?, ?, ?)
-		ON CONFLICT(name, key) DO UPDATE SET value = excluded.value
-	`, name, key, value)
+		INSERT INTO registered_model_tags(workspace_id, name, key, value) VALUES (?, ?, ?, ?)
+		ON CONFLICT(workspace_id, name, key) DO UPDATE SET value = excluded.value
+	`, workspaceID, name, key, value)
 	return err
 }
 
 // DeleteRegisteredModelTag removes a tag from a registered model.
-func (s *SQLiteStore) DeleteRegisteredModelTag(ctx context.Context, name, key string) error {
+func (s *SQLiteStore) DeleteRegisteredModelTag(ctx context.Context, workspaceID, name, key string) error {
+	if workspaceID == "" {
+		workspaceID = "default"
+	}
 	res, err := s.db.ExecContext(ctx,
-		`DELETE FROM registered_model_tags WHERE name = ? AND key = ?`, name, key)
+		`DELETE FROM registered_model_tags WHERE workspace_id = ? AND name = ? AND key = ?`, workspaceID, name, key)
 	if err != nil {
 		return err
 	}
@@ -392,22 +424,28 @@ func (s *SQLiteStore) DeleteRegisteredModelTag(ctx context.Context, name, key st
 // ---- Model Aliases -----------------------------------------------------------
 
 // SetModelAlias upserts an alias on a model version.
-func (s *SQLiteStore) SetModelAlias(ctx context.Context, name, alias string, version int64) error {
+func (s *SQLiteStore) SetModelAlias(ctx context.Context, workspaceID, name, alias string, version int64) error {
+	if workspaceID == "" {
+		workspaceID = "default"
+	}
 	// Confirm version exists.
-	if _, err := s.GetModelVersion(ctx, name, version); err != nil {
+	if _, err := s.GetModelVersion(ctx, workspaceID, name, version); err != nil {
 		return err
 	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO model_aliases(name, alias, version) VALUES (?, ?, ?)
-		ON CONFLICT(name, alias) DO UPDATE SET version = excluded.version
-	`, name, alias, version)
+		INSERT INTO model_aliases(workspace_id, name, alias, version) VALUES (?, ?, ?, ?)
+		ON CONFLICT(workspace_id, name, alias) DO UPDATE SET version = excluded.version
+	`, workspaceID, name, alias, version)
 	return err
 }
 
 // DeleteModelAlias removes an alias. Returns ErrNotFound if absent.
-func (s *SQLiteStore) DeleteModelAlias(ctx context.Context, name, alias string) error {
+func (s *SQLiteStore) DeleteModelAlias(ctx context.Context, workspaceID, name, alias string) error {
+	if workspaceID == "" {
+		workspaceID = "default"
+	}
 	res, err := s.db.ExecContext(ctx,
-		`DELETE FROM model_aliases WHERE name = ? AND alias = ?`, name, alias)
+		`DELETE FROM model_aliases WHERE workspace_id = ? AND name = ? AND alias = ?`, workspaceID, name, alias)
 	if err != nil {
 		return err
 	}
@@ -419,29 +457,36 @@ func (s *SQLiteStore) DeleteModelAlias(ctx context.Context, name, alias string) 
 }
 
 // GetModelByAlias resolves an alias to a model version.
-func (s *SQLiteStore) GetModelByAlias(ctx context.Context, name, alias string) (*model.ModelVersion, error) {
+func (s *SQLiteStore) GetModelByAlias(ctx context.Context, workspaceID, name, alias string) (*model.ModelVersion, error) {
+	if workspaceID == "" {
+		workspaceID = "default"
+	}
 	var version int64
 	err := s.db.QueryRowContext(ctx,
-		`SELECT version FROM model_aliases WHERE name = ? AND alias = ?`, name, alias).Scan(&version)
+		`SELECT version FROM model_aliases WHERE workspace_id = ? AND name = ? AND alias = ?`, workspaceID, name, alias).Scan(&version)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, err
 	}
-	return s.GetModelVersion(ctx, name, version)
+	return s.GetModelVersion(ctx, workspaceID, name, version)
 }
 
 // ---- Model Versions ----------------------------------------------------------
 
 // CreateModelVersion inserts a new model version with an auto-incremented
 // version number per model name. The first version is 1.
-func (s *SQLiteStore) CreateModelVersion(ctx context.Context, mv *model.ModelVersion) (*model.ModelVersion, error) {
+func (s *SQLiteStore) CreateModelVersion(ctx context.Context, workspaceID string, mv *model.ModelVersion) (*model.ModelVersion, error) {
+	if workspaceID == "" {
+		workspaceID = "default"
+	}
+	mv.WorkspaceID = workspaceID
 	if err := model.ValidName(mv.Name, 250); err != nil {
 		return nil, err
 	}
 	// Confirm model exists.
-	if _, err := s.GetRegisteredModel(ctx, mv.Name); err != nil {
+	if _, err := s.GetRegisteredModel(ctx, workspaceID, mv.Name); err != nil {
 		return nil, err
 	}
 	now := time.Now().UnixMilli()
@@ -467,17 +512,17 @@ func (s *SQLiteStore) CreateModelVersion(ctx context.Context, mv *model.ModelVer
 	// Auto-increment version per name.
 	var nextVersion int64
 	if err := tx.QueryRowContext(ctx,
-		`SELECT COALESCE(MAX(version), 0) + 1 FROM model_versions WHERE name = ?`,
-		mv.Name).Scan(&nextVersion); err != nil {
+		`SELECT COALESCE(MAX(version), 0) + 1 FROM model_versions WHERE workspace_id = ? AND name = ?`,
+		workspaceID, mv.Name).Scan(&nextVersion); err != nil {
 		return nil, err
 	}
 	mv.Version = nextVersion
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO model_versions(name, version, description, user_id, current_stage, source,
+		INSERT INTO model_versions(workspace_id, name, version, description, user_id, current_stage, source,
 		                           run_id, status, status_message, creation_time, last_update_time)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, mv.Name, mv.Version, nilIfEmpty(mv.Description), nilIfEmpty(mv.UserID),
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, workspaceID, mv.Name, mv.Version, nilIfEmpty(mv.Description), nilIfEmpty(mv.UserID),
 		mv.CurrentStage, mv.Source, nilIfEmpty(mv.RunID), mv.Status,
 		nilIfEmpty(mv.StatusMessage), mv.CreationTime, mv.LastUpdateTime)
 	if err != nil {
@@ -486,22 +531,26 @@ func (s *SQLiteStore) CreateModelVersion(ctx context.Context, mv *model.ModelVer
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	return s.GetModelVersion(ctx, mv.Name, mv.Version)
+	return s.GetModelVersion(ctx, workspaceID, mv.Name, mv.Version)
 }
 
 // GetModelVersion returns a specific model version with its tags.
-func (s *SQLiteStore) GetModelVersion(ctx context.Context, name string, version int64) (*model.ModelVersion, error) {
+func (s *SQLiteStore) GetModelVersion(ctx context.Context, workspaceID, name string, version int64) (*model.ModelVersion, error) {
+	if workspaceID == "" {
+		workspaceID = "default"
+	}
 	row := s.db.QueryRowContext(ctx, `
 		SELECT name, version, COALESCE(description,''), COALESCE(user_id,''), current_stage,
 		       source, COALESCE(run_id,''), status, COALESCE(status_message,''),
 		       creation_time, last_update_time
-		FROM model_versions WHERE name = ? AND version = ?
-	`, name, version)
+		FROM model_versions WHERE workspace_id = ? AND name = ? AND version = ?
+	`, workspaceID, name, version)
 	mv, err := scanModelVersionSingleRow(row)
 	if err != nil {
 		return nil, err
 	}
-	tags, err := s.getModelVersionTags(ctx, name, version)
+	mv.WorkspaceID = workspaceID
+	tags, err := s.getModelVersionTags(ctx, workspaceID, name, version)
 	if err != nil {
 		return nil, err
 	}
@@ -510,14 +559,17 @@ func (s *SQLiteStore) GetModelVersion(ctx context.Context, name string, version 
 }
 
 // UpdateModelVersion updates the description of a model version.
-func (s *SQLiteStore) UpdateModelVersion(ctx context.Context, name string, version int64, description *string) (*model.ModelVersion, error) {
+func (s *SQLiteStore) UpdateModelVersion(ctx context.Context, workspaceID, name string, version int64, description *string) (*model.ModelVersion, error) {
+	if workspaceID == "" {
+		workspaceID = "default"
+	}
 	if description == nil {
-		return s.GetModelVersion(ctx, name, version)
+		return s.GetModelVersion(ctx, workspaceID, name, version)
 	}
 	now := time.Now().UnixMilli()
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE model_versions SET description = ?, last_update_time = ? WHERE name = ? AND version = ?`,
-		nilIfEmpty(*description), now, name, version)
+		`UPDATE model_versions SET description = ?, last_update_time = ? WHERE workspace_id = ? AND name = ? AND version = ?`,
+		nilIfEmpty(*description), now, workspaceID, name, version)
 	if err != nil {
 		return nil, err
 	}
@@ -525,13 +577,16 @@ func (s *SQLiteStore) UpdateModelVersion(ctx context.Context, name string, versi
 	if n == 0 {
 		return nil, ErrNotFound
 	}
-	return s.GetModelVersion(ctx, name, version)
+	return s.GetModelVersion(ctx, workspaceID, name, version)
 }
 
 // DeleteModelVersion deletes a specific model version (and cascades aliases/tags).
-func (s *SQLiteStore) DeleteModelVersion(ctx context.Context, name string, version int64) error {
+func (s *SQLiteStore) DeleteModelVersion(ctx context.Context, workspaceID, name string, version int64) error {
+	if workspaceID == "" {
+		workspaceID = "default"
+	}
 	res, err := s.db.ExecContext(ctx,
-		`DELETE FROM model_versions WHERE name = ? AND version = ?`, name, version)
+		`DELETE FROM model_versions WHERE workspace_id = ? AND name = ? AND version = ?`, workspaceID, name, version)
 	if err != nil {
 		return err
 	}
@@ -544,17 +599,20 @@ func (s *SQLiteStore) DeleteModelVersion(ctx context.Context, name string, versi
 
 // SearchModelVersions lists versions matching a simple filter.
 // Supported filters: empty, `name = '...'`, `tags.X = '...'`.
-func (s *SQLiteStore) SearchModelVersions(ctx context.Context, filter string, maxResults int, pageToken string) (SearchResult[*model.ModelVersion], error) {
+func (s *SQLiteStore) SearchModelVersions(ctx context.Context, workspaceID, filter string, maxResults int, pageToken string) (SearchResult[*model.ModelVersion], error) {
+	if workspaceID == "" {
+		workspaceID = "default"
+	}
 	if maxResults <= 0 {
 		maxResults = 100
 	}
 	if maxResults > 10000 {
 		maxResults = 10000
 	}
-	args := []any{}
-	where := []string{}
+	args := []any{workspaceID}
+	where := []string{"workspace_id = ?"}
 	if f := strings.TrimSpace(filter); f != "" {
-		clause, fargs, err := parseModelVersionFilter(f)
+		clause, fargs, err := parseModelVersionFilter(workspaceID, f)
 		if err != nil {
 			return SearchResult[*model.ModelVersion]{}, err
 		}
@@ -589,6 +647,7 @@ func (s *SQLiteStore) SearchModelVersions(ctx context.Context, filter string, ma
 		if err != nil {
 			return SearchResult[*model.ModelVersion]{}, err
 		}
+		mv.WorkspaceID = workspaceID
 		out = append(out, mv)
 	}
 	if err := rows.Err(); err != nil {
@@ -601,7 +660,7 @@ func (s *SQLiteStore) SearchModelVersions(ctx context.Context, filter string, ma
 		token = fmt.Sprintf("%s:%d", last.Name, last.Version)
 	}
 	for _, mv := range out {
-		tags, err := s.getModelVersionTags(ctx, mv.Name, mv.Version)
+		tags, err := s.getModelVersionTags(ctx, workspaceID, mv.Name, mv.Version)
 		if err != nil {
 			return SearchResult[*model.ModelVersion]{}, err
 		}
@@ -610,7 +669,7 @@ func (s *SQLiteStore) SearchModelVersions(ctx context.Context, filter string, ma
 	return SearchResult[*model.ModelVersion]{Items: out, NextPageToken: token}, nil
 }
 
-func parseModelVersionFilter(f string) (string, []any, error) {
+func parseModelVersionFilter(workspaceID, f string) (string, []any, error) {
 	f = stripPromptExclusion(f)
 	// tags.X = 'value'
 	if strings.HasPrefix(strings.ToLower(f), "tags.") {
@@ -621,7 +680,7 @@ func parseModelVersionFilter(f string) (string, []any, error) {
 		key := strings.TrimSpace(f[5:idx])
 		val := strings.TrimSpace(f[idx+1:])
 		val = strings.Trim(val, "'\"")
-		return `(name, version) IN (SELECT name, version FROM model_version_tags WHERE key = ? AND value = ?)`, []any{key, val}, nil
+		return `(name, version) IN (SELECT name, version FROM model_version_tags WHERE workspace_id = ? AND key = ? AND value = ?)`, []any{workspaceID, key, val}, nil
 	}
 	// run_id = 'value'
 	if strings.HasPrefix(strings.ToLower(f), "run_id") {
@@ -646,7 +705,10 @@ func parseModelVersionFilter(f string) (string, []any, error) {
 
 // TransitionModelStage sets the stage of a model version.
 // If archiveExisting is true, existing Production versions are moved to Archived.
-func (s *SQLiteStore) TransitionModelStage(ctx context.Context, name string, version int64, stage string, archiveExisting bool) (*model.ModelVersion, error) {
+func (s *SQLiteStore) TransitionModelStage(ctx context.Context, workspaceID, name string, version int64, stage string, archiveExisting bool) (*model.ModelVersion, error) {
+	if workspaceID == "" {
+		workspaceID = "default"
+	}
 	if !model.ValidStage(stage) {
 		return nil, fmt.Errorf("%w: %q must be one of None, Staging, Production, Archived", ErrInvalidStage, stage)
 	}
@@ -662,8 +724,8 @@ func (s *SQLiteStore) TransitionModelStage(ctx context.Context, name string, ver
 	if archiveExisting && stage == model.StageProduction {
 		_, err := tx.ExecContext(ctx, `
 			UPDATE model_versions SET current_stage = 'Archived', last_update_time = ?
-			WHERE name = ? AND current_stage = 'Production' AND version != ?
-		`, now, name, version)
+			WHERE workspace_id = ? AND name = ? AND current_stage = 'Production' AND version != ?
+		`, now, workspaceID, name, version)
 		if err != nil {
 			return nil, fmt.Errorf("archive existing: %w", err)
 		}
@@ -671,8 +733,8 @@ func (s *SQLiteStore) TransitionModelStage(ctx context.Context, name string, ver
 
 	res, err := tx.ExecContext(ctx, `
 		UPDATE model_versions SET current_stage = ?, last_update_time = ?
-		WHERE name = ? AND version = ?
-	`, stage, now, name, version)
+		WHERE workspace_id = ? AND name = ? AND version = ?
+	`, stage, now, workspaceID, name, version)
 	if err != nil {
 		return nil, err
 	}
@@ -684,26 +746,32 @@ func (s *SQLiteStore) TransitionModelStage(ctx context.Context, name string, ver
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	return s.GetModelVersion(ctx, name, version)
+	return s.GetModelVersion(ctx, workspaceID, name, version)
 }
 
 // SetModelVersionTag upserts a tag on a model version.
-func (s *SQLiteStore) SetModelVersionTag(ctx context.Context, name string, version int64, key, value string) error {
-	if _, err := s.GetModelVersion(ctx, name, version); err != nil {
+func (s *SQLiteStore) SetModelVersionTag(ctx context.Context, workspaceID, name string, version int64, key, value string) error {
+	if workspaceID == "" {
+		workspaceID = "default"
+	}
+	if _, err := s.GetModelVersion(ctx, workspaceID, name, version); err != nil {
 		return err
 	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO model_version_tags(name, version, key, value) VALUES (?, ?, ?, ?)
-		ON CONFLICT(name, version, key) DO UPDATE SET value = excluded.value
-	`, name, version, key, value)
+		INSERT INTO model_version_tags(workspace_id, name, version, key, value) VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(workspace_id, name, version, key) DO UPDATE SET value = excluded.value
+	`, workspaceID, name, version, key, value)
 	return err
 }
 
 // DeleteModelVersionTag removes a tag from a model version.
-func (s *SQLiteStore) DeleteModelVersionTag(ctx context.Context, name string, version int64, key string) error {
+func (s *SQLiteStore) DeleteModelVersionTag(ctx context.Context, workspaceID, name string, version int64, key string) error {
+	if workspaceID == "" {
+		workspaceID = "default"
+	}
 	res, err := s.db.ExecContext(ctx,
-		`DELETE FROM model_version_tags WHERE name = ? AND version = ? AND key = ?`,
-		name, version, key)
+		`DELETE FROM model_version_tags WHERE workspace_id = ? AND name = ? AND version = ? AND key = ?`,
+		workspaceID, name, version, key)
 	if err != nil {
 		return err
 	}
@@ -714,10 +782,10 @@ func (s *SQLiteStore) DeleteModelVersionTag(ctx context.Context, name string, ve
 	return nil
 }
 
-func (s *SQLiteStore) getModelVersionTags(ctx context.Context, name string, version int64) ([]model.KV, error) {
+func (s *SQLiteStore) getModelVersionTags(ctx context.Context, workspaceID, name string, version int64) ([]model.KV, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT key, value FROM model_version_tags WHERE name = ? AND version = ? ORDER BY key`,
-		name, version)
+		`SELECT key, value FROM model_version_tags WHERE workspace_id = ? AND name = ? AND version = ? ORDER BY key`,
+		workspaceID, name, version)
 	if err != nil {
 		return nil, err
 	}

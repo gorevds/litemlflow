@@ -373,7 +373,7 @@ func (h *Handler) GlobalSearch(w http.ResponseWriter, r *http.Request) {
 			if ql != "" && !strings.Contains(strings.ToLower(name), ql) {
 				continue
 			}
-			p, err := h.Store.GetLatestPrompt(ctx, name)
+			p, err := h.Store.GetLatestPrompt(ctx, ws, name)
 			if err != nil {
 				continue
 			}
@@ -801,7 +801,7 @@ type createPromptReq struct {
 
 // ListPrompts handles GET /api/v1/prompts (latest version per name).
 func (h *Handler) ListPrompts(w http.ResponseWriter, r *http.Request) {
-	prompts, err := h.Store.ListPrompts(r.Context())
+	prompts, err := h.Store.ListPrompts(r.Context(), workspaceFromReq(r))
 	if err != nil {
 		writeStoreErr(w, err)
 		return
@@ -827,7 +827,7 @@ func (h *Handler) CreatePrompt(w http.ResponseWriter, r *http.Request) {
 		Name: req.Name, Content: req.Content,
 		Description: req.Description, CreatedBy: req.CreatedBy,
 	}
-	if _, err := h.Store.CreatePrompt(r.Context(), p); err != nil {
+	if _, err := h.Store.CreatePrompt(r.Context(), workspaceFromReq(r), p); err != nil {
 		writeStoreErr(w, err)
 		return
 	}
@@ -837,7 +837,7 @@ func (h *Handler) CreatePrompt(w http.ResponseWriter, r *http.Request) {
 // GetLatestPrompt handles GET /api/v1/prompts/{name}.
 func (h *Handler) GetLatestPrompt(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
-	p, err := h.Store.GetLatestPrompt(r.Context(), name)
+	p, err := h.Store.GetLatestPrompt(r.Context(), workspaceFromReq(r), name)
 	if err != nil {
 		writeStoreErr(w, err)
 		return
@@ -848,7 +848,7 @@ func (h *Handler) GetLatestPrompt(w http.ResponseWriter, r *http.Request) {
 // ListPromptVersions handles GET /api/v1/prompts/{name}/versions.
 func (h *Handler) ListPromptVersions(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
-	versions, err := h.Store.ListPromptVersions(r.Context(), name)
+	versions, err := h.Store.ListPromptVersions(r.Context(), workspaceFromReq(r), name)
 	if err != nil {
 		writeStoreErr(w, err)
 		return
@@ -864,7 +864,7 @@ func (h *Handler) GetPromptVersion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "version must be a positive integer")
 		return
 	}
-	p, err := h.Store.GetPromptVersion(r.Context(), name, v)
+	p, err := h.Store.GetPromptVersion(r.Context(), workspaceFromReq(r), name, v)
 	if err != nil {
 		writeStoreErr(w, err)
 		return
@@ -885,7 +885,7 @@ func (h *Handler) SetPromptAlias(w http.ResponseWriter, r *http.Request) {
 		writeBadRequest(w, err)
 		return
 	}
-	if err := h.Store.SetPromptAlias(r.Context(), name, req.Alias, req.Version); err != nil {
+	if err := h.Store.SetPromptAlias(r.Context(), workspaceFromReq(r), name, req.Alias, req.Version); err != nil {
 		writeStoreErr(w, err)
 		return
 	}
@@ -896,7 +896,7 @@ func (h *Handler) SetPromptAlias(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) GetPromptByAlias(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	alias := chi.URLParam(r, "alias")
-	p, err := h.Store.GetPromptByAlias(r.Context(), name, alias)
+	p, err := h.Store.GetPromptByAlias(r.Context(), workspaceFromReq(r), name, alias)
 	if err != nil {
 		writeStoreErr(w, err)
 		return

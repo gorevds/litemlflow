@@ -86,25 +86,6 @@ CREATE TABLE traces (
     FOREIGN KEY (parent_id) REFERENCES traces(id) ON DELETE CASCADE
 );
 
-CREATE TABLE prompts (
-    name         TEXT    NOT NULL,
-    version      INTEGER NOT NULL,
-    content      TEXT    NOT NULL,
-    content_hash TEXT    NOT NULL,
-    created_at   INTEGER NOT NULL,
-    created_by   TEXT,
-    description  TEXT,
-    PRIMARY KEY (name, version)
-);
-
-CREATE TABLE prompt_aliases (
-    name    TEXT    NOT NULL,
-    alias   TEXT    NOT NULL,
-    version INTEGER NOT NULL,
-    PRIMARY KEY (name, alias),
-    FOREIGN KEY (name, version) REFERENCES prompts(name, version) ON DELETE CASCADE
-);
-
 CREATE TABLE evals (
     run_id          TEXT PRIMARY KEY,
     target_run_ids  TEXT NOT NULL,
@@ -123,56 +104,6 @@ CREATE TABLE sessions (
     created_at  INTEGER NOT NULL,             -- unix ms
     expires_at  INTEGER NOT NULL,             -- unix ms
     last_seen   INTEGER NOT NULL              -- unix ms
-);
-
-CREATE TABLE registered_models (
-    name             TEXT    PRIMARY KEY,
-    description      TEXT,
-    creation_time    INTEGER NOT NULL,   -- unix ms
-    last_update_time INTEGER NOT NULL    -- unix ms
-);
-
-CREATE TABLE model_versions (
-    name              TEXT    NOT NULL,
-    version           INTEGER NOT NULL,
-    description       TEXT,
-    user_id           TEXT,
-    current_stage     TEXT    NOT NULL DEFAULT 'None',  -- None|Staging|Production|Archived
-    source            TEXT    NOT NULL,                  -- artifact URI
-    run_id            TEXT,                              -- nullable
-    status            TEXT    NOT NULL DEFAULT 'READY',  -- READY|PENDING|FAILED
-    status_message    TEXT,
-    creation_time     INTEGER NOT NULL,
-    last_update_time  INTEGER NOT NULL,
-    PRIMARY KEY (name, version),
-    FOREIGN KEY (name) REFERENCES registered_models(name) ON DELETE CASCADE,
-    CHECK (current_stage IN ('None','Staging','Production','Archived')),
-    CHECK (status IN ('READY','PENDING','FAILED'))
-);
-
-CREATE TABLE registered_model_tags (
-    name  TEXT NOT NULL,
-    key   TEXT NOT NULL,
-    value TEXT NOT NULL,
-    PRIMARY KEY (name, key),
-    FOREIGN KEY (name) REFERENCES registered_models(name) ON DELETE CASCADE
-);
-
-CREATE TABLE model_version_tags (
-    name    TEXT NOT NULL,
-    version INTEGER NOT NULL,
-    key     TEXT NOT NULL,
-    value   TEXT NOT NULL,
-    PRIMARY KEY (name, version, key),
-    FOREIGN KEY (name, version) REFERENCES model_versions(name, version) ON DELETE CASCADE
-);
-
-CREATE TABLE model_aliases (
-    name    TEXT NOT NULL,
-    alias   TEXT NOT NULL,
-    version INTEGER NOT NULL,
-    PRIMARY KEY (name, alias),
-    FOREIGN KEY (name, version) REFERENCES model_versions(name, version) ON DELETE CASCADE
 );
 
 CREATE TABLE workspaces (
@@ -339,6 +270,85 @@ CREATE TABLE dataset_inputs_v2 (
     FOREIGN KEY (dataset_id) REFERENCES datasets_v2(id) ON DELETE CASCADE
 );
 
+CREATE TABLE "prompts" (
+    name         TEXT    NOT NULL,
+    version      INTEGER NOT NULL,
+    workspace_id TEXT    NOT NULL DEFAULT 'default'
+        REFERENCES workspaces(id) ON DELETE CASCADE,
+    content      TEXT    NOT NULL,
+    content_hash TEXT    NOT NULL,
+    created_at   INTEGER NOT NULL,
+    created_by   TEXT,
+    description  TEXT,
+    PRIMARY KEY (workspace_id, name, version)
+);
+
+CREATE TABLE "prompt_aliases" (
+    workspace_id TEXT    NOT NULL DEFAULT 'default',
+    name         TEXT    NOT NULL,
+    alias        TEXT    NOT NULL,
+    version      INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, name, alias),
+    FOREIGN KEY (workspace_id, name, version) REFERENCES "prompts"(workspace_id, name, version) ON DELETE CASCADE
+);
+
+CREATE TABLE "registered_models" (
+    name             TEXT    NOT NULL,
+    workspace_id     TEXT    NOT NULL DEFAULT 'default'
+        REFERENCES workspaces(id) ON DELETE CASCADE,
+    description      TEXT,
+    creation_time    INTEGER NOT NULL,
+    last_update_time INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, name)
+);
+
+CREATE TABLE "model_versions" (
+    name              TEXT    NOT NULL,
+    version           INTEGER NOT NULL,
+    workspace_id      TEXT    NOT NULL DEFAULT 'default',
+    description       TEXT,
+    user_id           TEXT,
+    current_stage     TEXT    NOT NULL DEFAULT 'None',
+    source            TEXT    NOT NULL,
+    run_id            TEXT,
+    status            TEXT    NOT NULL DEFAULT 'READY',
+    status_message    TEXT,
+    creation_time     INTEGER NOT NULL,
+    last_update_time  INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, name, version),
+    FOREIGN KEY (workspace_id, name) REFERENCES "registered_models"(workspace_id, name) ON DELETE CASCADE,
+    CHECK (current_stage IN ('None','Staging','Production','Archived')),
+    CHECK (status IN ('READY','PENDING','FAILED'))
+);
+
+CREATE TABLE "registered_model_tags" (
+    name         TEXT NOT NULL,
+    workspace_id TEXT NOT NULL DEFAULT 'default',
+    key          TEXT NOT NULL,
+    value        TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, name, key),
+    FOREIGN KEY (workspace_id, name) REFERENCES "registered_models"(workspace_id, name) ON DELETE CASCADE
+);
+
+CREATE TABLE "model_version_tags" (
+    name         TEXT NOT NULL,
+    version      INTEGER NOT NULL,
+    workspace_id TEXT NOT NULL DEFAULT 'default',
+    key          TEXT NOT NULL,
+    value        TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, name, version, key),
+    FOREIGN KEY (workspace_id, name, version) REFERENCES "model_versions"(workspace_id, name, version) ON DELETE CASCADE
+);
+
+CREATE TABLE "model_aliases" (
+    name         TEXT NOT NULL,
+    workspace_id TEXT NOT NULL DEFAULT 'default',
+    alias        TEXT NOT NULL,
+    version      INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, name, alias),
+    FOREIGN KEY (workspace_id, name, version) REFERENCES "model_versions"(workspace_id, name, version) ON DELETE CASCADE
+);
+
 CREATE INDEX idx_runs_experiment_status ON runs(experiment_id, status, start_time DESC);
 
 CREATE INDEX idx_runs_lifecycle ON runs(lifecycle_stage);
@@ -351,13 +361,7 @@ CREATE INDEX idx_traces_parent ON traces(parent_id);
 
 CREATE INDEX idx_traces_trace ON traces(trace_id);
 
-CREATE INDEX idx_prompts_hash ON prompts(content_hash);
-
 CREATE INDEX idx_sessions_expires ON sessions(expires_at);
-
-CREATE INDEX idx_mv_run ON model_versions(run_id);
-
-CREATE INDEX idx_mv_stage ON model_versions(current_stage);
 
 CREATE INDEX idx_experiments_workspace ON experiments(workspace_id, lifecycle_stage);
 
@@ -385,6 +389,12 @@ CREATE INDEX idx_events_entity_ts
 CREATE INDEX idx_events_ts ON events(ts_ms);
 
 CREATE INDEX idx_dataset_inputs_v2_run ON dataset_inputs_v2(run_id);
+
+CREATE INDEX idx_prompts_hash ON prompts(workspace_id, name, content_hash);
+
+CREATE INDEX idx_mv_run ON model_versions(run_id);
+
+CREATE INDEX idx_mv_stage ON model_versions(current_stage);
 
 CREATE TRIGGER trg_metrics_latest_ai
 AFTER INSERT ON metrics

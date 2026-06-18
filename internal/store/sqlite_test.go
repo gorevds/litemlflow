@@ -280,27 +280,27 @@ func TestPromptVersioning(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
 
-	v1, err := s.CreatePrompt(ctx, &model.Prompt{Name: "sys", Content: "hello"})
+	v1, err := s.CreatePrompt(ctx, "default", &model.Prompt{Name: "sys", Content: "hello"})
 	if err != nil {
 		t.Fatalf("create v1: %v", err)
 	}
 	if v1 != 1 {
 		t.Fatalf("want version 1, got %d", v1)
 	}
-	v2, _ := s.CreatePrompt(ctx, &model.Prompt{Name: "sys", Content: "hello v2"})
+	v2, _ := s.CreatePrompt(ctx, "default", &model.Prompt{Name: "sys", Content: "hello v2"})
 	if v2 != 2 {
 		t.Fatalf("want version 2, got %d", v2)
 	}
 	// Identical content → same version reused.
-	v1again, _ := s.CreatePrompt(ctx, &model.Prompt{Name: "sys", Content: "hello"})
+	v1again, _ := s.CreatePrompt(ctx, "default", &model.Prompt{Name: "sys", Content: "hello"})
 	if v1again != 1 {
 		t.Fatalf("want reused v1, got %d", v1again)
 	}
 
-	if err := s.SetPromptAlias(ctx, "sys", "production", 2); err != nil {
+	if err := s.SetPromptAlias(ctx, "default", "sys", "production", 2); err != nil {
 		t.Fatalf("alias: %v", err)
 	}
-	got, err := s.GetPromptByAlias(ctx, "sys", "production")
+	got, err := s.GetPromptByAlias(ctx, "default", "sys", "production")
 	if err != nil {
 		t.Fatalf("get alias: %v", err)
 	}

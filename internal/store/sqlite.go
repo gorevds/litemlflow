@@ -1486,7 +1486,11 @@ func (s *SQLiteStore) querySpans(ctx context.Context, where string, args ...any)
 // will collide on the (name, version) PK and the call returns an error.
 // Callers should retry; in practice CreatePrompt is rarely contended and
 // the cost of a stronger lock is not worth the throughput hit.
-func (s *SQLiteStore) CreatePrompt(ctx context.Context, p *model.Prompt) (int64, error) {
+func (s *SQLiteStore) CreatePrompt(ctx context.Context, workspaceID string, p *model.Prompt) (int64, error) {
+	if workspaceID == "" {
+		workspaceID = "default"
+	}
+	p.WorkspaceID = workspaceID
 	if err := model.ValidName(p.Name, 250); err != nil {
 		return 0, err
 	}
@@ -1498,8 +1502,8 @@ func (s *SQLiteStore) CreatePrompt(ctx context.Context, p *model.Prompt) (int64,
 
 	// Reuse identical content under the same name if it already exists.
 	var existingVersion sql.NullInt64
-	err := s.db.QueryRowContext(ctx, `SELECT version FROM prompts WHERE name = ? AND content_hash = ? ORDER BY version DESC LIMIT 1`,
-		p.Name, p.ContentHash).Scan(&existingVersion)
+	err := s.db.QueryRowContext(ctx, `SELECT version FROM prompts WHERE workspace_id = ? AND name = ? AND content_hash = ? ORDER BY version DESC LIMIT 1`,
+		workspaceID, p.Name, p.ContentHash).Scan(&existingVersion)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return 0, err
 	}
@@ -1515,15 +1519,15 @@ func (s *SQLiteStore) CreatePrompt(ctx context.Context, p *model.Prompt) (int64,
 	defer func() { _ = tx.Rollback() }()
 
 	var nextVersion int64
-	err = tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) + 1 FROM prompts WHERE name = ?`, p.Name).Scan(&nextVersion)
+	err = tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) + 1 FROM prompts WHERE workspace_id = ? AND name = ?`, workspaceID, p.Name).Scan(&nextVersion)
 	if err != nil {
 		return 0, err
 	}
 	p.Version = nextVersion
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO prompts(name, version, content, content_hash, created_at, created_by, description)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, p.Name, p.Version, p.Content, p.ContentHash, p.CreatedAt, nilIfEmpty(p.CreatedBy), nilIfEmpty(p.Description))
+		INSERT INTO prompts(workspace_id, name, version, content, content_hash, created_at, created_by, description)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, workspaceID, p.Name, p.Version, p.Content, p.ContentHash, p.CreatedAt, nilIfEmpty(p.CreatedBy), nilIfEmpty(p.Description))
 	if err != nil {
 		return 0, err
 	}
@@ -1537,15 +1541,19 @@ func (s *SQLiteStore) CreatePrompt(ctx context.Context, p *model.Prompt) (int64,
 // Implemented as a window-function-free query: pick MAX(version) per name then
 // join back. Modernc/sqlite supports window functions but the join form keeps
 // the query plan obvious.
-func (s *SQLiteStore) ListPrompts(ctx context.Context) ([]*model.Prompt, error) {
+func (s *SQLiteStore) ListPrompts(ctx context.Context, workspaceID string) ([]*model.Prompt, error) {
+	if workspaceID == "" {
+		workspaceID = "default"
+	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT p.name, p.version, p.content, p.content_hash, p.created_at,
 		       COALESCE(p.created_by,''), COALESCE(p.description,'')
 		FROM prompts p
-		JOIN (SELECT name, MAX(version) AS v FROM prompts GROUP BY name) latest
+		JOIN (SELECT name, MAX(version) AS v FROM prompts WHERE workspace_id = ? GROUP BY name) latest
 		  ON p.name = latest.name AND p.version = latest.v
+		WHERE p.workspace_id = ?
 		ORDER BY p.created_at DESC
-	`)
+	`, workspaceID, workspaceID)
 	if err != nil {
 		return nil, err
 	}
@@ -1557,35 +1565,45 @@ func (s *SQLiteStore) ListPrompts(ctx context.Context) ([]*model.Prompt, error) 
 			&p.CreatedAt, &p.CreatedBy, &p.Description); err != nil {
 			return nil, err
 		}
+		p.WorkspaceID = workspaceID
 		out = append(out, &p)
 	}
 	return out, rows.Err()
 }
 
 // GetLatestPrompt returns the highest-versioned prompt with the given name.
-func (s *SQLiteStore) GetLatestPrompt(ctx context.Context, name string) (*model.Prompt, error) {
+func (s *SQLiteStore) GetLatestPrompt(ctx context.Context, workspaceID, name string) (*model.Prompt, error) {
+	if workspaceID == "" {
+		workspaceID = "default"
+	}
 	row := s.db.QueryRowContext(ctx, `
 		SELECT name, version, content, content_hash, created_at, COALESCE(created_by,''), COALESCE(description,'')
-		FROM prompts WHERE name = ? ORDER BY version DESC LIMIT 1
-	`, name)
-	return scanPrompt(row)
+		FROM prompts WHERE workspace_id = ? AND name = ? ORDER BY version DESC LIMIT 1
+	`, workspaceID, name)
+	return scanPrompt(row, workspaceID)
 }
 
 // GetPromptVersion returns a specific prompt version.
-func (s *SQLiteStore) GetPromptVersion(ctx context.Context, name string, version int64) (*model.Prompt, error) {
+func (s *SQLiteStore) GetPromptVersion(ctx context.Context, workspaceID, name string, version int64) (*model.Prompt, error) {
+	if workspaceID == "" {
+		workspaceID = "default"
+	}
 	row := s.db.QueryRowContext(ctx, `
 		SELECT name, version, content, content_hash, created_at, COALESCE(created_by,''), COALESCE(description,'')
-		FROM prompts WHERE name = ? AND version = ?
-	`, name, version)
-	return scanPrompt(row)
+		FROM prompts WHERE workspace_id = ? AND name = ? AND version = ?
+	`, workspaceID, name, version)
+	return scanPrompt(row, workspaceID)
 }
 
 // ListPromptVersions returns all versions of a prompt newest first.
-func (s *SQLiteStore) ListPromptVersions(ctx context.Context, name string) ([]*model.Prompt, error) {
+func (s *SQLiteStore) ListPromptVersions(ctx context.Context, workspaceID, name string) ([]*model.Prompt, error) {
+	if workspaceID == "" {
+		workspaceID = "default"
+	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT name, version, content, content_hash, created_at, COALESCE(created_by,''), COALESCE(description,'')
-		FROM prompts WHERE name = ? ORDER BY version DESC
-	`, name)
+		FROM prompts WHERE workspace_id = ? AND name = ? ORDER BY version DESC
+	`, workspaceID, name)
 	if err != nil {
 		return nil, err
 	}
@@ -1596,38 +1614,46 @@ func (s *SQLiteStore) ListPromptVersions(ctx context.Context, name string) ([]*m
 		if err := rows.Scan(&p.Name, &p.Version, &p.Content, &p.ContentHash, &p.CreatedAt, &p.CreatedBy, &p.Description); err != nil {
 			return nil, err
 		}
+		p.WorkspaceID = workspaceID
 		out = append(out, &p)
 	}
 	return out, rows.Err()
 }
 
-// SetPromptAlias upserts an alias (e.g., "production") to a specific version.
-func (s *SQLiteStore) SetPromptAlias(ctx context.Context, name, alias string, version int64) error {
-	// Confirm version exists.
-	if _, err := s.GetPromptVersion(ctx, name, version); err != nil {
+// SetPromptAlias upserts an alias (e.g., "production") to a specific version
+// within the given workspace.
+func (s *SQLiteStore) SetPromptAlias(ctx context.Context, workspaceID, name, alias string, version int64) error {
+	if workspaceID == "" {
+		workspaceID = "default"
+	}
+	// Confirm version exists in this workspace.
+	if _, err := s.GetPromptVersion(ctx, workspaceID, name, version); err != nil {
 		return err
 	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO prompt_aliases(name, alias, version) VALUES (?, ?, ?)
-		ON CONFLICT(name, alias) DO UPDATE SET version = excluded.version
-	`, name, alias, version)
+		INSERT INTO prompt_aliases(workspace_id, name, alias, version) VALUES (?, ?, ?, ?)
+		ON CONFLICT(workspace_id, name, alias) DO UPDATE SET version = excluded.version
+	`, workspaceID, name, alias, version)
 	return err
 }
 
-// GetPromptByAlias resolves an alias to a prompt version.
-func (s *SQLiteStore) GetPromptByAlias(ctx context.Context, name, alias string) (*model.Prompt, error) {
+// GetPromptByAlias resolves an alias to a prompt version within the workspace.
+func (s *SQLiteStore) GetPromptByAlias(ctx context.Context, workspaceID, name, alias string) (*model.Prompt, error) {
+	if workspaceID == "" {
+		workspaceID = "default"
+	}
 	var v int64
-	err := s.db.QueryRowContext(ctx, `SELECT version FROM prompt_aliases WHERE name = ? AND alias = ?`, name, alias).Scan(&v)
+	err := s.db.QueryRowContext(ctx, `SELECT version FROM prompt_aliases WHERE workspace_id = ? AND name = ? AND alias = ?`, workspaceID, name, alias).Scan(&v)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, err
 	}
-	return s.GetPromptVersion(ctx, name, v)
+	return s.GetPromptVersion(ctx, workspaceID, name, v)
 }
 
-func scanPrompt(row *sql.Row) (*model.Prompt, error) {
+func scanPrompt(row *sql.Row, workspaceID string) (*model.Prompt, error) {
 	var p model.Prompt
 	if err := row.Scan(&p.Name, &p.Version, &p.Content, &p.ContentHash, &p.CreatedAt, &p.CreatedBy, &p.Description); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -1635,6 +1661,7 @@ func scanPrompt(row *sql.Row) (*model.Prompt, error) {
 		}
 		return nil, err
 	}
+	p.WorkspaceID = workspaceID
 	return &p, nil
 }
 

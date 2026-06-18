@@ -71,18 +71,18 @@ func (h *Handler) CreateRegisteredModel(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	m := &model.RegisteredModel{Name: req.Name, Description: req.Description}
-	if err := h.Store.CreateRegisteredModel(r.Context(), m); err != nil {
+	if err := h.Store.CreateRegisteredModel(r.Context(), currentWorkspace(r), m); err != nil {
 		writeStoreErr(w, err)
 		return
 	}
 	// Apply tags.
 	for _, t := range req.Tags {
-		if err := h.Store.SetRegisteredModelTag(r.Context(), req.Name, t.Key, t.Value); err != nil {
+		if err := h.Store.SetRegisteredModelTag(r.Context(), currentWorkspace(r), req.Name, t.Key, t.Value); err != nil {
 			writeStoreErr(w, err)
 			return
 		}
 	}
-	got, err := h.Store.GetRegisteredModel(r.Context(), req.Name)
+	got, err := h.Store.GetRegisteredModel(r.Context(), currentWorkspace(r), req.Name)
 	if err != nil {
 		writeStoreErr(w, err)
 		return
@@ -101,7 +101,7 @@ func (h *Handler) GetRegisteredModel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "name is required")
 		return
 	}
-	m, err := h.Store.GetRegisteredModel(r.Context(), name)
+	m, err := h.Store.GetRegisteredModel(r.Context(), currentWorkspace(r), name)
 	if err != nil {
 		writeStoreErr(w, err)
 		return
@@ -125,7 +125,7 @@ func (h *Handler) RenameRegisteredModel(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "name and new_name are required")
 		return
 	}
-	m, err := h.Store.RenameRegisteredModel(r.Context(), req.Name, req.NewName)
+	m, err := h.Store.RenameRegisteredModel(r.Context(), currentWorkspace(r), req.Name, req.NewName)
 	if err != nil {
 		writeStoreErr(w, err)
 		return
@@ -149,7 +149,7 @@ func (h *Handler) UpdateRegisteredModel(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "name is required")
 		return
 	}
-	m, err := h.Store.UpdateRegisteredModel(r.Context(), req.Name, req.Description)
+	m, err := h.Store.UpdateRegisteredModel(r.Context(), currentWorkspace(r), req.Name, req.Description)
 	if err != nil {
 		writeStoreErr(w, err)
 		return
@@ -176,7 +176,7 @@ func (h *Handler) DeleteRegisteredModel(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "name is required")
 		return
 	}
-	if err := h.Store.DeleteRegisteredModel(r.Context(), req.Name); err != nil {
+	if err := h.Store.DeleteRegisteredModel(r.Context(), currentWorkspace(r), req.Name); err != nil {
 		writeStoreErr(w, err)
 		return
 	}
@@ -213,7 +213,7 @@ func (h *Handler) SearchRegisteredModels(w http.ResponseWriter, r *http.Request)
 		req.PageToken = r.URL.Query().Get("page_token")
 	}
 
-	res, err := h.Store.SearchRegisteredModels(r.Context(), req.Filter, req.MaxResults, req.PageToken)
+	res, err := h.Store.SearchRegisteredModels(r.Context(), currentWorkspace(r), req.Filter, req.MaxResults, req.PageToken)
 	if err != nil {
 		writeStoreErr(w, err)
 		return
@@ -248,7 +248,7 @@ func (h *Handler) GetLatestModelVersions(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "name is required")
 		return
 	}
-	versions, err := h.Store.GetLatestModelVersions(r.Context(), req.Name, req.Stages)
+	versions, err := h.Store.GetLatestModelVersions(r.Context(), currentWorkspace(r), req.Name, req.Stages)
 	if err != nil {
 		writeStoreErr(w, err)
 		return
@@ -277,7 +277,7 @@ func (h *Handler) SetRegisteredModelTag(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "name and key are required")
 		return
 	}
-	if err := h.Store.SetRegisteredModelTag(r.Context(), req.Name, req.Key, req.Value); err != nil {
+	if err := h.Store.SetRegisteredModelTag(r.Context(), currentWorkspace(r), req.Name, req.Key, req.Value); err != nil {
 		writeStoreErr(w, err)
 		return
 	}
@@ -300,7 +300,7 @@ func (h *Handler) DeleteRegisteredModelTag(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "name and key are required")
 		return
 	}
-	if err := h.Store.DeleteRegisteredModelTag(r.Context(), req.Name, req.Key); err != nil {
+	if err := h.Store.DeleteRegisteredModelTag(r.Context(), currentWorkspace(r), req.Name, req.Key); err != nil {
 		writeStoreErr(w, err)
 		return
 	}
@@ -329,7 +329,7 @@ func (h *Handler) SetModelAlias(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "version must be an integer")
 		return
 	}
-	if err := h.Store.SetModelAlias(r.Context(), req.Name, req.Alias, ver); err != nil {
+	if err := h.Store.SetModelAlias(r.Context(), currentWorkspace(r), req.Name, req.Alias, ver); err != nil {
 		writeStoreErr(w, err)
 		return
 	}
@@ -344,7 +344,7 @@ func (h *Handler) DeleteModelAlias(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "name and alias are required")
 		return
 	}
-	if err := h.Store.DeleteModelAlias(r.Context(), name, alias); err != nil {
+	if err := h.Store.DeleteModelAlias(r.Context(), currentWorkspace(r), name, alias); err != nil {
 		writeStoreErr(w, err)
 		return
 	}
@@ -363,7 +363,7 @@ func (h *Handler) GetModelByAlias(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "name and alias are required")
 		return
 	}
-	mv, err := h.Store.GetModelByAlias(r.Context(), name, alias)
+	mv, err := h.Store.GetModelByAlias(r.Context(), currentWorkspace(r), name, alias)
 	if err != nil {
 		writeStoreErr(w, err)
 		return
@@ -400,7 +400,7 @@ func (h *Handler) CreateModelVersion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "source is required")
 		return
 	}
-	mv, err := h.Store.CreateModelVersion(r.Context(), &model.ModelVersion{
+	mv, err := h.Store.CreateModelVersion(r.Context(), currentWorkspace(r), &model.ModelVersion{
 		Name:        req.Name,
 		Source:      req.Source,
 		RunID:       req.RunID,
@@ -412,13 +412,13 @@ func (h *Handler) CreateModelVersion(w http.ResponseWriter, r *http.Request) {
 	}
 	// Apply tags.
 	for _, t := range req.Tags {
-		if err := h.Store.SetModelVersionTag(r.Context(), mv.Name, mv.Version, t.Key, t.Value); err != nil {
+		if err := h.Store.SetModelVersionTag(r.Context(), currentWorkspace(r), mv.Name, mv.Version, t.Key, t.Value); err != nil {
 			writeStoreErr(w, err)
 			return
 		}
 	}
 	// Reload to include tags.
-	mv, err = h.Store.GetModelVersion(r.Context(), mv.Name, mv.Version)
+	mv, err = h.Store.GetModelVersion(r.Context(), currentWorkspace(r), mv.Name, mv.Version)
 	if err != nil {
 		writeStoreErr(w, err)
 		return
@@ -443,7 +443,7 @@ func (h *Handler) GetModelVersion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "version must be an integer")
 		return
 	}
-	mv, err := h.Store.GetModelVersion(r.Context(), name, ver)
+	mv, err := h.Store.GetModelVersion(r.Context(), currentWorkspace(r), name, ver)
 	if err != nil {
 		writeStoreErr(w, err)
 		return
@@ -473,7 +473,7 @@ func (h *Handler) UpdateModelVersion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "version must be an integer")
 		return
 	}
-	mv, err := h.Store.UpdateModelVersion(r.Context(), req.Name, ver, req.Description)
+	mv, err := h.Store.UpdateModelVersion(r.Context(), currentWorkspace(r), req.Name, ver, req.Description)
 	if err != nil {
 		writeStoreErr(w, err)
 		return
@@ -507,7 +507,7 @@ func (h *Handler) DeleteModelVersion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "version must be an integer")
 		return
 	}
-	if err := h.Store.DeleteModelVersion(r.Context(), req.Name, ver); err != nil {
+	if err := h.Store.DeleteModelVersion(r.Context(), currentWorkspace(r), req.Name, ver); err != nil {
 		writeStoreErr(w, err)
 		return
 	}
@@ -542,7 +542,7 @@ func (h *Handler) SearchModelVersions(w http.ResponseWriter, r *http.Request) {
 	if req.PageToken == "" {
 		req.PageToken = r.URL.Query().Get("page_token")
 	}
-	res, err := h.Store.SearchModelVersions(r.Context(), req.Filter, req.MaxResults, req.PageToken)
+	res, err := h.Store.SearchModelVersions(r.Context(), currentWorkspace(r), req.Filter, req.MaxResults, req.PageToken)
 	if err != nil {
 		writeStoreErr(w, err)
 		return
@@ -572,7 +572,7 @@ func (h *Handler) GetModelVersionDownloadURI(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "version must be an integer")
 		return
 	}
-	mv, err := h.Store.GetModelVersion(r.Context(), name, ver)
+	mv, err := h.Store.GetModelVersion(r.Context(), currentWorkspace(r), name, ver)
 	if err != nil {
 		writeStoreErr(w, err)
 		return
@@ -581,9 +581,9 @@ func (h *Handler) GetModelVersionDownloadURI(w http.ResponseWriter, r *http.Requ
 }
 
 type transitionStageReq struct {
-	Name                  string `json:"name"`
-	Version               string `json:"version"`
-	Stage                 string `json:"stage"`
+	Name                    string `json:"name"`
+	Version                 string `json:"version"`
+	Stage                   string `json:"stage"`
 	ArchiveExistingVersions bool   `json:"archive_existing_versions"`
 }
 
@@ -603,7 +603,7 @@ func (h *Handler) TransitionModelStage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "version must be an integer")
 		return
 	}
-	mv, err := h.Store.TransitionModelStage(r.Context(), req.Name, ver, req.Stage, req.ArchiveExistingVersions)
+	mv, err := h.Store.TransitionModelStage(r.Context(), currentWorkspace(r), req.Name, ver, req.Stage, req.ArchiveExistingVersions)
 	if err != nil {
 		// Validation errors map to 400; sentinel-typed (store.ErrInvalidStage)
 		// rather than message-matched. Caught by
@@ -641,7 +641,7 @@ func (h *Handler) SetModelVersionTag(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "version must be an integer")
 		return
 	}
-	if err := h.Store.SetModelVersionTag(r.Context(), req.Name, ver, req.Key, req.Value); err != nil {
+	if err := h.Store.SetModelVersionTag(r.Context(), currentWorkspace(r), req.Name, ver, req.Key, req.Value); err != nil {
 		writeStoreErr(w, err)
 		return
 	}
@@ -670,7 +670,7 @@ func (h *Handler) DeleteModelVersionTag(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "version must be an integer")
 		return
 	}
-	if err := h.Store.DeleteModelVersionTag(r.Context(), req.Name, ver, req.Key); err != nil {
+	if err := h.Store.DeleteModelVersionTag(r.Context(), currentWorkspace(r), req.Name, ver, req.Key); err != nil {
 		writeStoreErr(w, err)
 		return
 	}

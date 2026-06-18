@@ -122,21 +122,21 @@ func (NopStore) GetSpansByTrace(context.Context, string) ([]model.Span, error) {
 }
 
 // Prompts.
-func (NopStore) CreatePrompt(context.Context, *model.Prompt) (int64, error) {
+func (NopStore) CreatePrompt(context.Context, string, *model.Prompt) (int64, error) {
 	return 0, store.ErrNotFound
 }
-func (NopStore) ListPrompts(context.Context) ([]*model.Prompt, error) { return nil, nil }
-func (NopStore) GetLatestPrompt(context.Context, string) (*model.Prompt, error) {
+func (NopStore) ListPrompts(context.Context, string) ([]*model.Prompt, error) { return nil, nil }
+func (NopStore) GetLatestPrompt(context.Context, string, string) (*model.Prompt, error) {
 	return nil, store.ErrNotFound
 }
-func (NopStore) GetPromptVersion(context.Context, string, int64) (*model.Prompt, error) {
+func (NopStore) GetPromptVersion(context.Context, string, string, int64) (*model.Prompt, error) {
 	return nil, store.ErrNotFound
 }
-func (NopStore) ListPromptVersions(context.Context, string) ([]*model.Prompt, error) {
+func (NopStore) ListPromptVersions(context.Context, string, string) ([]*model.Prompt, error) {
 	return nil, nil
 }
-func (NopStore) SetPromptAlias(context.Context, string, string, int64) error { return nil }
-func (NopStore) GetPromptByAlias(context.Context, string, string) (*model.Prompt, error) {
+func (NopStore) SetPromptAlias(context.Context, string, string, string, int64) error { return nil }
+func (NopStore) GetPromptByAlias(context.Context, string, string, string) (*model.Prompt, error) {
 	return nil, store.ErrNotFound
 }
 
@@ -147,48 +147,56 @@ func (NopStore) GetEval(context.Context, string) (*model.Eval, error) {
 }
 
 // Model Registry.
-func (NopStore) CreateRegisteredModel(context.Context, *model.RegisteredModel) error { return nil }
-func (NopStore) GetRegisteredModel(context.Context, string) (*model.RegisteredModel, error) {
+func (NopStore) CreateRegisteredModel(context.Context, string, *model.RegisteredModel) error {
+	return nil
+}
+func (NopStore) GetRegisteredModel(context.Context, string, string) (*model.RegisteredModel, error) {
 	return nil, store.ErrNotFound
 }
-func (NopStore) RenameRegisteredModel(context.Context, string, string) (*model.RegisteredModel, error) {
+func (NopStore) RenameRegisteredModel(context.Context, string, string, string) (*model.RegisteredModel, error) {
 	return nil, store.ErrNotFound
 }
-func (NopStore) UpdateRegisteredModel(context.Context, string, *string) (*model.RegisteredModel, error) {
+func (NopStore) UpdateRegisteredModel(context.Context, string, string, *string) (*model.RegisteredModel, error) {
 	return nil, store.ErrNotFound
 }
-func (NopStore) DeleteRegisteredModel(context.Context, string) error { return nil }
-func (NopStore) SearchRegisteredModels(context.Context, string, int, string) (store.SearchResult[*model.RegisteredModel], error) {
+func (NopStore) DeleteRegisteredModel(context.Context, string, string) error { return nil }
+func (NopStore) SearchRegisteredModels(context.Context, string, string, int, string) (store.SearchResult[*model.RegisteredModel], error) {
 	return store.SearchResult[*model.RegisteredModel]{}, nil
 }
-func (NopStore) GetLatestModelVersions(context.Context, string, []string) ([]*model.ModelVersion, error) {
+func (NopStore) GetLatestModelVersions(context.Context, string, string, []string) ([]*model.ModelVersion, error) {
 	return nil, nil
 }
-func (NopStore) SetRegisteredModelTag(context.Context, string, string, string) error { return nil }
-func (NopStore) DeleteRegisteredModelTag(context.Context, string, string) error      { return nil }
-func (NopStore) SetModelAlias(context.Context, string, string, int64) error          { return nil }
-func (NopStore) DeleteModelAlias(context.Context, string, string) error              { return nil }
-func (NopStore) GetModelByAlias(context.Context, string, string) (*model.ModelVersion, error) {
+func (NopStore) SetRegisteredModelTag(context.Context, string, string, string, string) error {
+	return nil
+}
+func (NopStore) DeleteRegisteredModelTag(context.Context, string, string, string) error { return nil }
+func (NopStore) SetModelAlias(context.Context, string, string, string, int64) error     { return nil }
+func (NopStore) DeleteModelAlias(context.Context, string, string, string) error         { return nil }
+func (NopStore) GetModelByAlias(context.Context, string, string, string) (*model.ModelVersion, error) {
 	return nil, store.ErrNotFound
 }
-func (NopStore) CreateModelVersion(context.Context, *model.ModelVersion) (*model.ModelVersion, error) {
+func (NopStore) CreateModelVersion(context.Context, string, *model.ModelVersion) (*model.ModelVersion, error) {
 	return nil, store.ErrNotFound
 }
-func (NopStore) GetModelVersion(context.Context, string, int64) (*model.ModelVersion, error) {
+func (NopStore) GetModelVersion(context.Context, string, string, int64) (*model.ModelVersion, error) {
 	return nil, store.ErrNotFound
 }
-func (NopStore) UpdateModelVersion(context.Context, string, int64, *string) (*model.ModelVersion, error) {
+func (NopStore) UpdateModelVersion(context.Context, string, string, int64, *string) (*model.ModelVersion, error) {
 	return nil, store.ErrNotFound
 }
-func (NopStore) DeleteModelVersion(context.Context, string, int64) error { return nil }
-func (NopStore) SearchModelVersions(context.Context, string, int, string) (store.SearchResult[*model.ModelVersion], error) {
+func (NopStore) DeleteModelVersion(context.Context, string, string, int64) error { return nil }
+func (NopStore) SearchModelVersions(context.Context, string, string, int, string) (store.SearchResult[*model.ModelVersion], error) {
 	return store.SearchResult[*model.ModelVersion]{}, nil
 }
-func (NopStore) TransitionModelStage(context.Context, string, int64, string, bool) (*model.ModelVersion, error) {
+func (NopStore) TransitionModelStage(context.Context, string, string, int64, string, bool) (*model.ModelVersion, error) {
 	return nil, store.ErrNotFound
 }
-func (NopStore) SetModelVersionTag(context.Context, string, int64, string, string) error { return nil }
-func (NopStore) DeleteModelVersionTag(context.Context, string, int64, string) error      { return nil }
+func (NopStore) SetModelVersionTag(context.Context, string, string, int64, string, string) error {
+	return nil
+}
+func (NopStore) DeleteModelVersionTag(context.Context, string, string, int64, string) error {
+	return nil
+}
 
 // Search & lineage.
 func (NopStore) SearchRunsByName(context.Context, string, string, int) ([]*model.Run, error) {

@@ -33,28 +33,20 @@ func TestRollbackRefusesNonEmpty(t *testing.T) {
 	}
 
 	// Seed enough rows for the latest migration's DOWN to actually drop.
-	// 014's DOWN drops dataset_inputs_v2. We need a parent (datasets_v2 row)
-	// to satisfy the FK before inserting the link row.
+	//
+	// 015 is the latest migration; its DOWN drops the workspace-scoped
+	// prompt_aliases table first (prompt_aliases has an FK to prompts), so we
+	// seed a prompt row then an alias row — enough for the guard to fire and
+	// name "prompt_aliases".
 	if _, err := db.ExecContext(ctx, `
-		INSERT INTO experiments(name, artifact_location, lifecycle_stage, workspace_id, creation_time, last_update_time)
-		VALUES ('exp', '/tmp', 'active', 'default', 0, 0)
+		INSERT INTO prompts(name, version, workspace_id, content, content_hash, created_at)
+		VALUES ('p', 1, 'default', 'c', 'h', 0)
 	`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `
-		INSERT INTO runs(id, experiment_id, status, start_time, artifact_uri, lifecycle_stage, run_kind)
-		VALUES ('r1', 1, 'FINISHED', 1, 'x', 'active', 'classic')
-	`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.ExecContext(ctx, `
-		INSERT INTO datasets_v2(name, version, content_hash, size_bytes, workspace_id, created_at, lifecycle_stage)
-		VALUES ('ds', 1, 'h', 0, 'default', 0, 'active')
-	`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.ExecContext(ctx, `
-		INSERT INTO dataset_inputs_v2(run_id, dataset_id, tags_json) VALUES ('r1', 1, '[]')
+		INSERT INTO prompt_aliases(workspace_id, name, alias, version)
+		VALUES ('default', 'p', 'prod', 1)
 	`); err != nil {
 		t.Fatal(err)
 	}
@@ -62,9 +54,9 @@ func TestRollbackRefusesNonEmpty(t *testing.T) {
 	// Plain Rollback must refuse.
 	err = migrations.Rollback(ctx, db)
 	if err == nil {
-		t.Fatal("expected rollback to fail on non-empty dataset_inputs_v2")
+		t.Fatal("expected rollback to fail on non-empty prompt_aliases")
 	}
-	if !strings.Contains(err.Error(), "dataset_inputs_v2") {
+	if !strings.Contains(err.Error(), "prompt_aliases") {
 		t.Errorf("error should name the table; got %v", err)
 	}
 	if !strings.Contains(err.Error(), "force=true") &&

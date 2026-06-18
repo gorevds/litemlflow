@@ -161,6 +161,7 @@ type Span struct {
 
 // Prompt is a versioned prompt template.
 type Prompt struct {
+	WorkspaceID string `json:"workspace_id,omitempty"`
 	Name        string `json:"name"`
 	Version     int64  `json:"version"`
 	Content     string `json:"content"`
@@ -183,18 +184,18 @@ type Dataset struct {
 // DatasetVersion is one row of the v1.2 datasets_v2 table — a versioned,
 // content-addressed dataset belonging to a workspace.
 type DatasetVersion struct {
-	ID             int64    `json:"id"`
-	Name           string   `json:"name"`
-	Version        int64    `json:"version"`
-	ContentHash    string   `json:"content_hash"`
-	SizeBytes      int64    `json:"size_bytes"`
-	SchemaJSON     string   `json:"schema_json,omitempty"`
-	Description    string   `json:"description,omitempty"`
-	WorkspaceID    string   `json:"workspace_id"`
-	CreatedAt      int64    `json:"created_at"`
-	CreatedBy      string   `json:"created_by,omitempty"`
-	LifecycleStage string   `json:"lifecycle_stage"`
-	Parents        []int64  `json:"parents,omitempty"` // parent dataset IDs (lineage)
+	ID             int64   `json:"id"`
+	Name           string  `json:"name"`
+	Version        int64   `json:"version"`
+	ContentHash    string  `json:"content_hash"`
+	SizeBytes      int64   `json:"size_bytes"`
+	SchemaJSON     string  `json:"schema_json,omitempty"`
+	Description    string  `json:"description,omitempty"`
+	WorkspaceID    string  `json:"workspace_id"`
+	CreatedAt      int64   `json:"created_at"`
+	CreatedBy      string  `json:"created_by,omitempty"`
+	LifecycleStage string  `json:"lifecycle_stage"`
+	Parents        []int64 `json:"parents,omitempty"` // parent dataset IDs (lineage)
 }
 
 // DatasetLineage is the response of GET /api/v1/datasets/{name}/versions/{v}/lineage.
@@ -331,6 +332,7 @@ func ValidStage(s string) bool {
 
 // RegisteredModel is a named model in the registry.
 type RegisteredModel struct {
+	WorkspaceID    string `json:"workspace_id,omitempty"`
 	Name           string `json:"name"`
 	Description    string `json:"description,omitempty"`
 	CreationTime   int64  `json:"creation_time"`
@@ -342,6 +344,7 @@ type RegisteredModel struct {
 
 // ModelVersion is one versioned snapshot of a registered model.
 type ModelVersion struct {
+	WorkspaceID    string `json:"workspace_id,omitempty"`
 	Name           string `json:"name"`
 	Version        int64  `json:"version"`
 	Description    string `json:"description,omitempty"`

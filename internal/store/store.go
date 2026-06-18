@@ -186,46 +186,46 @@ type Store interface {
 	GetSpansByTrace(ctx context.Context, traceID string) ([]model.Span, error)
 
 	// Prompts.
-	CreatePrompt(ctx context.Context, p *model.Prompt) (int64, error)
+	CreatePrompt(ctx context.Context, workspaceID string, p *model.Prompt) (int64, error)
 	// ListPrompts returns the latest version of each prompt name, newest first.
 	// Used by the UI prompts page (no per-user list scoping yet — single-user
 	// instances are the v1 hero use case).
-	ListPrompts(ctx context.Context) ([]*model.Prompt, error)
-	GetLatestPrompt(ctx context.Context, name string) (*model.Prompt, error)
-	GetPromptVersion(ctx context.Context, name string, version int64) (*model.Prompt, error)
-	ListPromptVersions(ctx context.Context, name string) ([]*model.Prompt, error)
-	SetPromptAlias(ctx context.Context, name, alias string, version int64) error
-	GetPromptByAlias(ctx context.Context, name, alias string) (*model.Prompt, error)
+	ListPrompts(ctx context.Context, workspaceID string) ([]*model.Prompt, error)
+	GetLatestPrompt(ctx context.Context, workspaceID, name string) (*model.Prompt, error)
+	GetPromptVersion(ctx context.Context, workspaceID, name string, version int64) (*model.Prompt, error)
+	ListPromptVersions(ctx context.Context, workspaceID, name string) ([]*model.Prompt, error)
+	SetPromptAlias(ctx context.Context, workspaceID, name, alias string, version int64) error
+	GetPromptByAlias(ctx context.Context, workspaceID, name, alias string) (*model.Prompt, error)
 
 	// Evals.
 	CreateEval(ctx context.Context, e *model.Eval) error
 	GetEval(ctx context.Context, runID string) (*model.Eval, error)
 
 	// Model Registry — Registered Models.
-	CreateRegisteredModel(ctx context.Context, m *model.RegisteredModel) error
-	GetRegisteredModel(ctx context.Context, name string) (*model.RegisteredModel, error)
-	RenameRegisteredModel(ctx context.Context, name, newName string) (*model.RegisteredModel, error)
-	UpdateRegisteredModel(ctx context.Context, name string, description *string) (*model.RegisteredModel, error)
-	DeleteRegisteredModel(ctx context.Context, name string) error
-	SearchRegisteredModels(ctx context.Context, filter string, maxResults int, pageToken string) (SearchResult[*model.RegisteredModel], error)
-	GetLatestModelVersions(ctx context.Context, name string, stages []string) ([]*model.ModelVersion, error)
-	SetRegisteredModelTag(ctx context.Context, name, key, value string) error
-	DeleteRegisteredModelTag(ctx context.Context, name, key string) error
+	CreateRegisteredModel(ctx context.Context, workspaceID string, m *model.RegisteredModel) error
+	GetRegisteredModel(ctx context.Context, workspaceID, name string) (*model.RegisteredModel, error)
+	RenameRegisteredModel(ctx context.Context, workspaceID, name, newName string) (*model.RegisteredModel, error)
+	UpdateRegisteredModel(ctx context.Context, workspaceID, name string, description *string) (*model.RegisteredModel, error)
+	DeleteRegisteredModel(ctx context.Context, workspaceID, name string) error
+	SearchRegisteredModels(ctx context.Context, workspaceID, filter string, maxResults int, pageToken string) (SearchResult[*model.RegisteredModel], error)
+	GetLatestModelVersions(ctx context.Context, workspaceID, name string, stages []string) ([]*model.ModelVersion, error)
+	SetRegisteredModelTag(ctx context.Context, workspaceID, name, key, value string) error
+	DeleteRegisteredModelTag(ctx context.Context, workspaceID, name, key string) error
 
 	// Model Registry — Aliases.
-	SetModelAlias(ctx context.Context, name, alias string, version int64) error
-	DeleteModelAlias(ctx context.Context, name, alias string) error
-	GetModelByAlias(ctx context.Context, name, alias string) (*model.ModelVersion, error)
+	SetModelAlias(ctx context.Context, workspaceID, name, alias string, version int64) error
+	DeleteModelAlias(ctx context.Context, workspaceID, name, alias string) error
+	GetModelByAlias(ctx context.Context, workspaceID, name, alias string) (*model.ModelVersion, error)
 
 	// Model Registry — Model Versions.
-	CreateModelVersion(ctx context.Context, mv *model.ModelVersion) (*model.ModelVersion, error)
-	GetModelVersion(ctx context.Context, name string, version int64) (*model.ModelVersion, error)
-	UpdateModelVersion(ctx context.Context, name string, version int64, description *string) (*model.ModelVersion, error)
-	DeleteModelVersion(ctx context.Context, name string, version int64) error
-	SearchModelVersions(ctx context.Context, filter string, maxResults int, pageToken string) (SearchResult[*model.ModelVersion], error)
-	TransitionModelStage(ctx context.Context, name string, version int64, stage string, archiveExisting bool) (*model.ModelVersion, error)
-	SetModelVersionTag(ctx context.Context, name string, version int64, key, value string) error
-	DeleteModelVersionTag(ctx context.Context, name string, version int64, key string) error
+	CreateModelVersion(ctx context.Context, workspaceID string, mv *model.ModelVersion) (*model.ModelVersion, error)
+	GetModelVersion(ctx context.Context, workspaceID, name string, version int64) (*model.ModelVersion, error)
+	UpdateModelVersion(ctx context.Context, workspaceID, name string, version int64, description *string) (*model.ModelVersion, error)
+	DeleteModelVersion(ctx context.Context, workspaceID, name string, version int64) error
+	SearchModelVersions(ctx context.Context, workspaceID, filter string, maxResults int, pageToken string) (SearchResult[*model.ModelVersion], error)
+	TransitionModelStage(ctx context.Context, workspaceID, name string, version int64, stage string, archiveExisting bool) (*model.ModelVersion, error)
+	SetModelVersionTag(ctx context.Context, workspaceID, name string, version int64, key, value string) error
+	DeleteModelVersionTag(ctx context.Context, workspaceID, name string, version int64, key string) error
 
 	// Cross-experiment search (native /api/v1/search endpoint).
 	// SearchRunsByName returns runs whose name LIKE %query% within the given

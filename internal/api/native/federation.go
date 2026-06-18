@@ -364,12 +364,12 @@ func (h *Handler) runLocalSearch(ctx context.Context, workspaceID, q, kind strin
 		}
 	}
 	if kind == "" || kind == "all" || kind == "prompts" {
-		// Prompts are workspace-global in the current schema; ListPrompts
-		// returns the latest version per name. Server-side substring match
-		// over q (case-insensitive) — peers don't have access to the
-		// caller's localStorage prompt-name index that GlobalSearch relies
-		// on, so the federated path matches against all known names.
-		prompts, err := h.Store.ListPrompts(ctx)
+		// Prompts are scoped to the caller's workspace; ListPrompts returns
+		// the latest version per name. Server-side substring match over q
+		// (case-insensitive) — peers don't have access to the caller's
+		// localStorage prompt-name index that GlobalSearch relies on, so the
+		// federated path matches against all known names in the workspace.
+		prompts, err := h.Store.ListPrompts(ctx, workspaceID)
 		if err == nil {
 			ql := strings.ToLower(q)
 			matched := 0
