@@ -577,18 +577,18 @@ func (s *SQLiteStore) SearchRuns(ctx context.Context, opt SearchOptions) (Search
 	if stage == "" {
 		stage = model.LifecycleActive
 	}
-	args := []any{}
+	baseArgs := []any{}
 	where := []string{}
 	if len(opt.ExperimentIDs) > 0 {
 		marks := strings.TrimRight(strings.Repeat("?,", len(opt.ExperimentIDs)), ",")
 		where = append(where, "experiment_id IN ("+marks+")")
 		for _, id := range opt.ExperimentIDs {
-			args = append(args, id)
+			baseArgs = append(baseArgs, id)
 		}
 	}
 	if stage != "all" {
 		where = append(where, "lifecycle_stage = ?")
-		args = append(args, stage)
+		baseArgs = append(baseArgs, stage)
 	}
 	if f := strings.TrimSpace(opt.Filter); f != "" {
 		clause, fargs, err := parseRunFilter(f)
@@ -596,34 +596,146 @@ func (s *SQLiteStore) SearchRuns(ctx context.Context, opt SearchOptions) (Search
 			return SearchResult[*model.Run]{}, err
 		}
 		where = append(where, clause)
-		args = append(args, fargs...)
+		baseArgs = append(baseArgs, fargs...)
 	}
 	orderCols, err := parseRunOrder(opt.OrderBy)
 	if err != nil {
 		return SearchResult[*model.Run]{}, err
 	}
-	kcols := make([]keysetCol, len(orderCols))
-	for i, c := range orderCols {
-		kcols[i] = keysetCol{expr: runColExpr(c.key), desc: c.desc}
+	hasComputed := false
+	for _, c := range orderCols {
+		if c.computed {
+			hasComputed = true
+			break
+		}
 	}
+
+	const baseSelect = `id, experiment_id, COALESCE(name,''), status, start_time, end_time, artifact_uri,
+		       lifecycle_stage, COALESCE(user_id,''), COALESCE(source_type,''), COALESCE(source_name,''), run_kind,
+		       COALESCE(parent_run_id,'')`
+
+	scanRun := func(rows *sql.Rows, extra []any) (*model.Run, error) {
+		var r model.Run
+		var endTime sql.NullInt64
+		dest := []any{&r.ID, &r.ExperimentID, &r.Name, &r.Status, &r.StartTime, &endTime, &r.ArtifactURI,
+			&r.LifecycleStage, &r.UserID, &r.SourceType, &r.SourceName, &r.Kind, &r.ParentRunID}
+		dest = append(dest, extra...)
+		if err := rows.Scan(dest...); err != nil {
+			return nil, err
+		}
+		if endTime.Valid {
+			v := endTime.Int64
+			r.EndTime = &v
+		}
+		return &r, nil
+	}
+
+	if !hasComputed {
+		// Flat path: order columns are run attributes only. Keyset cursor
+		// values come straight from the *model.Run.
+		kcols := make([]keysetCol, len(orderCols))
+		for i, c := range orderCols {
+			kcols[i] = keysetCol{expr: runColExpr(c.key), desc: c.desc}
+		}
+		args := append([]any{}, baseArgs...)
+		if opt.PageToken != "" {
+			cur, err := decodeCursor(opt.PageToken, len(kcols))
+			if err != nil {
+				return SearchResult[*model.Run]{}, err
+			}
+			pred, pargs := keysetPredicate(kcols, cur)
+			where = append(where, pred)
+			args = append(args, pargs...)
+		}
+		q := "SELECT " + baseSelect + " FROM runs"
+		if len(where) > 0 {
+			q += " WHERE " + strings.Join(where, " AND ")
+		}
+		q += " ORDER BY " + keysetOrderClause(kcols) + " LIMIT ?"
+		args = append(args, opt.MaxResults+1)
+
+		rows, err := s.db.QueryContext(ctx, q, args...)
+		if err != nil {
+			return SearchResult[*model.Run]{}, err
+		}
+		defer rows.Close()
+		var out []*model.Run
+		for rows.Next() {
+			r, err := scanRun(rows, nil)
+			if err != nil {
+				return SearchResult[*model.Run]{}, err
+			}
+			out = append(out, r)
+		}
+		if err := rows.Err(); err != nil {
+			return SearchResult[*model.Run]{}, err
+		}
+		var token string
+		if len(out) > opt.MaxResults {
+			out = out[:opt.MaxResults]
+			last := out[len(out)-1]
+			for i := range kcols {
+				kcols[i].val = runColValue(last, orderCols[i].key)
+			}
+			token = encodeCursor(kcols)
+		}
+		return SearchResult[*model.Run]{Items: out, NextPageToken: token}, nil
+	}
+
+	// Computed path: at least one order column is metrics./params./tags.
+	// Project each user-specified order column as ord{i} in an inner query,
+	// then order/paginate on the outer query referencing those aliases. This
+	// "wrapped subquery" keeps the keyset predicate free of embedded args and
+	// lets nullable computed columns be totally ordered: a run missing the key
+	// sorts last in BOTH directions via a null-rank companion key.
+	nUser := len(orderCols) - 1 // trailing element is the id tie-break
+	projExprs := make([]string, 0, nUser)
+	projArgs := make([]any, 0, nUser)
+	kcols := make([]keysetCol, 0, nUser*2+1)
+	for i := 0; i < nUser; i++ {
+		c := orderCols[i]
+		alias := fmt.Sprintf("ord%d", i)
+		if c.computed {
+			projExprs = append(projExprs, c.proj+" AS "+alias)
+			projArgs = append(projArgs, c.arg)
+			// present=0 sorts before missing=1 (NULLs last), then the value.
+			// Within the all-missing group the coalesced value is constant, so
+			// ordering falls through to the id tie-break.
+			sentinel := "0"
+			if c.textSentinel {
+				sentinel = "''"
+			}
+			kcols = append(kcols,
+				keysetCol{expr: "(" + alias + " IS NULL)", desc: false},
+				keysetCol{expr: "COALESCE(" + alias + ", " + sentinel + ")", desc: c.desc},
+			)
+		} else {
+			projExprs = append(projExprs, runColExpr(c.key)+" AS "+alias)
+			kcols = append(kcols, keysetCol{expr: alias, desc: c.desc})
+		}
+	}
+	kcols = append(kcols, keysetCol{expr: "id", desc: false}) // unique tie-break
+
+	inner := "SELECT " + baseSelect + ", " + strings.Join(projExprs, ", ") + " FROM runs"
+	if len(where) > 0 {
+		inner += " WHERE " + strings.Join(where, " AND ")
+	}
+	// Arg order mirrors textual order: inner SELECT projections, inner WHERE
+	// base filters, outer keyset predicate, LIMIT.
+	args := append([]any{}, projArgs...)
+	args = append(args, baseArgs...)
+	outerWhere := ""
 	if opt.PageToken != "" {
 		cur, err := decodeCursor(opt.PageToken, len(kcols))
 		if err != nil {
 			return SearchResult[*model.Run]{}, err
 		}
 		pred, pargs := keysetPredicate(kcols, cur)
-		where = append(where, pred)
+		outerWhere = " WHERE " + pred
 		args = append(args, pargs...)
 	}
-	q := `
-		SELECT id, experiment_id, COALESCE(name,''), status, start_time, end_time, artifact_uri,
-		       lifecycle_stage, COALESCE(user_id,''), COALESCE(source_type,''), COALESCE(source_name,''), run_kind,
-		       COALESCE(parent_run_id,'')
-		FROM runs`
-	if len(where) > 0 {
-		q += " WHERE " + strings.Join(where, " AND ")
-	}
-	q += " ORDER BY " + keysetOrderClause(kcols) + " LIMIT ?"
+	q := "SELECT * FROM (" + inner + ")" + outerWhere +
+		" ORDER BY " + keysetOrderClause(kcols) + " LIMIT ?"
 	args = append(args, opt.MaxResults+1)
 
 	rows, err := s.db.QueryContext(ctx, q, args...)
@@ -632,18 +744,26 @@ func (s *SQLiteStore) SearchRuns(ctx context.Context, opt SearchOptions) (Search
 	}
 	defer rows.Close()
 	var out []*model.Run
+	var ordRows [][]any
 	for rows.Next() {
-		var r model.Run
-		var endTime sql.NullInt64
-		if err := rows.Scan(&r.ID, &r.ExperimentID, &r.Name, &r.Status, &r.StartTime, &endTime, &r.ArtifactURI,
-			&r.LifecycleStage, &r.UserID, &r.SourceType, &r.SourceName, &r.Kind, &r.ParentRunID); err != nil {
+		ordVals := make([]any, nUser)
+		ptrs := make([]any, nUser)
+		for i := range ordVals {
+			ptrs[i] = &ordVals[i]
+		}
+		r, err := scanRun(rows, ptrs)
+		if err != nil {
 			return SearchResult[*model.Run]{}, err
 		}
-		if endTime.Valid {
-			v := endTime.Int64
-			r.EndTime = &v
+		// modernc returns TEXT as []byte; normalize so cursor JSON round-trips
+		// to the same value the SQL COALESCE comparison sees.
+		for i, v := range ordVals {
+			if b, ok := v.([]byte); ok {
+				ordVals[i] = string(b)
+			}
 		}
-		out = append(out, &r)
+		out = append(out, r)
+		ordRows = append(ordRows, ordVals)
 	}
 	if err := rows.Err(); err != nil {
 		return SearchResult[*model.Run]{}, err
@@ -651,10 +771,34 @@ func (s *SQLiteStore) SearchRuns(ctx context.Context, opt SearchOptions) (Search
 	var token string
 	if len(out) > opt.MaxResults {
 		out = out[:opt.MaxResults]
-		last := out[len(out)-1]
-		for i := range kcols {
-			kcols[i].val = runColValue(last, orderCols[i].key)
+		lastOrd := ordRows[opt.MaxResults-1]
+		ki := 0
+		for i := 0; i < nUser; i++ {
+			c := orderCols[i]
+			if c.computed {
+				v := lastOrd[i]
+				if v == nil {
+					kcols[ki].val = int64(1) // missing: null-rank = 1
+				} else {
+					kcols[ki].val = int64(0)
+				}
+				ki++
+				if v == nil {
+					if c.textSentinel {
+						kcols[ki].val = ""
+					} else {
+						kcols[ki].val = int64(0)
+					}
+				} else {
+					kcols[ki].val = v
+				}
+				ki++
+			} else {
+				kcols[ki].val = lastOrd[i]
+				ki++
+			}
 		}
+		kcols[ki].val = out[len(out)-1].ID
 		token = encodeCursor(kcols)
 	}
 	return SearchResult[*model.Run]{Items: out, NextPageToken: token}, nil
@@ -705,19 +849,44 @@ func (s *SQLiteStore) SearchRunsByName(ctx context.Context, workspaceID, query s
 	return out, rows.Err()
 }
 
-// runOrderCol is one parsed ORDER BY component for SearchRuns. key is the
-// logical column used to extract the cursor value from a *model.Run.
+// runOrderCol is one parsed ORDER BY component for SearchRuns.
+//
+// For run attributes (computed == false) key is the logical column used to
+// extract the cursor value from a *model.Run via runColValue/runColExpr.
+//
+// For metrics./params./tags. order keys (computed == true) the value lives in
+// a child table, so proj holds a correlated subquery projected as an ord{i}
+// alias and arg is the bound metric/param/tag key. textSentinel selects the
+// COALESCE sentinel (empty string for text params/tags, 0 for numeric
+// metrics) used when the run is missing the key.
 type runOrderCol struct {
-	key  string // "start_time" | "end_time" | "status" | "id"
-	desc bool
+	key          string // attribute: "start_time" | "end_time" | "status" | "id"
+	desc         bool
+	computed     bool
+	proj         string // correlated subquery, contains exactly one '?'
+	arg          any    // bound key for proj
+	textSentinel bool
 }
+
+// Correlated-subquery projections for computed order columns. Each contains
+// exactly one '?' bound to the metric/param/tag key.
+const (
+	metricOrderProj = `(SELECT value FROM metrics WHERE metrics.run_id = runs.id AND metrics.key = ? ORDER BY metrics.timestamp DESC, metrics.step DESC LIMIT 1)`
+	paramOrderProj  = `(SELECT value FROM params WHERE params.run_id = runs.id AND params.key = ? LIMIT 1)`
+	tagOrderProj    = `(SELECT value FROM tags WHERE tags.run_id = runs.id AND tags.key = ? LIMIT 1)`
+)
 
 // runColExpr returns the SQL expression for a run order column. end_time is
 // nullable, so COALESCE keeps it out of the keyset comparison (NULL comparisons
 // would otherwise break the cursor); -1 is below any real unix-ms timestamp.
 func runColExpr(key string) string {
-	if key == "end_time" {
+	switch key {
+	case "end_time":
 		return "COALESCE(end_time, -1)"
+	case "name":
+		// name is nullable; '' keeps it out of the keyset NULL trap and
+		// matches the COALESCE(name,'') projected into *model.Run.Name.
+		return "COALESCE(name, '')"
 	}
 	return key
 }
@@ -734,6 +903,8 @@ func runColValue(r *model.Run, key string) any {
 		return int64(-1)
 	case "status":
 		return r.Status
+	case "name":
+		return r.Name
 	default: // id
 		return r.ID
 	}
@@ -748,9 +919,13 @@ func parseRunOrder(order []string) ([]runOrderCol, error) {
 		"attributes.start_time": "start_time",
 		"attributes.end_time":   "end_time",
 		"attributes.status":     "status",
+		"attributes.run_name":   "name",
+		"attributes.run_id":     "id",
 		"start_time":            "start_time",
 		"end_time":              "end_time",
 		"status":                "status",
+		"run_name":              "name",
+		"run_id":                "id",
 	}
 	var cols []runOrderCol
 	for _, o := range order {
@@ -758,10 +933,7 @@ func parseRunOrder(order []string) ([]runOrderCol, error) {
 		if len(fields) == 0 {
 			continue
 		}
-		key, ok := colMap[fields[0]]
-		if !ok {
-			return nil, fmt.Errorf("%w: unsupported order_by column %q", ErrInvalidFilter, fields[0])
-		}
+		rawKey := fields[0]
 		desc := false
 		if len(fields) > 1 {
 			switch strings.ToUpper(fields[1]) {
@@ -772,7 +944,32 @@ func parseRunOrder(order []string) ([]runOrderCol, error) {
 				return nil, fmt.Errorf("%w: invalid order_by direction %q", ErrInvalidFilter, fields[1])
 			}
 		}
-		cols = append(cols, runOrderCol{key: key, desc: desc})
+		switch {
+		case strings.HasPrefix(rawKey, "metrics."):
+			k := strings.TrimPrefix(rawKey, "metrics.")
+			if k == "" {
+				return nil, fmt.Errorf("%w: empty metric key in order_by", ErrInvalidFilter)
+			}
+			cols = append(cols, runOrderCol{desc: desc, computed: true, proj: metricOrderProj, arg: k})
+		case strings.HasPrefix(rawKey, "params."):
+			k := strings.TrimPrefix(rawKey, "params.")
+			if k == "" {
+				return nil, fmt.Errorf("%w: empty param key in order_by", ErrInvalidFilter)
+			}
+			cols = append(cols, runOrderCol{desc: desc, computed: true, proj: paramOrderProj, arg: k, textSentinel: true})
+		case strings.HasPrefix(rawKey, "tags."):
+			k := strings.TrimPrefix(rawKey, "tags.")
+			if k == "" {
+				return nil, fmt.Errorf("%w: empty tag key in order_by", ErrInvalidFilter)
+			}
+			cols = append(cols, runOrderCol{desc: desc, computed: true, proj: tagOrderProj, arg: k, textSentinel: true})
+		default:
+			key, ok := colMap[rawKey]
+			if !ok {
+				return nil, fmt.Errorf("%w: unsupported order_by column %q", ErrInvalidFilter, rawKey)
+			}
+			cols = append(cols, runOrderCol{key: key, desc: desc})
+		}
 	}
 	if len(cols) == 0 {
 		cols = []runOrderCol{{key: "start_time", desc: true}}
