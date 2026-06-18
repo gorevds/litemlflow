@@ -78,6 +78,8 @@ class Client:
             ``X-Workspace`` header on every request; the server validates it and
             isolates experiments/runs/registry per workspace. Defaults to the
             ``LITEMLFLOW_WORKSPACE`` env var, else the server's "default".
+        max_retries: number of retries for transient failures (connection
+            errors and 429/502/503/504) with exponential backoff (default 3).
     """
 
     def __init__(
@@ -87,9 +89,11 @@ class Client:
         auth: tuple[str, str] | None = None,
         timeout: float = 30.0,
         workspace: str | None = None,
+        max_retries: int = 3,
     ) -> None:
         self.url = (url or os.environ.get("LITEMLFLOW_URL", "http://localhost:5000")).rstrip("/")
         self.timeout = timeout
+        self.max_retries = max_retries
         self.workspace = workspace or os.environ.get("LITEMLFLOW_WORKSPACE") or None
         self._session = requests.Session()
         if auth is not None:
@@ -99,12 +103,46 @@ class Client:
 
     # ------------------------------------------------------------------ http
 
+    # HTTP statuses worth retrying: transient overload / gateway errors. 5xx
+    # like 500/501 are treated as deterministic and not retried.
+    _RETRYABLE_STATUS = frozenset({429, 502, 503, 504})
+
     def _request(self, method: str, path: str, json: Any | None = None, params: dict | None = None) -> Any:
         full = self.url + path
-        try:
-            resp = self._session.request(method, full, json=json, params=params, timeout=self.timeout)
-        except requests.RequestException as exc:
-            raise LiteMLflowError(0, "TRANSPORT_ERROR", str(exc)) from exc
+        attempt = 0
+        while True:
+            try:
+                resp = self._session.request(method, full, json=json, params=params, timeout=self.timeout)
+            except requests.RequestException as exc:
+                # Transport error (connection refused, reset, timeout): retry
+                # with backoff, then surface as a TRANSPORT_ERROR.
+                if attempt < self.max_retries:
+                    time.sleep(self._backoff(attempt))
+                    attempt += 1
+                    continue
+                raise LiteMLflowError(0, "TRANSPORT_ERROR", str(exc)) from exc
+            if resp.status_code in self._RETRYABLE_STATUS and attempt < self.max_retries:
+                time.sleep(self._retry_delay(resp, attempt))
+                attempt += 1
+                continue
+            return self._handle_response(resp)
+
+    @staticmethod
+    def _backoff(attempt: int) -> float:
+        """Exponential backoff in seconds, capped at 10s."""
+        return min(10.0, 0.25 * (2**attempt))
+
+    def _retry_delay(self, resp: requests.Response, attempt: int) -> float:
+        """Honor a numeric Retry-After header, else exponential backoff."""
+        ra = resp.headers.get("Retry-After")
+        if ra:
+            try:
+                return min(60.0, float(ra))
+            except ValueError:
+                pass
+        return self._backoff(attempt)
+
+    def _handle_response(self, resp: requests.Response) -> Any:
         ctype = resp.headers.get("Content-Type", "")
         body: Any = None
         if "application/json" in ctype:
