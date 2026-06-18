@@ -75,6 +75,15 @@ func requiredRole(method, path string) string {
 		}
 	}
 
+	// --- Reads exposed as POST require only viewer ---
+	//
+	// Analytics queries are read-only but use POST to carry a JSON DSL body.
+	// Without this explicit rule the default-deny safety net below would
+	// over-gate them to editor, locking viewers out of dashboards.
+	if path == "/api/v1/analytics/query" {
+		return "viewer"
+	}
+
 	// --- No role requirement for public / meta paths ---
 
 	switch path {
@@ -87,11 +96,37 @@ func requiredRole(method, path string) string {
 	if strings.HasPrefix(path, "/api/v1/auth/") {
 		return ""
 	}
+	// Peer-to-peer federation endpoints authenticate via mutual HMAC, not a
+	// workspace role. They are already auth-exempt in isPublicPath
+	// (middleware.go); this entry is defense-in-depth so the default-deny net
+	// below cannot accidentally demand editor if the layers are reordered.
+	switch path {
+	case "/api/v1/federate/echo", "/api/v1/federate/search":
+		return ""
+	}
+
+	// --- Default-deny: any other mutating request within the API surface
+	// requires at least editor. This is a safety net so that newly added
+	// write endpoints (or ones not explicitly enumerated above) are gated by
+	// default instead of silently falling through to public access. The
+	// mlflow-artifacts/ prefix is distinct from mlflow/ and carries the
+	// largest write surface (PUT/DELETE artifact upload), so it is listed
+	// explicitly. ---
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		if strings.HasPrefix(path, "/api/v1/") ||
+			strings.HasPrefix(path, "/api/2.0/mlflow/") ||
+			strings.HasPrefix(path, "/api/2.0/mlflow-artifacts/") ||
+			strings.HasPrefix(path, "/v1/") {
+			return "editor"
+		}
+	}
 
 	// --- Viewer for all remaining reads (GET /api/...) ---
 
 	if method == http.MethodGet {
 		if strings.HasPrefix(path, "/api/2.0/mlflow/") ||
+			strings.HasPrefix(path, "/api/2.0/mlflow-artifacts/") ||
 			strings.HasPrefix(path, "/api/v1/") {
 			return "viewer"
 		}

@@ -210,6 +210,43 @@ func TestRBACFederationPeerCRUDIsAdminOnly(t *testing.T) {
 	}
 }
 
+// TestRBACViewerCannotWriteNativeEndpoints guards independent-review finding 2.2
+// end-to-end: before the default-deny safety net these native write endpoints
+// had no role requirement, so a workspace viewer could mutate them. Each must
+// now return 403 for a viewer. (Analytics query is a read-as-POST and must NOT
+// be gated — it is verified separately.)
+func TestRBACViewerCannotWriteNativeEndpoints(t *testing.T) {
+	t.Parallel()
+	const user, pass = "ivy", "ivypass"
+	srv := newRBACServer(t, user, pass)
+	adminSetup(t, srv, user, pass, "ws-native-write", user, "viewer")
+
+	cases := []struct {
+		method, path string
+		body         any
+	}{
+		{http.MethodPut, "/api/v1/runs/run-x/note", map[string]string{"note": "x"}},
+		{http.MethodPost, "/api/v1/webhooks", map[string]any{"url": "https://example.com", "events": []string{"run.created"}}},
+		{http.MethodDelete, "/api/v1/webhooks/1", nil},
+		{http.MethodPost, "/api/v1/datasets/d1/versions", map[string]string{"uri": "s3://x"}},
+		{http.MethodPut, "/api/v1/dashboards/proj1", map[string]any{"layout": "{}"}},
+		{http.MethodPost, "/api/v1/experiments/1/clone", map[string]string{"name": "copy"}},
+	}
+	for _, tc := range cases {
+		resp, body := rbacDo(t, srv, tc.method, tc.path, "ws-native-write", user, pass, tc.body)
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("viewer %s %s: want 403, got %d: %v", tc.method, tc.path, resp.StatusCode, body)
+		}
+	}
+
+	// A read-as-POST must remain accessible to a viewer (not 403).
+	resp, _ := rbacDo(t, srv, http.MethodPost, "/api/v1/analytics/query",
+		"ws-native-write", user, pass, map[string]any{"select": []string{"count"}})
+	if resp.StatusCode == http.StatusForbidden {
+		t.Errorf("viewer POST /analytics/query: should not be gated by RBAC, got 403")
+	}
+}
+
 // TestRBACAdminCanManageMembers verifies that an admin can add members.
 func TestRBACAdminCanManageMembers(t *testing.T) {
 	t.Parallel()
