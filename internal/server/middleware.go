@@ -332,13 +332,6 @@ func authMiddlewareWithSessions(cfg config.Config, sessions SessionLookup, authL
 	}
 }
 
-// authMiddleware is the original single-argument version for callers that don't
-// have a session store (tests, etc.). It delegates to authMiddlewareWithSessions
-// with a nil store, which skips cookie checks.
-func authMiddleware(cfg config.Config) func(http.Handler) http.Handler {
-	return authMiddlewareWithSessions(cfg, nil, nil)
-}
-
 func isPublicPath(p string) bool {
 	switch p {
 	case "/healthz", "/readyz", "/version", "/metrics":
