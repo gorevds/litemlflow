@@ -296,3 +296,29 @@ func TestMLflowToleratesUnknownFields(t *testing.T) {
 		t.Errorf("create with unknown fields: want 200 (forward-compat), got %d", resp.StatusCode)
 	}
 }
+
+// TestSecurityHeadersPresent guards independent-review: baseline security
+// headers must be set on responses.
+func TestSecurityHeadersPresent(t *testing.T) {
+	t.Parallel()
+	ts, _ := newTestServer(t, config.Config{})
+	resp, err := http.Get(ts.URL + "/version")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	want := map[string]string{
+		"X-Content-Type-Options":  "nosniff",
+		"X-Frame-Options":         "DENY",
+		"Content-Security-Policy": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+	}
+	for k, v := range want {
+		if got := resp.Header.Get(k); got != v {
+			t.Errorf("header %s = %q, want %q", k, got, v)
+		}
+	}
+	// HSTS must NOT be set over plaintext HTTP (httptest is plaintext).
+	if got := resp.Header.Get("Strict-Transport-Security"); got != "" {
+		t.Errorf("HSTS should be absent over plaintext HTTP, got %q", got)
+	}
+}

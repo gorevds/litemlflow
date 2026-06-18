@@ -83,6 +83,32 @@ func requestIDMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// securityHeadersMiddleware sets baseline security response headers
+// (independent-review: none were set). HSTS is emitted only for requests that
+// arrived over TLS (directly or via a trusted proxy) so local plaintext dev is
+// not pinned to HTTPS.
+//
+// The CSP keeps 'unsafe-inline' for scripts and styles because the bundled UI
+// uses inline onclick handlers and inline style attributes; it still restricts
+// every resource origin to 'self' and forbids framing (frame-ancestors 'none').
+// Removing 'unsafe-inline' requires refactoring the UI and is a follow-up.
+func securityHeadersMiddleware(next http.Handler) http.Handler {
+	const csp = "default-src 'self'; img-src 'self' data:; " +
+		"style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; " +
+		"connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Content-Security-Policy", csp)
+		if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+			h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // loggingMiddleware emits a one-line slog record per request.
 func loggingMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
