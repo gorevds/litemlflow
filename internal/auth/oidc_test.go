@@ -469,6 +469,6 @@ func TestExchangeBackwardCompatEmptyNonce(t *testing.T) {
 		t.Fatalf("Exchange with empty expectedNonce should succeed: %v", err)
 	}
 	if _, hasNonce := claims["nonce"]; hasNonce {
-		// The token shouldn't have a nonce, but that's fine — no assertion needed.
+		t.Error("token unexpectedly carries a nonce claim")
 	}
 }

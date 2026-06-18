@@ -315,7 +315,7 @@ func runBackup(args []string) error {
 			"backup with --artifact-backend=s3 would silently exclude artifacts from the tar.\n" +
 				"  Pick one:\n" +
 				"    --include-only-db   tar only the SQLite DB; snapshot the bucket separately\n" +
-				"    --include-s3        stream every S3 object into the backup tar (slow)\n",
+				"    --include-s3        stream every S3 object into the backup tar (slow)",
 		)
 	}
 	if *includeOnlyDB && *includeS3 {
@@ -543,7 +543,7 @@ func runRestore(args []string) error {
 			if err := os.MkdirAll(dst, 0o750); err != nil {
 				return err
 			}
-		case tar.TypeReg, tar.TypeRegA:
+		case tar.TypeReg:
 			if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
 				return err
 			}

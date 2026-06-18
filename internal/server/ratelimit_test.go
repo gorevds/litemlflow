@@ -39,11 +39,15 @@ func TestAuthRateLimiterPerKeyIsolation(t *testing.T) {
 	rl := newAuthRateLimiter(2, 1)
 	rl.now = func() time.Time { return now }
 
-	if !rl.allow("a") || !rl.allow("a") || rl.allow("a") {
+	// Assign to vars (evaluated left-to-right) so each call's effect is
+	// distinct — staticcheck flags textually identical `x || x` operands.
+	a1, a2, a3 := rl.allow("a"), rl.allow("a"), rl.allow("a")
+	if !a1 || !a2 || a3 {
 		t.Fatal("key a should allow exactly 2 then deny")
 	}
 	// A different key has its own independent bucket.
-	if !rl.allow("b") || !rl.allow("b") {
+	b1, b2 := rl.allow("b"), rl.allow("b")
+	if !b1 || !b2 {
 		t.Fatal("key b should have its own full bucket")
 	}
 }

@@ -26,8 +26,8 @@ func TestSanitizeFilename(t *testing.T) {
 		{`a;rm -rf /`, "a_rm -rf _"},
 
 		// Bidi override (U+202E) and other non-printable Unicode → '_'.
-		{"file‮gnp.exe", "file_gnp.exe"},
-		{"file​title", "file_title"},
+		{"file\u202egnp.exe", "file_gnp.exe"},
+		{"file\u200btitle", "file_title"},
 
 		// Non-ASCII letters fall back to '_' (RFC 5987 filename* not
 		// implemented yet).

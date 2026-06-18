@@ -534,10 +534,6 @@ func TestMLflowImporter_Pagination(t *testing.T) {
 	}
 	// Add 3 runs; the fake handler paginates at 2, so this exercises next_page_token.
 	for i := 0; i < 3; i++ {
-		runID := strings.Repeat("0", 28) + strings.Repeat("x", 2) + string(rune('a'+i))
-		// Use valid 32-char hex-like IDs.
-		runID = "00000000000000000000000000000" + string(rune('a'+i))
-		_ = runID
 		rid := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"[0:30] + string(rune('a'+i))
 		fake.runs["42"] = append(fake.runs["42"], mlflowRun{
 			Info: mlflowRunInfo{

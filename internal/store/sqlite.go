@@ -2318,14 +2318,6 @@ func datasetsV03WritesEnabled() bool {
 	return false
 }
 
-// mirrorIntoDatasetsV2 is the original signature (returns error only).
-// Retained for callers that don't need the id; new v2.1 code uses
-// mirrorIntoDatasetsV2Returning.
-func mirrorIntoDatasetsV2(ctx context.Context, tx *sql.Tx, runID, name, digest string) error {
-	_, err := mirrorIntoDatasetsV2Returning(ctx, tx, runID, name, digest)
-	return err
-}
-
 // mirrorIntoDatasetsV2Returning ensures a datasets_v2 row exists for
 // (workspace, name, content_hash) and returns its id. Idempotent.
 //

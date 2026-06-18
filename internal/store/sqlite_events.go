@@ -84,38 +84,6 @@ type runEvent struct {
 	Payload map[string]any
 }
 
-// readRunEventsUntil returns all events for runID with ts_ms <= asOfMs,
-// ordered by (ts_ms ASC, id ASC) so replay applies them in physical
-// commit order. Used by replay logic to reconstruct historical run state.
-func (s *SQLiteStore) readRunEventsUntil(ctx context.Context, runID string, asOfMs int64) ([]runEvent, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, ts_ms, kind, payload
-		FROM events
-		WHERE entity_type = 'run' AND entity_id = ? AND ts_ms <= ?
-		ORDER BY ts_ms ASC, id ASC
-	`, runID, asOfMs)
-	if err != nil {
-		return nil, fmt.Errorf("event read: %w", err)
-	}
-	defer rows.Close()
-
-	var out []runEvent
-	for rows.Next() {
-		var e runEvent
-		var rawPayload string
-		if err := rows.Scan(&e.ID, &e.TsMs, &e.Kind, &rawPayload); err != nil {
-			return nil, err
-		}
-		if rawPayload != "" {
-			if err := json.Unmarshal([]byte(rawPayload), &e.Payload); err != nil {
-				return nil, fmt.Errorf("event payload decode (id=%d): %w", e.ID, err)
-			}
-		}
-		out = append(out, e)
-	}
-	return out, rows.Err()
-}
-
 // GetRunAsOf reconstructs run state at the given unix-ms timestamp.
 //
 // Replay strategy:

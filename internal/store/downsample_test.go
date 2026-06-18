@@ -113,7 +113,7 @@ func TestDownsampleLTTB_EmptyAndSingle(t *testing.T) {
 	t.Parallel()
 	// Empty slice.
 	got := store.DownsampleLTTB(nil, 100)
-	if got != nil && len(got) != 0 {
+	if len(got) != 0 {
 		t.Errorf("empty: want nil/empty, got len=%d", len(got))
 	}
 	// Single point.
