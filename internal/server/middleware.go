@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"log/slog"
@@ -296,7 +295,7 @@ func authMiddlewareWithSessions(cfg config.Config, sessions SessionLookup) func(
 					writeError(w, http.StatusUnauthorized, CodeUnauthenticated, "basic authentication required")
 					return
 				}
-				if !verifyBasic(cfg, user, pass) {
+				if !auth.VerifyBasicCredentials(cfg.BasicUser, cfg.BasicPassHash, user, pass) {
 					writeError(w, http.StatusUnauthorized, CodeUnauthenticated, "invalid credentials")
 					return
 				}
@@ -354,21 +353,6 @@ func isPublicPath(p string) bool {
 		return true
 	}
 	return false
-}
-
-// verifyBasic compares user/pass against the configured user and password
-// hash (hex-encoded SHA-256). subtle.ConstantTimeCompare avoids leaking
-// password length via timing.
-func verifyBasic(cfg config.Config, user, pass string) bool {
-	if subtle.ConstantTimeCompare([]byte(user), []byte(cfg.BasicUser)) != 1 {
-		return false
-	}
-	got := sha256.Sum256([]byte(pass))
-	want, err := hex.DecodeString(cfg.BasicPassHash)
-	if err != nil || len(want) != len(got) {
-		return false
-	}
-	return subtle.ConstantTimeCompare(got[:], want) == 1
 }
 
 func shortHash(seed int64) string {

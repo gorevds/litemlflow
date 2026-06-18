@@ -30,9 +30,10 @@ import (
 	"time"
 
 	"github.com/gorevds/litemlflow/internal/artifact"
+	"github.com/gorevds/litemlflow/internal/auth"
 	"github.com/gorevds/litemlflow/internal/config"
-	"github.com/gorevds/litemlflow/internal/migrator"
 	"github.com/gorevds/litemlflow/internal/migrations"
+	"github.com/gorevds/litemlflow/internal/migrator"
 	"github.com/gorevds/litemlflow/internal/server"
 	"github.com/gorevds/litemlflow/internal/store"
 	"github.com/gorevds/litemlflow/pkg/version"
@@ -61,6 +62,8 @@ func main() {
 		err = runRestore(args)
 	case "import-mlflow":
 		err = runImportMLflow(args)
+	case "hash-password":
+		err = runHashPassword(args)
 	case "help", "-h", "--help":
 		usage(os.Stdout)
 	default:
@@ -90,6 +93,7 @@ Usage:
   litemlflow backup       [--data DIR] [--out FILE]
   litemlflow restore      [--data DIR] [--in FILE]
   litemlflow import-mlflow --from MLFLOW_URL --data DIR [--workspace WS] [--include-deleted] [--dry-run]
+  litemlflow hash-password   # reads a password from stdin, prints a bcrypt hash for --basic-pass-hash
   litemlflow version
 
 Environment variables override defaults; flags override env vars.
@@ -98,7 +102,7 @@ Environment variables override defaults; flags override env vars.
   LITEMLFLOW_ADDR                listen address, e.g., :5000
   LITEMLFLOW_AUTH                one of: none|basic|oidc
   LITEMLFLOW_BASIC_USER          basic auth username
-  LITEMLFLOW_BASIC_PASS_HASH     basic auth password (hex SHA-256)
+  LITEMLFLOW_BASIC_PASS_HASH     basic auth password hash (bcrypt; legacy hex SHA-256 still accepted)
   LITEMLFLOW_OIDC_ISSUER         OIDC issuer URL (required for auth=oidc)
   LITEMLFLOW_OIDC_CLIENT_ID      OIDC client ID (required for auth=oidc)
   LITEMLFLOW_OIDC_CLIENT_SECRET  OIDC client secret (optional; omit for public clients)
@@ -122,7 +126,7 @@ func runUp(args []string) error {
 	addr := fs.String("addr", "", "listen address, e.g., :5000")
 	auth := fs.String("auth", "", "auth mode: none, basic, oidc")
 	basicUser := fs.String("basic-user", "", "basic auth username")
-	basicPassHash := fs.String("basic-pass-hash", "", "basic auth password (hex SHA-256)")
+	basicPassHash := fs.String("basic-pass-hash", "", "basic auth password hash (bcrypt; legacy hex SHA-256 still accepted)")
 	dev := fs.Bool("dev", false, "enable dev mode")
 	// AUTH-OIDC: OIDC / session flags
 	oidcIssuer := fs.String("oidc-issuer", "", "OIDC issuer URL (required when --auth=oidc)")
@@ -192,20 +196,20 @@ func runUp(args []string) error {
 	// silently get the new semantics.
 	if v1 := os.Getenv("LITEMLFLOW_DISABLE_V03_TO_V2_MIRROR"); v1 != "" {
 		logger.Warn(
-			"LITEMLFLOW_DISABLE_V03_TO_V2_MIRROR is a no-op as of v2.1. " +
-				"The v1.2 datasets path is now primary by default. " +
-				"To restore v0.3 link-table writes for legacy tooling, " +
-				"set LITEMLFLOW_ENABLE_DATASETS_V03_WRITES=1. " +
+			"LITEMLFLOW_DISABLE_V03_TO_V2_MIRROR is a no-op as of v2.1. "+
+				"The v1.2 datasets path is now primary by default. "+
+				"To restore v0.3 link-table writes for legacy tooling, "+
+				"set LITEMLFLOW_ENABLE_DATASETS_V03_WRITES=1. "+
 				"See docs/upgrade-to-v2.md#status-as-of-v21.",
 			slog.String("env_value", v1),
 		)
 	}
 	if v2 := os.Getenv("LITEMLFLOW_DISABLE_DATASETS_V03_MIRROR"); v2 != "" {
 		logger.Warn(
-			"LITEMLFLOW_DISABLE_DATASETS_V03_MIRROR is a no-op as of v2.1. " +
-				"The v1.2 datasets path is now primary by default. " +
-				"To restore v0.3 link-table writes for legacy tooling, " +
-				"set LITEMLFLOW_ENABLE_DATASETS_V03_WRITES=1. " +
+			"LITEMLFLOW_DISABLE_DATASETS_V03_MIRROR is a no-op as of v2.1. "+
+				"The v1.2 datasets path is now primary by default. "+
+				"To restore v0.3 link-table writes for legacy tooling, "+
+				"set LITEMLFLOW_ENABLE_DATASETS_V03_WRITES=1. "+
 				"See docs/upgrade-to-v2.md#status-as-of-v21.",
 			slog.String("env_value", v2),
 		)
@@ -628,6 +632,39 @@ func runImportMLflow(args []string) error {
 	if _, err := imp.Run(ctx); err != nil {
 		return err
 	}
+	return nil
+}
+
+// runHashPassword reads a password from stdin and prints a bcrypt hash for use
+// with --basic-pass-hash / LITEMLFLOW_BASIC_PASS_HASH. Reading from stdin (not
+// an argv flag) keeps the plaintext out of the process table and shell history:
+//
+//	printf '%s' 's3cret' | litemlflow hash-password
+func runHashPassword(args []string) error {
+	fs := flag.NewFlagSet("hash-password", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	raw, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return fmt.Errorf("read password from stdin: %w", err)
+	}
+	// Trim a single trailing newline (and optional CR) so `echo password |`
+	// works; do not trim other whitespace, which may be part of the password.
+	pw := strings.TrimSuffix(strings.TrimSuffix(string(raw), "\n"), "\r")
+	if pw == "" {
+		return errors.New("empty password on stdin")
+	}
+	// bcrypt hashes at most 72 bytes; surface this clearly rather than letting
+	// the raw "password length exceeds 72 bytes" error bubble up unexplained.
+	if len(pw) > 72 {
+		return fmt.Errorf("password is %d bytes; bcrypt accepts at most 72 — use a shorter password", len(pw))
+	}
+	h, err := auth.HashPassword(pw)
+	if err != nil {
+		return err
+	}
+	fmt.Println(h)
 	return nil
 }
 

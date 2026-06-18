@@ -6,9 +6,7 @@ package native
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -1207,28 +1205,12 @@ func mintSession(ctx context.Context, ss SessionStore, userID, email, name, meth
 	return sess, nil
 }
 
-// verifyBasicCreds validates user/pass against the config.
-//
-// AUTH-OIDC: this duplicates the logic in server/middleware.go by design —
-// keeping the native API package independent of internal/server avoids an
-// import cycle. Both use crypto/sha256 + subtle compare; the canonical
-// implementation is the one in middleware.go.
+// verifyBasicCreds validates user/pass against the config. The configured hash
+// may be bcrypt (preferred) or a legacy hex SHA-256 digest; the shared
+// canonical implementation auth.VerifyBasicCredentials (also used by
+// server/middleware.go) handles both and the constant-time comparison.
 func verifyBasicCreds(cfg config.Config, user, pass string) bool {
-	return verifyPassHash(cfg.BasicUser, cfg.BasicPassHash, user, pass)
-}
-
-// verifyPassHash checks that user==wantUser and SHA-256(pass)==hex(wantHash).
-// Uses constant-time comparison to resist timing side-channels.
-func verifyPassHash(wantUser, wantHashHex, user, pass string) bool {
-	if subtle.ConstantTimeCompare([]byte(user), []byte(wantUser)) != 1 {
-		return false
-	}
-	got := sha256.Sum256([]byte(pass))
-	want, err := hex.DecodeString(wantHashHex)
-	if err != nil || len(want) != len(got) {
-		return false
-	}
-	return subtle.ConstantTimeCompare(got[:], want) == 1
+	return auth.VerifyBasicCredentials(cfg.BasicUser, cfg.BasicPassHash, user, pass)
 }
 
 // ---- shared helpers --------------------------------------------------------

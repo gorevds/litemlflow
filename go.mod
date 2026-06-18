@@ -7,6 +7,7 @@ toolchain go1.26.3
 require (
 	github.com/go-chi/chi/v5 v5.2.5
 	go.opentelemetry.io/proto/otlp v1.10.0
+	golang.org/x/crypto v0.50.0
 	google.golang.org/grpc v1.81.0
 	modernc.org/sqlite v1.50.0
 )
