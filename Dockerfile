@@ -4,7 +4,7 @@
 # manager, just the binary. The image is reproducible-friendly: the build
 # stage uses the Go module proxy.
 
-FROM golang:1.26.3-alpine AS build
+FROM golang:1.26.4-alpine AS build
 WORKDIR /src
 RUN apk add --no-cache git ca-certificates
 

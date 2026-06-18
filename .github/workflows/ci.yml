@@ -89,11 +89,16 @@ jobs:
         run: docker build --build-arg VERSION=ci-${{ github.sha }} -t litemlflow:ci .
       - name: smoke test image
         run: |
-          docker run --rm -d --name lmf -p 5050:5000 -v $(pwd)/data:/data litemlflow:ci
+          # The image runs as distroless nonroot (UID 65532); make the
+          # bind-mounted data dir writable by it so the SQLite store can be
+          # created (otherwise the server crashes on startup).
+          mkdir -p data && chmod 0777 data
+          docker run --rm -d --name lmf -p 5050:5000 -v "$(pwd)/data:/data" litemlflow:ci
+          ok=
           for _ in $(seq 1 20); do
-            if curl -fsS http://127.0.0.1:5050/healthz; then break; fi
+            if curl -fsS http://127.0.0.1:5050/healthz | grep -q '"ok":true'; then ok=1; break; fi
             sleep 0.5
           done
-          curl -fsS http://127.0.0.1:5050/healthz | grep -q '"ok":true'
-          docker logs lmf | tail -20
+          docker logs lmf | tail -20   # always surface startup logs for debugging
           docker stop lmf
+          test -n "$ok"
