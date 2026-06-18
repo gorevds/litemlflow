@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"github.com/gorevds/litemlflow/internal/model"
@@ -30,17 +29,24 @@ const (
 	EventTagDelete    = "tag_delete"
 )
 
-// writeRunEvent appends one event row. Internal helper used by the
-// run-mutation methods.
+// dbtx is the subset of *sql.DB / *sql.Tx used by the run-mutation helpers, so
+// each can run standalone (against s.db) or inside a caller's transaction.
+// Both *sql.DB and *sql.Tx satisfy it.
+type dbtx interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// writeRunEvent appends one event row using the given executor (q).
 //
-// Note on transactionality: in v1.5-rc1 events are written from the same
-// SQLiteStore.db handle as the underlying mutation, but NOT inside the
-// same explicit txn (the existing UpdateRun / SetTag / etc. don't use
-// transactions today). A crash between the run UPDATE and the event
-// INSERT would lose the event row but not corrupt the run state. This
-// is acceptable for a debugging / observability feature; if it becomes
-// load-bearing we'll wrap both writes in a single SQLITE_TXN.
-func (s *SQLiteStore) writeRunEvent(ctx context.Context, kind, runID string, payload map[string]any) error {
+// Transactionality (independent-review P1): the run-mutation methods now pass
+// the SAME transaction used for the mutation, so the event row and the mutation
+// commit atomically. A crash can no longer leave a mutation with no event row,
+// which would silently corrupt ?as_of= replay (the missing event is never
+// undone). Event-write failure therefore rolls back the whole mutation — better
+// to fail loudly than to lose the audit trail.
+func writeRunEvent(ctx context.Context, q dbtx, kind, runID string, payload map[string]any) error {
 	if payload == nil {
 		payload = map[string]any{}
 	}
@@ -48,7 +54,7 @@ func (s *SQLiteStore) writeRunEvent(ctx context.Context, kind, runID string, pay
 	if err != nil {
 		return fmt.Errorf("event payload marshal: %w", err)
 	}
-	_, err = s.db.ExecContext(ctx, `
+	_, err = q.ExecContext(ctx, `
 		INSERT INTO events(ts_ms, kind, entity_type, entity_id, payload)
 		VALUES (?, ?, 'run', ?, ?)
 	`, time.Now().UnixMilli(), kind, runID, string(raw))
@@ -56,16 +62,6 @@ func (s *SQLiteStore) writeRunEvent(ctx context.Context, kind, runID string, pay
 		return fmt.Errorf("event insert: %w", err)
 	}
 	return nil
-}
-
-// tryWriteRunEvent is the standard call site wrapper: write the event,
-// log a warning on failure (mutation has already succeeded; we don't
-// want the audit-trail loss to be silent). Returns nothing — the caller
-// has nothing to do with the failure.
-func (s *SQLiteStore) tryWriteRunEvent(ctx context.Context, kind, runID string, payload map[string]any) {
-	if err := s.writeRunEvent(ctx, kind, runID, payload); err != nil {
-		slog.Warn("event write failed", "run_id", runID, "kind", kind, "err", err.Error())
-	}
 }
 
 // PruneEventsBefore deletes event rows with ts_ms < beforeMs. Used by
@@ -332,8 +328,8 @@ func applyTagUndo(tagMap map[string]string, e runEvent) {
 //
 // Returns nil if the run does not exist; the caller's UPDATE will then
 // affect zero rows and surface its own NotFound.
-func (s *SQLiteStore) captureRunBefore(ctx context.Context, runID string) map[string]any {
-	row := s.db.QueryRowContext(ctx, `
+func captureRunBefore(ctx context.Context, q dbtx, runID string) map[string]any {
+	row := q.QueryRowContext(ctx, `
 		SELECT status, end_time, COALESCE(name,''), lifecycle_stage, COALESCE(parent_run_id,'')
 		FROM runs WHERE id = ?
 	`, runID)

@@ -454,11 +454,11 @@ func (s *SQLiteStore) CreateRun(ctx context.Context, r *model.Run) error {
 		// the URI path only needs to contain the run ID.
 		r.ArtifactURI = "mlflow-artifacts:/" + r.ID
 	}
-	_, err := s.db.ExecContext(ctx, `
+	const insertRun = `
 		INSERT INTO runs(id, experiment_id, name, status, start_time, end_time, artifact_uri, lifecycle_stage, user_id, source_type, source_name, run_kind)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, r.ID, r.ExperimentID, nilIfEmpty(r.Name), r.Status, r.StartTime, r.EndTime, r.ArtifactURI, r.LifecycleStage, nilIfEmpty(r.UserID), nilIfEmpty(r.SourceType), nilIfEmpty(r.SourceName), r.Kind)
-	if err != nil {
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	insertArgs := []any{r.ID, r.ExperimentID, nilIfEmpty(r.Name), r.Status, r.StartTime, r.EndTime, r.ArtifactURI, r.LifecycleStage, nilIfEmpty(r.UserID), nilIfEmpty(r.SourceType), nilIfEmpty(r.SourceName), r.Kind}
+	mapInsertErr := func(err error) error {
 		if isUniqueViolation(err) {
 			return ErrAlreadyExists
 		}
@@ -467,13 +467,31 @@ func (s *SQLiteStore) CreateRun(ctx context.Context, r *model.Run) error {
 		}
 		return err
 	}
-	// Persist parent_run_id and mirror as tag if set.
-	if r.ParentRunID != "" {
-		if err := s.setParentRunID(ctx, r.ID, r.ParentRunID); err != nil {
-			return err
+
+	// No parent: a single INSERT needs no explicit txn (SQLite wraps it in an
+	// implicit one). Only the parent path writes multiple rows + events that
+	// must be atomic, so reserve the txn for that case.
+	if r.ParentRunID == "" {
+		if _, err := s.db.ExecContext(ctx, insertRun, insertArgs...); err != nil {
+			return mapInsertErr(err)
 		}
+		return nil
 	}
-	return nil
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, insertRun, insertArgs...); err != nil {
+		return mapInsertErr(err)
+	}
+	// Persist parent_run_id and mirror as tag in the same txn so the run row,
+	// parent column, mirror tag, and time-travel events are atomic.
+	if err := setParentRunID(ctx, tx, r.ID, r.ParentRunID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // GetRun returns the run with the given ID.
@@ -523,12 +541,19 @@ func (s *SQLiteStore) UpdateRun(ctx context.Context, id string, status *string, 
 	if len(sets) == 0 {
 		return nil
 	}
-	// v1.5 time-travel: capture pre-state BEFORE the UPDATE, then write
-	// the event AFTER. If the UPDATE returns ErrNotFound the event is
-	// not written. See sqlite_events.go for the durability tradeoff.
-	before := s.captureRunBefore(ctx, id)
+	// v1.5 time-travel: capture pre-state BEFORE opening the txn so the txn's
+	// first statement is the UPDATE (write-first). This avoids a read→write
+	// lock upgrade inside a deferred txn, which under concurrent writers can
+	// fail with SQLITE_BUSY_SNAPSHOT. The mutation and its event then commit
+	// atomically in one txn (independent-review P1).
+	before := captureRunBefore(ctx, s.db, id)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
 	args = append(args, id)
-	res, err := s.db.ExecContext(ctx,
+	res, err := tx.ExecContext(ctx,
 		`UPDATE runs SET `+strings.Join(sets, ", ")+` WHERE id = ?`, args...)
 	if err != nil {
 		return err
@@ -538,9 +563,11 @@ func (s *SQLiteStore) UpdateRun(ctx context.Context, id string, status *string, 
 		return ErrNotFound
 	}
 	if before != nil {
-		s.tryWriteRunEvent(ctx, EventRunUpdate, id, map[string]any{"before": before})
+		if err := writeRunEvent(ctx, tx, EventRunUpdate, id, map[string]any{"before": before}); err != nil {
+			return err
+		}
 	}
-	return nil
+	return tx.Commit()
 }
 
 // SetRunLifecycle marks a run active or deleted.
@@ -548,8 +575,14 @@ func (s *SQLiteStore) SetRunLifecycle(ctx context.Context, id, stage string) err
 	if stage != model.LifecycleActive && stage != model.LifecycleDeleted {
 		return fmt.Errorf("invalid lifecycle stage %q", stage)
 	}
-	before := s.captureRunBefore(ctx, id)
-	res, err := s.db.ExecContext(ctx,
+	// Capture pre-state before the txn (write-first; see UpdateRun).
+	before := captureRunBefore(ctx, s.db, id)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx,
 		`UPDATE runs SET lifecycle_stage = ? WHERE id = ?`, stage, id)
 	if err != nil {
 		return err
@@ -559,9 +592,11 @@ func (s *SQLiteStore) SetRunLifecycle(ctx context.Context, id, stage string) err
 		return ErrNotFound
 	}
 	if before != nil {
-		s.tryWriteRunEvent(ctx, EventRunLifecycle, id, map[string]any{"before": before})
+		if err := writeRunEvent(ctx, tx, EventRunLifecycle, id, map[string]any{"before": before}); err != nil {
+			return err
+		}
 	}
-	return nil
+	return tx.Commit()
 }
 
 // SearchRuns lists runs matching opt. v0.1 supports filter by experiment IDs,
@@ -1467,43 +1502,56 @@ func (s *SQLiteStore) SetTag(ctx context.Context, runID string, t model.KV) erro
 	if err := model.ValidKey(t.Key); err != nil {
 		return err
 	}
+	// Existence check and before-value read happen before the txn (write-first;
+	// see UpdateRun). v1.5 time-travel: the `before` value lets us undo the
+	// upsert at as-of read time.
 	if err := assertRunExists(ctx, s.db, runID); err != nil {
 		return err
 	}
-	// v1.5 time-travel: capture the current value (if any) so the
-	// event payload's `before` lets us undo the upsert at as-of read time.
-	beforeVal, hadBefore := s.readTagValue(ctx, runID, t.Key)
-	_, err := s.db.ExecContext(ctx, `
+	beforeVal, hadBefore := readTagValue(ctx, s.db, runID, t.Key)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO tags(run_id, key, value) VALUES (?, ?, ?)
 		ON CONFLICT(run_id, key) DO UPDATE SET value = excluded.value
-	`, runID, t.Key, t.Value)
-	if err != nil {
+	`, runID, t.Key, t.Value); err != nil {
 		return err
 	}
 	payload := map[string]any{"key": t.Key, "value": t.Value}
 	if hadBefore {
 		payload["before"] = beforeVal
 	}
-	s.tryWriteRunEvent(ctx, EventTagSet, runID, payload)
-	// Keep parent_run_id column in sync with the MLflow client's tag.
-	if t.Key == "mlflow.parentRunId" && t.Value != "" {
-		return s.syncParentRunIDFromTag(ctx, runID, t.Value)
+	if err := writeRunEvent(ctx, tx, EventTagSet, runID, payload); err != nil {
+		return err
 	}
-	return nil
+	// Keep parent_run_id column in sync with the MLflow client's tag, in the
+	// same txn so the column, mirror tag, and events all commit together.
+	if t.Key == "mlflow.parentRunId" && t.Value != "" {
+		if err := syncParentRunIDFromTag(ctx, tx, runID, t.Value); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // SetTags upserts multiple tags atomically.
 //
 // v1.5 time-travel: capture each tag's pre-value BEFORE the txn so each
-// tag_set event has a correct `before`. Events are written AFTER commit
-// so a rollback doesn't leave orphan event rows.
+// tag_set event has a correct `before`. The upserts and their events are
+// written inside the same txn so they commit atomically (independent-review
+// P1): a rollback discards both, never leaving a tag write with no event.
 func (s *SQLiteStore) SetTags(ctx context.Context, runID string, ts []model.KV) error {
+	// Existence check and before-value reads happen before the txn (write-first;
+	// see UpdateRun).
 	if err := assertRunExists(ctx, s.db, runID); err != nil {
 		return err
 	}
 	beforeVals := make(map[string]string, len(ts))
 	for _, t := range ts {
-		if v, ok := s.readTagValue(ctx, runID, t.Key); ok {
+		if v, ok := readTagValue(ctx, s.db, runID, t.Key); ok {
 			beforeVals[t.Key] = v
 		}
 	}
@@ -1528,23 +1576,30 @@ func (s *SQLiteStore) SetTags(ctx context.Context, runID string, ts []model.KV) 
 			return err
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
+	// Events are written inside the same txn so the tag upserts and their
+	// time-travel events commit atomically (independent-review P1).
 	for _, t := range ts {
 		payload := map[string]any{"key": t.Key, "value": t.Value}
 		if v, ok := beforeVals[t.Key]; ok {
 			payload["before"] = v
 		}
-		s.tryWriteRunEvent(ctx, EventTagSet, runID, payload)
+		if err := writeRunEvent(ctx, tx, EventTagSet, runID, payload); err != nil {
+			return err
+		}
 	}
-	return nil
+	return tx.Commit()
 }
 
 // DeleteTag removes a tag. Returns ErrNotFound if absent.
 func (s *SQLiteStore) DeleteTag(ctx context.Context, runID, key string) error {
-	beforeVal, hadBefore := s.readTagValue(ctx, runID, key)
-	res, err := s.db.ExecContext(ctx, `DELETE FROM tags WHERE run_id = ? AND key = ?`, runID, key)
+	// before-value read happens before the txn (write-first; see UpdateRun).
+	beforeVal, hadBefore := readTagValue(ctx, s.db, runID, key)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, `DELETE FROM tags WHERE run_id = ? AND key = ?`, runID, key)
 	if err != nil {
 		return err
 	}
@@ -1553,19 +1608,21 @@ func (s *SQLiteStore) DeleteTag(ctx context.Context, runID, key string) error {
 		return ErrNotFound
 	}
 	if hadBefore {
-		s.tryWriteRunEvent(ctx, EventTagDelete, runID, map[string]any{
+		if err := writeRunEvent(ctx, tx, EventTagDelete, runID, map[string]any{
 			"key":    key,
 			"before": beforeVal,
-		})
+		}); err != nil {
+			return err
+		}
 	}
-	return nil
+	return tx.Commit()
 }
 
 // readTagValue returns (value, true) if a tag exists for (runID, key),
 // or ("", false) otherwise. Used by SetTag/DeleteTag to capture the
 // pre-state for time-travel events.
-func (s *SQLiteStore) readTagValue(ctx context.Context, runID, key string) (string, bool) {
-	row := s.db.QueryRowContext(ctx,
+func readTagValue(ctx context.Context, q dbtx, runID, key string) (string, bool) {
+	row := q.QueryRowContext(ctx,
 		`SELECT value FROM tags WHERE run_id = ? AND key = ?`, runID, key)
 	var v string
 	if err := row.Scan(&v); err != nil {
@@ -2506,9 +2563,9 @@ func nilIfEmpty(s string) any {
 	return s
 }
 
-func assertRunExists(ctx context.Context, db *sql.DB, runID string) error {
+func assertRunExists(ctx context.Context, q dbtx, runID string) error {
 	var n int
-	err := db.QueryRowContext(ctx, `SELECT 1 FROM runs WHERE id = ?`, runID).Scan(&n)
+	err := q.QueryRowContext(ctx, `SELECT 1 FROM runs WHERE id = ?`, runID).Scan(&n)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
