@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"sort"
 	"strconv"
@@ -1205,6 +1206,13 @@ func (s *SQLiteStore) LogMetrics(ctx context.Context, runID string, ms []model.M
 	for _, m := range ms {
 		if err := model.ValidKey(m.Key); err != nil {
 			return err
+		}
+		// Reject non-finite values: the JSON response layer cannot encode
+		// NaN/Inf, so storing them yields unreadable runs (independent-review
+		// 2.5). MLflow clients that truly need to record divergence should log
+		// a sentinel finite value or a tag instead.
+		if math.IsNaN(m.Value) || math.IsInf(m.Value, 0) {
+			return fmt.Errorf("%w: metric %q value must be finite", ErrInvalidValue, m.Key)
 		}
 		if m.Timestamp == 0 {
 			m.Timestamp = time.Now().UnixMilli()

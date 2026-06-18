@@ -25,6 +25,9 @@ var (
 	// strings.Contains(err.Error(), "...") guards introduced in T2.5.
 	ErrInvalidFilter = errors.New("invalid filter")
 	ErrInvalidStage  = errors.New("invalid stage")
+	// ErrInvalidValue marks a client value that cannot be stored/served — e.g.
+	// a non-finite (NaN/Inf) metric value, which the JSON layer cannot encode.
+	ErrInvalidValue = errors.New("invalid value")
 )
 
 // SearchOptions controls listing endpoints.

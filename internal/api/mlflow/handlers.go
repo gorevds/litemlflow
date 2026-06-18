@@ -1176,9 +1176,10 @@ func writeStoreErr(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, "RESOURCE_ALREADY_EXISTS", err.Error())
 	case errors.Is(err, store.ErrConflict):
 		writeError(w, http.StatusConflict, "RESOURCE_CONFLICT", err.Error())
-	case errors.Is(err, store.ErrInvalidFilter), errors.Is(err, store.ErrInvalidStage):
-		// Bad client input — e.g. an unsupported order_by column or a
-		// malformed page_token (keyset cursor) — is a 400, not a 500.
+	case errors.Is(err, store.ErrInvalidFilter), errors.Is(err, store.ErrInvalidStage), errors.Is(err, store.ErrInvalidValue):
+		// Bad client input — an unsupported order_by column, a malformed
+		// page_token (keyset cursor), or a non-finite metric value — is a 400,
+		// not a 500.
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", err.Error())
 	default:
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
@@ -1195,8 +1196,17 @@ func writeError(w http.ResponseWriter, status int, code, msg string) {
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
+	// Marshal to a buffer first so an un-encodable value (e.g. a non-finite
+	// metric that slipped past write-time validation) becomes a clean 500
+	// instead of a silent empty 200 with the header already flushed
+	// (independent-review 2.5).
+	b, err := json.Marshal(v)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to encode response")
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(v)
+	_, _ = w.Write(b)
 }
 
 // deprecated wraps a handler with RFC 8594 deprecation headers. Clients

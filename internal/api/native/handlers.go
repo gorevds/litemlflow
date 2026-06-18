@@ -1279,6 +1279,8 @@ func writeStoreErr(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, "RESOURCE_ALREADY_EXISTS", err.Error())
 	case errors.Is(err, store.ErrConflict):
 		writeError(w, http.StatusConflict, "RESOURCE_CONFLICT", err.Error())
+	case errors.Is(err, store.ErrInvalidFilter), errors.Is(err, store.ErrInvalidStage), errors.Is(err, store.ErrInvalidValue):
+		writeError(w, http.StatusBadRequest, codeInvalidParameter, err.Error())
 	default:
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
 	}
@@ -1291,8 +1293,15 @@ func writeError(w http.ResponseWriter, status int, code, msg string) {
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
+	// Buffer first so an un-encodable value yields a clean 500 rather than a
+	// silent empty 200 (independent-review 2.5).
+	b, err := json.Marshal(v)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to encode response")
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(v)
+	_, _ = w.Write(b)
 }
 
 func jsonOrEmpty(v any) (string, error) {
