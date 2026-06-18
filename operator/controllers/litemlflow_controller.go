@@ -62,10 +62,14 @@ func (r *LiteMLflowReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, fmt.Errorf("get LiteMLflow: %w", err)
 	}
 
-	// Phase 1: validate secrets when auth.mode == basic.
+	// Phase 1: validate secrets when auth.mode == basic. A missing Secret is
+	// not an error here — it sets a MissingSecret condition and reconciliation
+	// continues (the pod will stay pending until the Secret appears). But a
+	// transient API error (or a failed status patch) is returned so the
+	// controller requeues instead of silently dropping the reconcile.
 	if err := r.validateBasicAuthSecrets(ctx, lmf); err != nil {
 		logger.Error(err, "basic-auth secret validation failed")
-		// Status update is done inside validateBasicAuthSecrets; continue reconciling.
+		return ctrl.Result{}, fmt.Errorf("validate basic-auth secrets: %w", err)
 	}
 
 	// Phase 2: reconcile the headless Service (required by StatefulSet).
@@ -489,4 +493,3 @@ func selectorLabels(lmf *litemlflowv1alpha1.LiteMLflow) map[string]string {
 		"app.kubernetes.io/instance": lmf.Name,
 	}
 }
-
