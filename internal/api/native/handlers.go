@@ -1141,7 +1141,10 @@ func (h *Handler) OIDCCallback(w http.ResponseWriter, r *http.Request) {
 
 	// Validate anti-CSRF state.
 	incomingState := r.URL.Query().Get("state")
-	if incomingState != pkceState.State {
+	// Constant-time compare so a timing side-channel cannot be used to forge
+	// the anti-CSRF state byte by byte (independent-review); matches the
+	// nonce check which already uses subtle.ConstantTimeCompare.
+	if subtle.ConstantTimeCompare([]byte(incomingState), []byte(pkceState.State)) != 1 {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "CSRF state mismatch")
 		return
 	}
