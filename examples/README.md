@@ -10,7 +10,7 @@ End-to-end walkthroughs of the tracker.
 
 ```bash
 pip install litemlflow jupyter
-litemlflow serve --addr :5050 --db ~/lmf.db &
+litemlflow serve --addr :5050 --data ~/lmf &
 jupyter notebook examples/quickstart.ipynb
 ```
 
