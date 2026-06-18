@@ -358,6 +358,12 @@ func (h *Handler) ListEchoDeliveries(w http.ResponseWriter, r *http.Request) {
 //	?fanout=N     — per-level fan-out cap, clamped 1..200 (default 50)
 func (h *Handler) GetRunLineage(w http.ResponseWriter, r *http.Request) {
 	runID := chi.URLParam(r, "runID")
+	// Workspace-scope by run ID: the lineage walk otherwise derives the
+	// workspace from the run's own experiment, leaking another tenant's
+	// run + ancestors + dataset edges by run ID (independent-review).
+	if !h.ensureRunInWorkspace(w, r, runID) {
+		return
+	}
 	opt := store.LineageOptions{Direction: store.LineageBoth}
 	switch r.URL.Query().Get("direction") {
 	case "upstream":

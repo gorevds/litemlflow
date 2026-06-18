@@ -92,7 +92,7 @@ type RunLineage struct {
 type DatasetEdge struct {
 	RunID     string `json:"run_id"`
 	Name      string `json:"name"`
-	Version   int64  `json:"version,omitempty"`   // 0 = no v1.2 mirror in this workspace
+	Version   int64  `json:"version,omitempty"` // 0 = no v1.2 mirror in this workspace
 	Digest    string `json:"digest"`
 	DatasetID int64  `json:"dataset_id,omitempty"` // 0 = no v1.2 mirror in this workspace
 }
@@ -142,6 +142,11 @@ type Store interface {
 	// Runs.
 	CreateRun(ctx context.Context, r *model.Run) error
 	GetRun(ctx context.Context, id string) (*model.Run, error)
+	// GetRunInWorkspace returns the run only if it belongs to the given
+	// workspace (via its experiment); otherwise ErrNotFound. Used by native
+	// read/write-by-run-ID handlers to scope access in multi-tenant mode
+	// (independent-review finding: run-ID handlers were not workspace-scoped).
+	GetRunInWorkspace(ctx context.Context, id, workspaceID string) (*model.Run, error)
 	UpdateRun(ctx context.Context, id string, status *string, endTime *int64, name *string) error
 	SetRunLifecycle(ctx context.Context, id string, stage string) error
 	SearchRuns(ctx context.Context, opt SearchOptions) (SearchResult[*model.Run], error)

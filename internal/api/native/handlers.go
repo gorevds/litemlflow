@@ -202,10 +202,26 @@ type runNoteResp struct {
 	UpdatedBy string `json:"updated_by,omitempty"`
 }
 
+// ensureRunInWorkspace returns true if runID belongs to the caller's
+// workspace. Otherwise it writes a 404 (constant-shape, so callers cannot
+// probe runs in other workspaces) and returns false. Used to scope native
+// read/write-by-run-ID handlers in multi-tenant mode (independent-review:
+// these handlers previously queried by run ID with no workspace filter).
+func (h *Handler) ensureRunInWorkspace(w http.ResponseWriter, r *http.Request, runID string) bool {
+	if _, err := h.Store.GetRunInWorkspace(r.Context(), runID, workspaceFromReq(r)); err != nil {
+		writeStoreErr(w, err)
+		return false
+	}
+	return true
+}
+
 // GetRunNote handles GET /api/v1/runs/{runID}/note.
 // Returns 404 when no note has been set.
 func (h *Handler) GetRunNote(w http.ResponseWriter, r *http.Request) {
 	runID := chi.URLParam(r, "runID")
+	if !h.ensureRunInWorkspace(w, r, runID) {
+		return
+	}
 	content, by, at, err := h.Store.GetRunNote(r.Context(), runID)
 	if err != nil {
 		writeStoreErr(w, err)
@@ -222,6 +238,9 @@ type setRunNoteReq struct {
 // Body: {"content": "..."} — empty content deletes the note.
 func (h *Handler) SetRunNote(w http.ResponseWriter, r *http.Request) {
 	runID := chi.URLParam(r, "runID")
+	if !h.ensureRunInWorkspace(w, r, runID) {
+		return
+	}
 	var req setRunNoteReq
 	if err := decodeJSON(r, &req); err != nil {
 		writeBadRequest(w, err)
@@ -437,18 +456,18 @@ func (h *Handler) Version(w http.ResponseWriter, r *http.Request) {
 // ---- traces -----------------------------------------------------------------
 
 type spanDTO struct {
-	ID            string         `json:"id,omitempty"`
-	TraceID       string         `json:"trace_id,omitempty"`
-	ParentID      string         `json:"parent_id,omitempty"`
-	RunID         string         `json:"run_id,omitempty"`
-	Name          string         `json:"name"`
-	Kind          string         `json:"span_kind,omitempty"`
-	StartTimeNS   int64          `json:"start_time_ns"`
-	EndTimeNS     *int64         `json:"end_time_ns,omitempty"`
-	Attributes    map[string]any `json:"attributes,omitempty"`
+	ID            string           `json:"id,omitempty"`
+	TraceID       string           `json:"trace_id,omitempty"`
+	ParentID      string           `json:"parent_id,omitempty"`
+	RunID         string           `json:"run_id,omitempty"`
+	Name          string           `json:"name"`
+	Kind          string           `json:"span_kind,omitempty"`
+	StartTimeNS   int64            `json:"start_time_ns"`
+	EndTimeNS     *int64           `json:"end_time_ns,omitempty"`
+	Attributes    map[string]any   `json:"attributes,omitempty"`
 	Events        []map[string]any `json:"events,omitempty"`
-	StatusCode    string         `json:"status_code,omitempty"`
-	StatusMessage string         `json:"status_message,omitempty"`
+	StatusCode    string           `json:"status_code,omitempty"`
+	StatusMessage string           `json:"status_message,omitempty"`
 }
 
 type ingestTracesReq struct {
@@ -503,6 +522,9 @@ func (h *Handler) IngestTraces(w http.ResponseWriter, r *http.Request) {
 // GetRunTraces handles GET /api/v1/runs/{runID}/traces.
 func (h *Handler) GetRunTraces(w http.ResponseWriter, r *http.Request) {
 	runID := chi.URLParam(r, "runID")
+	if !h.ensureRunInWorkspace(w, r, runID) {
+		return
+	}
 	spans, err := h.Store.GetSpansByRun(r.Context(), runID)
 	if err != nil {
 		writeStoreErr(w, err)
@@ -543,7 +565,9 @@ func (h *Handler) GetRunData(w http.ResponseWriter, r *http.Request) {
 	if asOf > 0 {
 		run, tags, err = h.Store.GetRunAsOfInWorkspace(r.Context(), runID, workspaceFromReq(r), asOf)
 	} else {
-		run, err = h.Store.GetRun(r.Context(), runID)
+		// Workspace-scoped: symmetric with the as_of branch so a run from
+		// another tenant's workspace is not readable by run ID.
+		run, err = h.Store.GetRunInWorkspace(r.Context(), runID, workspaceFromReq(r))
 	}
 	if err != nil {
 		writeStoreErr(w, err)
@@ -919,6 +943,11 @@ func (h *Handler) CreateEval(w http.ResponseWriter, r *http.Request) {
 // GetEval handles GET /api/v1/evals/{runID}.
 func (h *Handler) GetEval(w http.ResponseWriter, r *http.Request) {
 	runID := chi.URLParam(r, "runID")
+	// An eval is keyed by its run; scope read access to runs visible in the
+	// caller's workspace so one tenant cannot read another's eval by run ID.
+	if !h.ensureRunInWorkspace(w, r, runID) {
+		return
+	}
 	e, err := h.Store.GetEval(r.Context(), runID)
 	if err != nil {
 		writeStoreErr(w, err)
@@ -1221,13 +1250,13 @@ func decodeJSON(r *http.Request, dst any) error {
 // migration of the most overloaded site (writeBadRequest → still 400
 // INVALID_PARAMETER_VALUE because callers depend on that).
 const (
-	codeMissingField     = "MISSING_REQUIRED_FIELD" // for blank/absent required input
-	codeInvalidParameter = "INVALID_PARAMETER_VALUE"
-	codeMethodNotAllowed = "METHOD_NOT_ALLOWED"
+	codeMissingField      = "MISSING_REQUIRED_FIELD" // for blank/absent required input
+	codeInvalidParameter  = "INVALID_PARAMETER_VALUE"
+	codeMethodNotAllowed  = "METHOD_NOT_ALLOWED"
 	codeWorkspaceNotFound = "WORKSPACE_NOT_FOUND"
-	codePayloadTooLarge  = "PAYLOAD_TOO_LARGE"
-	codeUnauthenticated  = "UNAUTHENTICATED"
-	codeForbidden        = "FORBIDDEN"
+	codePayloadTooLarge   = "PAYLOAD_TOO_LARGE"
+	codeUnauthenticated   = "UNAUTHENTICATED"
+	codeForbidden         = "FORBIDDEN"
 )
 
 // writeMissingField is a tiny helper for "X is required" validation, used

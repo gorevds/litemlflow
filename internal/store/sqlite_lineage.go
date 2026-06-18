@@ -205,6 +205,17 @@ func (s *SQLiteStore) walkAncestors(ctx context.Context, run *model.Run, selfID,
 	return ancestors
 }
 
+// GetRunInWorkspace returns the run only if it belongs to workspaceID (via its
+// experiment), else ErrNotFound. An empty workspaceID defaults to "default",
+// matching GetRunAsOfInWorkspace. Exported wrapper over getRunInWorkspace for
+// workspace-scoped native handlers.
+func (s *SQLiteStore) GetRunInWorkspace(ctx context.Context, runID, workspaceID string) (*model.Run, error) {
+	if workspaceID == "" {
+		workspaceID = "default"
+	}
+	return s.getRunInWorkspace(ctx, runID, workspaceID)
+}
+
 // getRunInWorkspace returns ErrNotFound if the run is missing OR belongs
 // to a different workspace. Constant-shape error means callers cannot
 // distinguish the two cases, which is intentional for cross-workspace

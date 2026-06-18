@@ -71,8 +71,11 @@ func (NopStore) CreateRun(context.Context, *model.Run) error {
 	return nil
 }
 func (NopStore) GetRun(context.Context, string) (*model.Run, error) { return nil, store.ErrNotFound }
+func (NopStore) GetRunInWorkspace(context.Context, string, string) (*model.Run, error) {
+	return nil, store.ErrNotFound
+}
 func (NopStore) UpdateRun(context.Context, string, *string, *int64, *string) error { return nil }
-func (NopStore) SetRunLifecycle(context.Context, string, string) error              { return nil }
+func (NopStore) SetRunLifecycle(context.Context, string, string) error             { return nil }
 func (NopStore) SearchRuns(context.Context, store.SearchOptions) (store.SearchResult[*model.Run], error) {
 	return store.SearchResult[*model.Run]{}, nil
 }
@@ -91,8 +94,8 @@ func (NopStore) GetMetricHistory(context.Context, string, string, store.MetricHi
 func (NopStore) GetMetricHistoryDownsampled(context.Context, string, string, int) ([]model.Metric, int64, error) {
 	return nil, 0, nil
 }
-func (NopStore) GetParams(context.Context, string) ([]model.Param, error)        { return nil, nil }
-func (NopStore) GetTags(context.Context, string) ([]model.KV, error)             { return nil, nil }
+func (NopStore) GetParams(context.Context, string) ([]model.Param, error)         { return nil, nil }
+func (NopStore) GetTags(context.Context, string) ([]model.KV, error)              { return nil, nil }
 func (NopStore) GetLatestMetrics(context.Context, string) ([]model.Metric, error) { return nil, nil }
 
 // Run notes.
@@ -161,10 +164,10 @@ func (NopStore) SearchRegisteredModels(context.Context, string, int, string) (st
 func (NopStore) GetLatestModelVersions(context.Context, string, []string) ([]*model.ModelVersion, error) {
 	return nil, nil
 }
-func (NopStore) SetRegisteredModelTag(context.Context, string, string, string) error    { return nil }
-func (NopStore) DeleteRegisteredModelTag(context.Context, string, string) error         { return nil }
-func (NopStore) SetModelAlias(context.Context, string, string, int64) error             { return nil }
-func (NopStore) DeleteModelAlias(context.Context, string, string) error                 { return nil }
+func (NopStore) SetRegisteredModelTag(context.Context, string, string, string) error { return nil }
+func (NopStore) DeleteRegisteredModelTag(context.Context, string, string) error      { return nil }
+func (NopStore) SetModelAlias(context.Context, string, string, int64) error          { return nil }
+func (NopStore) DeleteModelAlias(context.Context, string, string) error              { return nil }
 func (NopStore) GetModelByAlias(context.Context, string, string) (*model.ModelVersion, error) {
 	return nil, store.ErrNotFound
 }
@@ -184,8 +187,8 @@ func (NopStore) SearchModelVersions(context.Context, string, int, string) (store
 func (NopStore) TransitionModelStage(context.Context, string, int64, string, bool) (*model.ModelVersion, error) {
 	return nil, store.ErrNotFound
 }
-func (NopStore) SetModelVersionTag(context.Context, string, int64, string, string) error    { return nil }
-func (NopStore) DeleteModelVersionTag(context.Context, string, int64, string) error         { return nil }
+func (NopStore) SetModelVersionTag(context.Context, string, int64, string, string) error { return nil }
+func (NopStore) DeleteModelVersionTag(context.Context, string, int64, string) error      { return nil }
 
 // Search & lineage.
 func (NopStore) SearchRunsByName(context.Context, string, string, int) ([]*model.Run, error) {
@@ -208,8 +211,8 @@ func (NopStore) GetLatestMetricsAsOf(context.Context, string, int64) ([]model.Me
 }
 
 // Janitor.
-func (NopStore) ArchiveStaleRuns(context.Context, int64) (int, error)    { return 0, nil }
-func (NopStore) PruneEventsBefore(context.Context, int64) (int, error)   { return 0, nil }
+func (NopStore) ArchiveStaleRuns(context.Context, int64) (int, error)  { return 0, nil }
+func (NopStore) PruneEventsBefore(context.Context, int64) (int, error) { return 0, nil }
 
 // Webhooks.
 func (NopStore) CreateWebhook(context.Context, *model.Webhook) (int64, error) {
@@ -221,9 +224,9 @@ func (NopStore) ListWebhooks(context.Context, string, *int64) ([]*model.Webhook,
 func (NopStore) GetWebhook(context.Context, int64) (*model.Webhook, error) {
 	return nil, store.ErrNotFound
 }
-func (NopStore) UpdateWebhook(context.Context, *model.Webhook) error                { return nil }
-func (NopStore) DeleteWebhook(context.Context, int64) error                          { return nil }
-func (NopStore) RecordWebhookAttempt(context.Context, int64, int, int64) error      { return nil }
+func (NopStore) UpdateWebhook(context.Context, *model.Webhook) error           { return nil }
+func (NopStore) DeleteWebhook(context.Context, int64) error                    { return nil }
+func (NopStore) RecordWebhookAttempt(context.Context, int64, int, int64) error { return nil }
 
 // Experiment clone.
 func (NopStore) CloneExperiment(context.Context, int64, string, string) (*model.Experiment, error) {
@@ -247,7 +250,9 @@ func (NopStore) AnalyticsQuery(context.Context, store.AnalyticsQuery) (*store.An
 func (NopStore) CreateDatasetVersion(context.Context, *model.DatasetVersion, []int64) (*model.DatasetVersion, error) {
 	return nil, store.ErrNotFound
 }
-func (NopStore) ListDatasets(context.Context, string) ([]*model.DatasetVersion, error) { return nil, nil }
+func (NopStore) ListDatasets(context.Context, string) ([]*model.DatasetVersion, error) {
+	return nil, nil
+}
 func (NopStore) ListDatasetVersions(context.Context, string, string) ([]*model.DatasetVersion, error) {
 	return nil, nil
 }
@@ -267,9 +272,9 @@ func (NopStore) CreateWorkspace(context.Context, *model.Workspace) error { retur
 func (NopStore) GetWorkspace(context.Context, string) (*model.Workspace, error) {
 	return nil, store.ErrNotFound
 }
-func (NopStore) ListWorkspaces(context.Context) ([]*model.Workspace, error) { return nil, nil }
+func (NopStore) ListWorkspaces(context.Context) ([]*model.Workspace, error)      { return nil, nil }
 func (NopStore) UpdateWorkspace(context.Context, string, *string, *string) error { return nil }
-func (NopStore) DeleteWorkspace(context.Context, string) error                    { return nil }
+func (NopStore) DeleteWorkspace(context.Context, string) error                   { return nil }
 
 // Workspace members.
 func (NopStore) AddMember(context.Context, string, string, string) error { return nil }
