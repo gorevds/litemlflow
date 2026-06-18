@@ -277,3 +277,37 @@ func TestSyncDeliveryPayload(t *testing.T) {
 		t.Fatal("no payload received")
 	}
 }
+
+// TestDispatcherStopAbortsBackoff guards against a goroutine leak on shutdown
+// (independent-review P2): the retry backoff select watched ctx.Done() and the
+// backoff timer but NOT stopCh, so a worker draining a failing webhook would
+// sleep through the full 1s→5s→25s backoff, blow past Stop's drainTimeout, and
+// leak. With a large RetryBase the test would block for ~RetryBase before the
+// fix; after it, Stop returns promptly because the backoff aborts on stopCh.
+func TestDispatcherStopAbortsBackoff(t *testing.T) {
+	// Always-failing target so the worker enters the retry backoff.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	wh := &model.Webhook{ID: 1, Name: "failing", URL: srv.URL, Events: "run_finished", Enabled: true}
+	ms := &mockStore{webhooks: []*model.Webhook{wh}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// RetryBase far larger than drainTimeout: if the backoff ignored stopCh the
+	// worker would be stuck here long after Stop is asked to drain.
+	d := webhooks.NewWithOptions(ctx, ms, nil, webhooks.Options{RetryBase: 30 * time.Second})
+	d.Notify(ctx, "run_finished", &model.Run{ID: "r1", Status: model.StatusFinished})
+
+	// Let the worker run attempt 0 (fails) and enter the backoff sleep.
+	time.Sleep(200 * time.Millisecond)
+
+	start := time.Now()
+	d.Stop(2 * time.Second)
+	elapsed := time.Since(start)
+	if elapsed > 1*time.Second {
+		t.Fatalf("Stop took %v; worker stuck in backoff instead of aborting on stopCh", elapsed)
+	}
+}

@@ -317,6 +317,11 @@ func (d *Dispatcher) deliver(ctx context.Context, j job) {
 			select {
 			case <-ctx.Done():
 				return
+			case <-d.stopCh:
+				// Stop() initiated: abort further retries promptly instead of
+				// sleeping through the backoff, so the worker exits within
+				// Stop's drainTimeout rather than leaking (independent-review).
+				return
 			case <-time.After(backoff):
 			}
 			backoff *= retryMultiplier
