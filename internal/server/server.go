@@ -84,6 +84,15 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Server, 
 	// ring buffer captures deliveries to lmf:// URLs for the demo UI.
 	echoLog := webhooks.NewEchoLog(0)
 	dispatcher := webhooks.NewWithOptions(ctx, st, logger, webhooks.Options{Echo: echoLog})
+	// The dispatcher has already started its worker pool. If any later init
+	// step fails we must stop it so those goroutines don't leak until ctx is
+	// canceled (independent-review). Cleared once New succeeds.
+	ok := false
+	defer func() {
+		if !ok {
+			dispatcher.Stop(time.Second)
+		}
+	}()
 
 	// Datasets v1.2: content-addressed store rooted under <data>/datasets/.
 	// Errors here are fatal — dataset upload paths depend on it.
@@ -115,6 +124,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Server, 
 		}
 	}
 
+	ok = true // init succeeded; the deferred dispatcher.Stop is a no-op now.
 	return &Server{
 		cfg: cfg, logger: logger, store: st, artifacts: art,
 		httpd: httpSrv, grpcSrv: grpcSrv, dispatcher: dispatcher,
