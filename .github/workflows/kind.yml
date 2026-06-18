@@ -7,13 +7,13 @@ name: Kind cluster smoke
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
     paths:
       - "operator/**"
       - "Dockerfile"
       - ".github/workflows/kind.yml"
   pull_request:
-    branches: [main]
+    branches: [main, master]
     paths:
       - "operator/**"
       - "Dockerfile"

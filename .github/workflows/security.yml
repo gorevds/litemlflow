@@ -2,9 +2,9 @@ name: Security
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   pull_request:
-    branches: [main]
+    branches: [main, master]
   schedule:
     # Re-run every Monday so newly disclosed CVEs in pinned deps are caught.
     - cron: "0 8 * * 1"
