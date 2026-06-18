@@ -322,11 +322,11 @@ func (h *Handler) SetExperimentTag(w http.ResponseWriter, r *http.Request) {
 // ---- runs -------------------------------------------------------------------
 
 type createRunReq struct {
-	ExperimentID string    `json:"experiment_id"`
-	UserID       string    `json:"user_id,omitempty"`
-	StartTime    int64     `json:"start_time,omitempty"`
-	Tags         []tagDTO  `json:"tags,omitempty"`
-	RunName      string    `json:"run_name,omitempty"`
+	ExperimentID string   `json:"experiment_id"`
+	UserID       string   `json:"user_id,omitempty"`
+	StartTime    int64    `json:"start_time,omitempty"`
+	Tags         []tagDTO `json:"tags,omitempty"`
+	RunName      string   `json:"run_name,omitempty"`
 }
 
 type runResp struct {
@@ -892,9 +892,9 @@ func (h *Handler) LogInputs(w http.ResponseWriter, r *http.Request) {
 }
 
 type getMetricHistoryResp struct {
-	Metrics          []metricDTO `json:"metrics"`
-	NextPageToken    string      `json:"next_page_token,omitempty"`
-	DownsampledFrom  *int64      `json:"downsampled_from,omitempty"`
+	Metrics         []metricDTO `json:"metrics"`
+	NextPageToken   string      `json:"next_page_token,omitempty"`
+	DownsampledFrom *int64      `json:"downsampled_from,omitempty"`
 }
 
 // GetMetricHistory handles GET .../metrics/get-history.
@@ -1176,6 +1176,10 @@ func writeStoreErr(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, "RESOURCE_ALREADY_EXISTS", err.Error())
 	case errors.Is(err, store.ErrConflict):
 		writeError(w, http.StatusConflict, "RESOURCE_CONFLICT", err.Error())
+	case errors.Is(err, store.ErrInvalidFilter), errors.Is(err, store.ErrInvalidStage):
+		// Bad client input — e.g. an unsupported order_by column or a
+		// malformed page_token (keyset cursor) — is a 400, not a 500.
+		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", err.Error())
 	default:
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
 	}

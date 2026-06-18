@@ -257,3 +257,25 @@ func TestGlobalSearch_Endpoint(t *testing.T) {
 		}
 	})
 }
+
+// TestSearchMalformedPageTokenIs400 guards independent-review 2.4: a malformed
+// keyset page_token must yield 400 INVALID_PARAMETER_VALUE, not 500, on both
+// the runs and experiments search endpoints.
+func TestSearchMalformedPageTokenIs400(t *testing.T) {
+	t.Parallel()
+	ts, _ := newTestServer(t, config.Config{})
+	for _, path := range []string{
+		"/api/2.0/mlflow/runs/search",
+		"/api/2.0/mlflow/experiments/search",
+	} {
+		body := `{"page_token":"!!!not-base64!!!"}`
+		resp, err := http.Post(ts.URL+path, "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("post %s: %v", path, err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s with malformed page_token: want 400, got %d", path, resp.StatusCode)
+		}
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -354,11 +355,23 @@ func (s *SQLiteStore) SearchExperiments(ctx context.Context, opt SearchOptions) 
 		where = append(where, clause)
 		args = append(args, fargs...)
 	}
+	// Keyset cursor: creation_time DESC with a unique id tie-break so paging is
+	// deterministic and terminates (independent-review 2.4).
+	kcols := []keysetCol{{expr: "creation_time", desc: true}, {expr: "id", desc: false}}
+	if opt.PageToken != "" {
+		cur, err := decodeCursor(opt.PageToken, len(kcols))
+		if err != nil {
+			return SearchResult[*model.Experiment]{}, err
+		}
+		pred, pargs := keysetPredicate(kcols, cur)
+		where = append(where, pred)
+		args = append(args, pargs...)
+	}
 	q := `SELECT id, name, artifact_location, lifecycle_stage, creation_time, last_update_time, workspace_id FROM experiments`
 	if len(where) > 0 {
 		q += " WHERE " + strings.Join(where, " AND ")
 	}
-	q += " ORDER BY creation_time DESC LIMIT ?"
+	q += " ORDER BY " + keysetOrderClause(kcols) + " LIMIT ?"
 	args = append(args, opt.MaxResults+1)
 
 	rows, err := s.db.QueryContext(ctx, q, args...)
@@ -381,7 +394,10 @@ func (s *SQLiteStore) SearchExperiments(ctx context.Context, opt SearchOptions) 
 	var token string
 	if len(out) > opt.MaxResults {
 		out = out[:opt.MaxResults]
-		token = strconv.FormatInt(out[len(out)-1].CreationTime, 10)
+		last := out[len(out)-1]
+		kcols[0].val = last.CreationTime
+		kcols[1].val = last.ID
+		token = encodeCursor(kcols)
 	}
 	for _, e := range out {
 		tags, err := s.getExperimentTags(ctx, e.ID)
@@ -581,6 +597,23 @@ func (s *SQLiteStore) SearchRuns(ctx context.Context, opt SearchOptions) (Search
 		where = append(where, clause)
 		args = append(args, fargs...)
 	}
+	orderCols, err := parseRunOrder(opt.OrderBy)
+	if err != nil {
+		return SearchResult[*model.Run]{}, err
+	}
+	kcols := make([]keysetCol, len(orderCols))
+	for i, c := range orderCols {
+		kcols[i] = keysetCol{expr: runColExpr(c.key), desc: c.desc}
+	}
+	if opt.PageToken != "" {
+		cur, err := decodeCursor(opt.PageToken, len(kcols))
+		if err != nil {
+			return SearchResult[*model.Run]{}, err
+		}
+		pred, pargs := keysetPredicate(kcols, cur)
+		where = append(where, pred)
+		args = append(args, pargs...)
+	}
 	q := `
 		SELECT id, experiment_id, COALESCE(name,''), status, start_time, end_time, artifact_uri,
 		       lifecycle_stage, COALESCE(user_id,''), COALESCE(source_type,''), COALESCE(source_name,''), run_kind,
@@ -589,15 +622,7 @@ func (s *SQLiteStore) SearchRuns(ctx context.Context, opt SearchOptions) (Search
 	if len(where) > 0 {
 		q += " WHERE " + strings.Join(where, " AND ")
 	}
-	order := "start_time DESC"
-	if len(opt.OrderBy) > 0 {
-		ob, err := translateOrderBy(opt.OrderBy)
-		if err != nil {
-			return SearchResult[*model.Run]{}, err
-		}
-		order = ob
-	}
-	q += " ORDER BY " + order + " LIMIT ?"
+	q += " ORDER BY " + keysetOrderClause(kcols) + " LIMIT ?"
 	args = append(args, opt.MaxResults+1)
 
 	rows, err := s.db.QueryContext(ctx, q, args...)
@@ -625,7 +650,11 @@ func (s *SQLiteStore) SearchRuns(ctx context.Context, opt SearchOptions) (Search
 	var token string
 	if len(out) > opt.MaxResults {
 		out = out[:opt.MaxResults]
-		token = out[len(out)-1].ID
+		last := out[len(out)-1]
+		for i := range kcols {
+			kcols[i].val = runColValue(last, orderCols[i].key)
+		}
+		token = encodeCursor(kcols)
 	}
 	return SearchResult[*model.Run]{Items: out, NextPageToken: token}, nil
 }
@@ -675,9 +704,45 @@ func (s *SQLiteStore) SearchRunsByName(ctx context.Context, workspaceID, query s
 	return out, rows.Err()
 }
 
-// translateOrderBy maps MLflow order-by syntax (`attributes.start_time DESC`)
-// to a safe SQL ORDER BY clause built only from a known column whitelist.
-func translateOrderBy(order []string) (string, error) {
+// runOrderCol is one parsed ORDER BY component for SearchRuns. key is the
+// logical column used to extract the cursor value from a *model.Run.
+type runOrderCol struct {
+	key  string // "start_time" | "end_time" | "status" | "id"
+	desc bool
+}
+
+// runColExpr returns the SQL expression for a run order column. end_time is
+// nullable, so COALESCE keeps it out of the keyset comparison (NULL comparisons
+// would otherwise break the cursor); -1 is below any real unix-ms timestamp.
+func runColExpr(key string) string {
+	if key == "end_time" {
+		return "COALESCE(end_time, -1)"
+	}
+	return key
+}
+
+// runColValue extracts the cursor value for a run order column.
+func runColValue(r *model.Run, key string) any {
+	switch key {
+	case "start_time":
+		return r.StartTime
+	case "end_time":
+		if r.EndTime != nil {
+			return *r.EndTime
+		}
+		return int64(-1)
+	case "status":
+		return r.Status
+	default: // id
+		return r.ID
+	}
+}
+
+// parseRunOrder maps MLflow order-by syntax (`attributes.start_time DESC`) to a
+// safe ordered column list built from a whitelist, always ending with a unique
+// `id` tie-break so the total order is deterministic (required for a stable
+// keyset cursor).
+func parseRunOrder(order []string) ([]runOrderCol, error) {
 	colMap := map[string]string{
 		"attributes.start_time": "start_time",
 		"attributes.end_time":   "end_time",
@@ -686,30 +751,105 @@ func translateOrderBy(order []string) (string, error) {
 		"end_time":              "end_time",
 		"status":                "status",
 	}
-	var parts []string
+	var cols []runOrderCol
 	for _, o := range order {
 		fields := strings.Fields(o)
 		if len(fields) == 0 {
 			continue
 		}
-		col, ok := colMap[fields[0]]
+		key, ok := colMap[fields[0]]
 		if !ok {
-			return "", fmt.Errorf("unsupported order_by column %q", fields[0])
+			return nil, fmt.Errorf("%w: unsupported order_by column %q", ErrInvalidFilter, fields[0])
 		}
-		dir := "ASC"
+		desc := false
 		if len(fields) > 1 {
-			d := strings.ToUpper(fields[1])
-			if d != "ASC" && d != "DESC" {
-				return "", fmt.Errorf("invalid order_by direction %q", fields[1])
+			switch strings.ToUpper(fields[1]) {
+			case "ASC":
+			case "DESC":
+				desc = true
+			default:
+				return nil, fmt.Errorf("%w: invalid order_by direction %q", ErrInvalidFilter, fields[1])
 			}
-			dir = d
 		}
-		parts = append(parts, col+" "+dir)
+		cols = append(cols, runOrderCol{key: key, desc: desc})
 	}
-	if len(parts) == 0 {
-		return "start_time DESC", nil
+	if len(cols) == 0 {
+		cols = []runOrderCol{{key: "start_time", desc: true}}
 	}
-	return strings.Join(parts, ", "), nil
+	cols = append(cols, runOrderCol{key: "id", desc: false}) // unique tie-break
+	return cols, nil
+}
+
+// --- keyset pagination (independent-review 2.4) ------------------------------
+//
+// SearchRuns/SearchExperiments previously emitted a NextPageToken but never
+// consumed PageToken, so a paging client looped on page one and duplicated
+// rows. A keyset cursor encodes the last row's order-key values as an opaque
+// token; the next page selects rows strictly after the cursor under the same
+// deterministic (order-by + unique id) total order.
+
+type keysetCol struct {
+	expr string // SQL expression in ORDER BY and the cursor predicate
+	desc bool
+	val  any // last-row value, set only when emitting a token
+}
+
+func keysetOrderClause(cols []keysetCol) string {
+	parts := make([]string, len(cols))
+	for i, c := range cols {
+		dir := "ASC"
+		if c.desc {
+			dir = "DESC"
+		}
+		parts[i] = c.expr + " " + dir
+	}
+	return strings.Join(parts, ", ")
+}
+
+func encodeCursor(cols []keysetCol) string {
+	vals := make([]any, len(cols))
+	for i, c := range cols {
+		vals[i] = c.val
+	}
+	b, _ := json.Marshal(vals)
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+func decodeCursor(token string, n int) ([]any, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil {
+		return nil, fmt.Errorf("%w: malformed page_token", ErrInvalidFilter)
+	}
+	var vals []any
+	if err := json.Unmarshal(raw, &vals); err != nil {
+		return nil, fmt.Errorf("%w: malformed page_token", ErrInvalidFilter)
+	}
+	if len(vals) != n {
+		return nil, fmt.Errorf("%w: page_token does not match order_by", ErrInvalidFilter)
+	}
+	return vals, nil
+}
+
+// keysetPredicate builds the lexicographic "row strictly after the cursor"
+// clause for the given columns and decoded cursor values.
+func keysetPredicate(cols []keysetCol, cur []any) (string, []any) {
+	var ors []string
+	var args []any
+	for i := range cols {
+		var ands []string
+		for j := 0; j < i; j++ {
+			ands = append(ands, cols[j].expr+" = ?")
+			args = append(args, cur[j])
+		}
+		cmp := ">"
+		if cols[i].desc {
+			cmp = "<"
+		}
+		ands = append(ands, cols[i].expr+" "+cmp+" ?")
+		args = append(args, cur[i])
+		ors = append(ors, "("+strings.Join(ands, " AND ")+")")
+	}
+	return "(" + strings.Join(ors, " OR ") + ")", args
 }
 
 // parseRunFilter supports a tiny subset:
