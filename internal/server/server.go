@@ -220,6 +220,13 @@ func buildRouter(cfg config.Config, logger *slog.Logger, st store.Store, art art
 	// Metrics middleware runs before auth so it captures every request,
 	// including unauthenticated ones that are rejected by auth.
 	r.Use(metricsMiddleware(std))
+	// Rate-limit credential brute force per client IP. ~5 burst, refilling 1
+	// attempt / 12s ≈ 5 attempts/min sustained per IP. The same limiter guards
+	// the login endpoint (every POST) and failed HTTP Basic attempts (only
+	// failures consume a token, so legitimate Basic clients are unaffected).
+	// Placed after apiV2Alias so the path is already normalized.
+	authLimiter := newAuthRateLimiter(5, 1.0/12.0)
+	r.Use(rateLimitAuthMiddleware(authLimiter))
 	// Body limit applies to all non-artifact endpoints; artifact subrouter
 	// re-applies its own (larger) limit.
 	r.Use(bodyLimitMiddleware(cfg.MaxRequestSize))
@@ -230,7 +237,7 @@ func buildRouter(cfg config.Config, logger *slog.Logger, st store.Store, art art
 	if sqlSt, ok := st.(*store.SQLiteStore); ok {
 		sessions = sqlSt
 	}
-	r.Use(authMiddlewareWithSessions(cfg, sessions))
+	r.Use(authMiddlewareWithSessions(cfg, sessions, authLimiter))
 	// TENANCY: workspaceMiddleware runs after auth so the workspace is available
 	// to all downstream handlers. It validates the X-Workspace header /
 	// lmf_workspace cookie against the store and falls back to "default".

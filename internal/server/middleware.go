@@ -243,7 +243,7 @@ type SessionLookup interface {
 //  3. Else if cfg.Auth=="basic", require HTTP Basic credentials.
 //  4. Else if cfg.Auth=="oidc" and the request accepts HTML, redirect to IdP start.
 //  5. Else if cfg.Auth=="none", user = "anonymous".
-func authMiddlewareWithSessions(cfg config.Config, sessions SessionLookup) func(http.Handler) http.Handler {
+func authMiddlewareWithSessions(cfg config.Config, sessions SessionLookup, authLimiter *authRateLimiter) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// 1. Strip identity header so clients cannot smuggle it.
@@ -296,6 +296,18 @@ func authMiddlewareWithSessions(cfg config.Config, sessions SessionLookup) func(
 					return
 				}
 				if !auth.VerifyBasicCredentials(cfg.BasicUser, cfg.BasicPassHash, user, pass) {
+					// Basic credentials are checked on every request, so this
+					// is the real brute-force surface (not just /auth/login).
+					// Charge each FAILED attempt to the per-IP limiter; a
+					// successful auth never consumes a token, so legitimate
+					// clients are unaffected. Once the budget is spent, reject
+					// further failures with 429 (independent-review).
+					if authLimiter != nil && !authLimiter.allow(clientIP(r)) {
+						w.Header().Set("Retry-After", "60")
+						writeError(w, http.StatusTooManyRequests, CodeTooManyRequests,
+							"too many failed authentication attempts; slow down and retry later")
+						return
+					}
 					writeError(w, http.StatusUnauthorized, CodeUnauthenticated, "invalid credentials")
 					return
 				}
@@ -324,7 +336,7 @@ func authMiddlewareWithSessions(cfg config.Config, sessions SessionLookup) func(
 // have a session store (tests, etc.). It delegates to authMiddlewareWithSessions
 // with a nil store, which skips cookie checks.
 func authMiddleware(cfg config.Config) func(http.Handler) http.Handler {
-	return authMiddlewareWithSessions(cfg, nil)
+	return authMiddlewareWithSessions(cfg, nil, nil)
 }
 
 func isPublicPath(p string) bool {

@@ -12,15 +12,16 @@ import (
 
 // MLflow ErrorCode values used in API responses.
 const (
-	CodeBadRequest             = "BAD_REQUEST"
-	CodeInvalidParameter       = "INVALID_PARAMETER_VALUE"
-	CodeResourceAlreadyExists  = "RESOURCE_ALREADY_EXISTS"
-	CodeResourceDoesNotExist   = "RESOURCE_DOES_NOT_EXIST"
-	CodeResourceConflict       = "RESOURCE_CONFLICT"
-	CodePermissionDenied       = "PERMISSION_DENIED"
-	CodeUnauthenticated        = "UNAUTHENTICATED"
-	CodeInternalError          = "INTERNAL_ERROR"
-	CodeNotImplemented         = "NOT_IMPLEMENTED"
+	CodeBadRequest            = "BAD_REQUEST"
+	CodeInvalidParameter      = "INVALID_PARAMETER_VALUE"
+	CodeResourceAlreadyExists = "RESOURCE_ALREADY_EXISTS"
+	CodeResourceDoesNotExist  = "RESOURCE_DOES_NOT_EXIST"
+	CodeResourceConflict      = "RESOURCE_CONFLICT"
+	CodePermissionDenied      = "PERMISSION_DENIED"
+	CodeUnauthenticated       = "UNAUTHENTICATED"
+	CodeInternalError         = "INTERNAL_ERROR"
+	CodeNotImplemented        = "NOT_IMPLEMENTED"
+	CodeTooManyRequests       = "RESOURCE_EXHAUSTED"
 )
 
 // errorResponse is the MLflow-compatible error body.
