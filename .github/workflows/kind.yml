@@ -58,6 +58,10 @@ jobs:
       - name: apply CRD, RBAC, and operator
         run: |
           kubectl apply -f operator/config/crd/litemlflow.yaml
+          # Namespace must exist before the namespaced ServiceAccount in rbac/.
+          # manager.yaml also declares it (idempotent under apply); create it
+          # up front so the rbac apply doesn't fail with NotFound.
+          kubectl create namespace litemlflow-system --dry-run=client -o yaml | kubectl apply -f -
           kubectl apply -f operator/config/rbac/
           kubectl apply -f operator/config/manager/manager.yaml
           # Patch the operator image to the locally loaded ci tag.

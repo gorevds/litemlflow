@@ -325,6 +325,16 @@ func DesiredStatefulSet(lmf *litemlflowv1alpha1.LiteMLflow) *appsv1.StatefulSet 
 					Labels: selectorLabels(lmf),
 				},
 				Spec: corev1.PodSpec{
+					// The image runs as distroless nonroot (UID/GID 65532).
+					// fsGroup makes the kubelet chown the mounted data PVC to
+					// that group so the SQLite store is writable; without it the
+					// container cannot create /data and crash-loops.
+					SecurityContext: &corev1.PodSecurityContext{
+						RunAsNonRoot: ptrBool(true),
+						RunAsUser:    ptrInt64(65532),
+						RunAsGroup:   ptrInt64(65532),
+						FSGroup:      ptrInt64(65532),
+					},
 					Containers: []corev1.Container{
 						{
 							Name:            "litemlflow",
@@ -486,6 +496,9 @@ func commonLabels(lmf *litemlflowv1alpha1.LiteMLflow) map[string]string {
 		"app.kubernetes.io/version":    lmf.Spec.Version,
 	}
 }
+
+func ptrBool(b bool) *bool    { return &b }
+func ptrInt64(i int64) *int64 { return &i }
 
 func selectorLabels(lmf *litemlflowv1alpha1.LiteMLflow) map[string]string {
 	return map[string]string{

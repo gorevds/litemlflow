@@ -103,3 +103,20 @@ func TestReconcileContinuesOnMissingSecret(t *testing.T) {
 		t.Error("expected a MissingSecret condition when the referenced Secret is absent")
 	}
 }
+
+func TestDesiredStatefulSetSetsNonrootSecurityContext(t *testing.T) {
+	ss := DesiredStatefulSet(minimalLMF("sec", "ns", "v1.0.0"))
+	sc := ss.Spec.Template.Spec.SecurityContext
+	if sc == nil {
+		t.Fatal("pod SecurityContext is nil; the distroless nonroot image needs fsGroup to write the data PVC")
+	}
+	if sc.FSGroup == nil || *sc.FSGroup != 65532 {
+		t.Errorf("FSGroup = %v, want 65532 (so the kubelet chowns the data PVC for the nonroot user)", sc.FSGroup)
+	}
+	if sc.RunAsNonRoot == nil || !*sc.RunAsNonRoot {
+		t.Error("RunAsNonRoot should be true")
+	}
+	if sc.RunAsUser == nil || *sc.RunAsUser != 65532 {
+		t.Errorf("RunAsUser = %v, want 65532", sc.RunAsUser)
+	}
+}
