@@ -31,6 +31,17 @@ func validateWebhookURL(rawURL string) error {
 	if webhooks.IsEchoURL(rawURL) {
 		return nil
 	}
+	return validateOutboundURL(rawURL)
+}
+
+// validateOutboundURL is the shared SSRF guard for any server-initiated
+// outbound HTTP(S) request target — webhooks AND federation peers
+// (independent-review finding 2.3: peer URLs were previously stored verbatim
+// with no validation). It rejects non-http(s) schemes and hosts that resolve
+// to private/loopback/link-local addresses (including the cloud-metadata
+// endpoint). The LITEMLFLOW_WEBHOOK_ALLOW_PRIVATE=1 override disables the check
+// for legitimate intra-cluster delivery.
+func validateOutboundURL(rawURL string) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return fmt.Errorf("invalid url: %w", err)
@@ -63,12 +74,11 @@ func validateWebhookURL(rawURL string) error {
 	}
 	for _, ipa := range ips {
 		if isBlockedIP(ipa.IP) {
-			return fmt.Errorf("webhook url resolves to a blocked address (%s); set LITEMLFLOW_WEBHOOK_ALLOW_PRIVATE=1 to override", ipa.IP)
+			return fmt.Errorf("url resolves to a blocked address (%s); set LITEMLFLOW_WEBHOOK_ALLOW_PRIVATE=1 to override", ipa.IP)
 		}
 	}
 	return nil
 }
-
 
 // isBlockedIP returns true for loopback (127.0.0.0/8, ::1), link-local
 // (169.254.0.0/16, fe80::/10 — including AWS metadata 169.254.169.254),
@@ -109,12 +119,12 @@ func (h *Handler) mountWebhookRoutes(r chi.Router) {
 // ---- webhook CRUD -----------------------------------------------------------
 
 type createWebhookReq struct {
-	Name         string  `json:"name"`
-	URL          string  `json:"url"`
-	Events       string  `json:"events"`
-	ExperimentID *int64  `json:"experiment_id,omitempty"`
-	Secret       string  `json:"secret,omitempty"`
-	Enabled      *bool   `json:"enabled,omitempty"`
+	Name         string `json:"name"`
+	URL          string `json:"url"`
+	Events       string `json:"events"`
+	ExperimentID *int64 `json:"experiment_id,omitempty"`
+	Secret       string `json:"secret,omitempty"`
+	Enabled      *bool  `json:"enabled,omitempty"`
 }
 
 func workspaceFromReq(r *http.Request) string {
@@ -149,17 +159,17 @@ func (h *Handler) ListWebhooks(w http.ResponseWriter, r *http.Request) {
 // the API surface. Locking down the wire shape before v2.0 freeze.
 
 type webhookDTO struct {
-	ID            int64  `json:"id"`
-	Name          string `json:"name"`
-	URL           string `json:"url"`
-	Events        string `json:"events"`
-	ExperimentID  *int64 `json:"experiment_id,omitempty"`
-	WorkspaceID   string `json:"workspace_id"`
-	HasSecret     bool   `json:"has_secret"`
-	CreatedAt     int64  `json:"created_at"`
-	LastStatus    *int   `json:"last_status,omitempty"`
-	LastAttempt   *int64 `json:"last_attempt,omitempty"`
-	Enabled       bool   `json:"enabled"`
+	ID           int64  `json:"id"`
+	Name         string `json:"name"`
+	URL          string `json:"url"`
+	Events       string `json:"events"`
+	ExperimentID *int64 `json:"experiment_id,omitempty"`
+	WorkspaceID  string `json:"workspace_id"`
+	HasSecret    bool   `json:"has_secret"`
+	CreatedAt    int64  `json:"created_at"`
+	LastStatus   *int   `json:"last_status,omitempty"`
+	LastAttempt  *int64 `json:"last_attempt,omitempty"`
+	Enabled      bool   `json:"enabled"`
 }
 
 func webhookToDTO(wh *model.Webhook) webhookDTO {
@@ -289,14 +299,14 @@ func (h *Handler) TestWebhook(w http.ResponseWriter, r *http.Request) {
 	// Build a synthetic run.
 	now := time.Now().UnixMilli()
 	syntheticRun := &model.Run{
-		ID:           "test-synthetic-run",
-		ExperimentID: 0,
-		Name:         "synthetic test run",
-		Status:       model.StatusFinished,
-		StartTime:    now - 1000,
-		ArtifactURI:  "mlflow-artifacts:/test",
+		ID:             "test-synthetic-run",
+		ExperimentID:   0,
+		Name:           "synthetic test run",
+		Status:         model.StatusFinished,
+		StartTime:      now - 1000,
+		ArtifactURI:    "mlflow-artifacts:/test",
 		LifecycleStage: model.LifecycleActive,
-		Kind:         model.KindClassic,
+		Kind:           model.KindClassic,
 	}
 	if wh.ExperimentID != nil {
 		syntheticRun.ExperimentID = *wh.ExperimentID
@@ -492,4 +502,3 @@ func (h *Handler) SaveDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, d)
 }
-

@@ -87,6 +87,14 @@ func (h *Handler) AddPeer(w http.ResponseWriter, r *http.Request) {
 		writeMissingField(w, "name+url")
 		return
 	}
+	// SSRF guard: a peer URL is server-initiated outbound traffic (echo,
+	// federated search fan-out), so it must pass the same validation as a
+	// webhook URL — otherwise an operator (or, in open mode, anyone) could
+	// point federation at internal services or the cloud-metadata endpoint.
+	if err := validateOutboundURL(req.URL); err != nil {
+		writeError(w, http.StatusBadRequest, codeInvalidParameter, err.Error())
+		return
+	}
 	secret := req.Secret
 	if secret == "" {
 		var err error
@@ -177,22 +185,19 @@ func (h *Handler) EchoPeer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	body := []byte(fmt.Sprintf(`{"from":%q,"ts":%d}`, ourName, time.Now().UnixMilli()))
-	resp, respBody, derr := client.Do("POST", "/api/v1/federate/echo", body)
+	resp, _, derr := client.Do("POST", "/api/v1/federate/echo", body)
 	if derr != nil {
 		_ = h.Store.UpdatePeerStatus(r.Context(), id, "error", "echo: "+derr.Error(), 0)
 		writeJSON(w, map[string]any{"status": "error", "error": derr.Error()})
 		return
 	}
 	if resp.StatusCode != http.StatusOK {
-		// Surface the peer's response body so misconfigured secrets / clock-skew
-		// errors are visible to the operator instead of just "HTTP 401". Cap
-		// to 1 KiB — a malicious or misconfigured peer can return arbitrary
-		// content and we don't want to flood the operator's UI / logs.
-		snippet := string(respBody)
-		if len(snippet) > 1024 {
-			snippet = snippet[:1024] + "…"
-		}
-		msg := fmt.Sprintf("peer responded HTTP %d: %s", resp.StatusCode, snippet)
+		// Report only the status code, NOT the peer's response body
+		// (independent-review finding 2.3): reflecting the body back to the
+		// caller turns echo into a limited SSRF read of internal responses.
+		// The status code is enough to diagnose misconfigured secrets (401)
+		// or clock-skew without disclosing arbitrary peer/internal content.
+		msg := fmt.Sprintf("peer responded HTTP %d", resp.StatusCode)
 		_ = h.Store.UpdatePeerStatus(r.Context(), id, "error", msg, 0)
 		writeJSON(w, map[string]any{"status": "error", "error": msg})
 		return
@@ -344,7 +349,7 @@ func (h *Handler) runLocalSearch(ctx context.Context, workspaceID, q, kind strin
 	}
 	if kind == "" || kind == "all" || kind == "experiments" {
 		exps, err := h.Store.SearchExperiments(ctx, store.SearchOptions{
-			Filter: "name LIKE '%" + escapeLikeBangSafe(q) + "%'",
+			Filter:     "name LIKE '%" + escapeLikeBangSafe(q) + "%'",
 			MaxResults: max, WorkspaceID: workspaceID,
 		})
 		if err == nil {
@@ -432,7 +437,7 @@ func (h *Handler) federatedFanOut(ctx context.Context, workspaceID, q, kind stri
 			if h.FederationCache != nil {
 				if cached, ok := h.FederationCache.Get(federation.Key(p.ID, cacheKey)); ok {
 					var hit struct {
-						Instance string         `json:"instance"`
+						Instance string             `json:"instance"`
 						Results  []searchResultItem `json:"results"`
 					}
 					if err := json.Unmarshal(cached, &hit); err == nil {
@@ -460,7 +465,7 @@ func (h *Handler) federatedFanOut(ctx context.Context, workspaceID, q, kind stri
 				return
 			}
 			var got struct {
-				Instance string         `json:"instance"`
+				Instance string             `json:"instance"`
 				Results  []searchResultItem `json:"results"`
 			}
 			if err := json.Unmarshal(payload, &got); err != nil {

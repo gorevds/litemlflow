@@ -44,6 +44,10 @@ type fedNode struct {
 // peers can identify it.
 func startFedNode(t *testing.T, name string) *fedNode {
 	t.Helper()
+	// Federation acceptance tests register peers at loopback (httptest)
+	// addresses, which the SSRF guard (independent-review 2.3) blocks unless
+	// the operator opts in. Setenv requires these tests to run non-parallel.
+	t.Setenv("LITEMLFLOW_WEBHOOK_ALLOW_PRIVATE", "1")
 	ts, _ := newTestServer(t, config.Config{FederationName: name})
 	return &fedNode{name: name, ts: ts}
 }
@@ -174,11 +178,53 @@ func createPrompt(t *testing.T, node *fedNode, name string) {
 	}
 }
 
+// TestFederationAddPeerRejectsSSRF guards independent-review finding 2.3:
+// peer URLs were stored verbatim with no SSRF validation, so AddPeer could be
+// pointed at the cloud-metadata endpoint or internal services. Without the
+// allow-private override these must be rejected at registration with 400.
+// (Uses newTestServer directly — NOT startFedNode — so the override is unset.)
+func TestFederationAddPeerRejectsSSRF(t *testing.T) {
+	ts, _ := newTestServer(t, config.Config{FederationName: "lmf-guard"})
+	// Use only literal IPs so the assertions are hermetic: Go resolves literal
+	// IPs without a DNS lookup, and validateOutboundURL fails open on resolve
+	// errors — a hostname case would be non-deterministic in offline CI.
+	for _, badURL := range []string{
+		"http://169.254.169.254/latest/meta-data/", // cloud metadata
+		"http://127.0.0.1:9999/",                   // loopback
+		"http://10.0.0.5/admin",                    // RFC1918
+	} {
+		body := fmt.Sprintf(`{"name":"evil","url":%q}`, badURL)
+		resp, err := http.Post(ts.URL+"/api/v1/federate/peers",
+			"application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("post %s: %v", badURL, err)
+		}
+		raw, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("AddPeer(%s): want 400, got %d: %s", badURL, resp.StatusCode, raw)
+		}
+	}
+
+	// A public address must still be accepted (positive control). Literal
+	// public IP keeps the test hermetic — no DNS dependency.
+	body := `{"name":"ok","url":"http://93.184.216.34/"}`
+	resp, err := http.Post(ts.URL+"/api/v1/federate/peers",
+		"application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("post good url: %v", err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("AddPeer(public url): want 200, got %d: %s", resp.StatusCode, raw)
+	}
+}
+
 // TestFederationSearchPrompts guards v1.3 deferred item M6: a federated
 // search with kind=prompts (or default kind=all) returns prompt hits from
 // peers, not just runs/experiments.
 func TestFederationSearchPrompts(t *testing.T) {
-	t.Parallel()
 	a := startFedNode(t, "lmf-prom-A")
 	b := startFedNode(t, "lmf-prom-B")
 	sec := strings.Repeat("ab", 32)
@@ -203,7 +249,6 @@ func TestFederationSearchPrompts(t *testing.T) {
 
 // TestFederationAcceptance — the headline: 3 instances, federated search.
 func TestFederationAcceptance(t *testing.T) {
-	t.Parallel()
 	a := startFedNode(t, "lmf-A")
 	b := startFedNode(t, "lmf-B")
 	c := startFedNode(t, "lmf-C")
@@ -263,7 +308,6 @@ func TestFederationAcceptance(t *testing.T) {
 // request must return the same opaque error body so an attacker cannot
 // enumerate registered peer names by error shape.
 func TestFederationDoesNotLeakPeerNames(t *testing.T) {
-	t.Parallel()
 	a := startFedNode(t, "lmf-leak-A")
 	b := startFedNode(t, "lmf-leak-B")
 	good := strings.Repeat("ab", 32)
@@ -303,7 +347,6 @@ func TestFederationDoesNotLeakPeerNames(t *testing.T) {
 // TestFederationRejectsBadHMAC ensures a peer with the wrong secret can't
 // invoke /api/v1/federate/search.
 func TestFederationRejectsBadHMAC(t *testing.T) {
-	t.Parallel()
 	a := startFedNode(t, "lmf-A-rej")
 	b := startFedNode(t, "lmf-B-rej")
 	good := strings.Repeat("ee", 32)
