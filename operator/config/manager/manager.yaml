@@ -28,6 +28,13 @@ spec:
       terminationGracePeriodSeconds: 10
       securityContext:
         runAsNonRoot: true
+        # The image's USER is the non-numeric name "nonroot"; the kubelet
+        # cannot verify runAsNonRoot from a name, so pin the numeric UID/GID
+        # (distroless nonroot = 65532) — otherwise CreateContainerConfigError.
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: manager
           # Replace with your pushed image, e.g.:
