@@ -5,7 +5,8 @@
 //
 // Key layout: <Prefix>artifacts/<runID>/<relPath>
 // Addressing:  path-style (default for any non-amazonaws.com endpoint)
-//              virtual-hosted for amazonaws.com
+//
+//	virtual-hosted for amazonaws.com
 package artifact
 
 import (
@@ -433,11 +434,11 @@ func (s *S3Store) List(runID, dir string) ([]ListEntry, error) {
 		Prefix string `xml:"Prefix"`
 	}
 	type xmlListResp struct {
-		XMLName        xml.Name     `xml:"ListBucketResult"`
+		XMLName        xml.Name      `xml:"ListBucketResult"`
 		Contents       []xmlContents `xml:"Contents"`
-		CommonPrefixes []xmlPrefix  `xml:"CommonPrefixes"`
-		IsTruncated    bool         `xml:"IsTruncated"`
-		NextToken      string       `xml:"NextContinuationToken"`
+		CommonPrefixes []xmlPrefix   `xml:"CommonPrefixes"`
+		IsTruncated    bool          `xml:"IsTruncated"`
+		NextToken      string        `xml:"NextContinuationToken"`
 	}
 
 	var entries []ListEntry
@@ -687,10 +688,10 @@ func (s *S3Store) listAllKeys(prefix string) ([]string, error) {
 		Key string `xml:"Key"`
 	}
 	type xmlResp struct {
-		XMLName     xml.Name     `xml:"ListBucketResult"`
+		XMLName     xml.Name      `xml:"ListBucketResult"`
 		Contents    []xmlContents `xml:"Contents"`
-		IsTruncated bool         `xml:"IsTruncated"`
-		NextToken   string       `xml:"NextContinuationToken"`
+		IsTruncated bool          `xml:"IsTruncated"`
+		NextToken   string        `xml:"NextContinuationToken"`
 	}
 
 	var keys []string

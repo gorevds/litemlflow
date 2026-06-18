@@ -263,7 +263,7 @@ func (h *Handler) GetDatasetLineage(w http.ResponseWriter, r *http.Request) {
 // becomes '_'.
 //
 // For non-ASCII original names a future revision can emit
-// `filename*=UTF-8''<percent-encoded>` per RFC 5987; the strict ASCII
+// `filename*=UTF-8”<percent-encoded>` per RFC 5987; the strict ASCII
 // fallback is enough for v1.2.
 func sanitizeFilename(name string) string {
 	var b strings.Builder

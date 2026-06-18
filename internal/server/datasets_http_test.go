@@ -236,7 +236,10 @@ func TestDatasetLineage(t *testing.T) {
 	defer resp.Body.Close()
 	var lin struct {
 		Self      struct{ Name string }
-		Ancestors []struct{ ID int64; Name string }
+		Ancestors []struct {
+			ID   int64
+			Name string
+		}
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&lin)
 	if lin.Self.Name != "child" {

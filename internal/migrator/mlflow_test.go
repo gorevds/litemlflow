@@ -175,7 +175,7 @@ func TestCollectMetricKeys(t *testing.T) {
 // MLflow REST API sufficient for the importer.
 type fakeMLflow struct {
 	experiments []mlflowExperiment
-	runs        map[string][]mlflowRun   // keyed by experiment_id
+	runs        map[string][]mlflowRun    // keyed by experiment_id
 	history     map[string][]mlflowMetric // keyed by "run_id:key"
 	artifacts   map[string]string         // keyed by "run_id/path" → content
 }
@@ -383,7 +383,6 @@ func (s *inMemStore) UpdateRun(_ context.Context, id string, status *string, end
 }
 
 // Stub out every other Store method so inMemStore satisfies the interface.
-
 
 // inMemArtifactStore records uploaded artifacts.
 type inMemArtifactStore struct {

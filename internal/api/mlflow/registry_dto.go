@@ -10,11 +10,11 @@ import (
 
 // registeredModelDTO mirrors mlflow.entities.RegisteredModel wire shape.
 type registeredModelDTO struct {
-	Name           string    `json:"name"`
-	CreationTime   int64     `json:"creation_timestamp"`
-	LastUpdateTime int64     `json:"last_updated_timestamp"`
-	Description    string    `json:"description,omitempty"`
-	LatestVersions []mvDTO   `json:"latest_versions,omitempty"`
+	Name           string     `json:"name"`
+	CreationTime   int64      `json:"creation_timestamp"`
+	LastUpdateTime int64      `json:"last_updated_timestamp"`
+	Description    string     `json:"description,omitempty"`
+	LatestVersions []mvDTO    `json:"latest_versions,omitempty"`
 	Tags           []mvTagDTO `json:"tags,omitempty"`
 	Aliases        []aliasDTO `json:"aliases,omitempty"`
 }

@@ -122,11 +122,11 @@ func TestCASInvalidHash(t *testing.T) {
 	t.Parallel()
 	store, _ := NewFilesystemCAS(t.TempDir())
 	cases := []string{
-		"",                              // empty
-		"too-short",                     // wrong length
-		strings.Repeat("z", 64),         // non-hex char
-		strings.Repeat("AA", 32),        // uppercase rejected
-		strings.Repeat("a", 63) + "/",   // path-traversal attempt
+		"",                            // empty
+		"too-short",                   // wrong length
+		strings.Repeat("z", 64),       // non-hex char
+		strings.Repeat("AA", 32),      // uppercase rejected
+		strings.Repeat("a", 63) + "/", // path-traversal attempt
 	}
 	for _, h := range cases {
 		if _, err := store.Has(h); err == nil {

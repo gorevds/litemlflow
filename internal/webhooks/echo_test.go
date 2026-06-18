@@ -16,7 +16,7 @@ func TestIsEchoURL(t *testing.T) {
 		{"lmf://echo/", true},
 		{"lmf://echo/anything", true},
 		{"lmf://echo/sub/path?q=1", true},
-		{"lmf://echofoo", false},        // closing the M1 review-finding loop
+		{"lmf://echofoo", false}, // closing the M1 review-finding loop
 		{"lmf://echo@evil.com:80/", false},
 		{"https://example.com/lmf://echo", false},
 		{"http://lmf://echo", false},

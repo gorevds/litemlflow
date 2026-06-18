@@ -16,9 +16,9 @@ import (
 
 // Errors.
 var (
-	ErrNotFound       = errors.New("artifact not found")
-	ErrInvalidPath    = errors.New("invalid artifact path")
-	ErrPayloadTooBig  = errors.New("artifact payload exceeds max size")
+	ErrNotFound      = errors.New("artifact not found")
+	ErrInvalidPath   = errors.New("invalid artifact path")
+	ErrPayloadTooBig = errors.New("artifact payload exceeds max size")
 )
 
 // Store is the artifact persistence interface.
@@ -61,9 +61,9 @@ func NewFilesystemStore(root string) (*FilesystemStore, error) {
 // Upload writes an artifact under the run's directory.
 //
 // Path traversal is prevented by:
-//   1. Cleaning the path with filepath.Clean.
-//   2. Rejecting absolute paths and any cleaned path that escapes the root
-//      via the prefix check after Abs resolution.
+//  1. Cleaning the path with filepath.Clean.
+//  2. Rejecting absolute paths and any cleaned path that escapes the root
+//     via the prefix check after Abs resolution.
 func (f *FilesystemStore) Upload(runID, relPath string, r io.Reader, maxSize int64) error {
 	abs, err := f.absoluteFor(runID, relPath)
 	if err != nil {

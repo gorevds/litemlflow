@@ -47,8 +47,8 @@ type Stats struct {
 	// Skipped counts runs the importer chose not to (re-)import: either
 	// they were already present in the target store (idempotent re-run) or
 	// the import of that single run failed and we logged-and-continued.
-	Skipped     int
-	Elapsed     time.Duration
+	Skipped int
+	Elapsed time.Duration
 }
 
 // MLflowImporter copies experiments, runs, metrics, params, tags, and

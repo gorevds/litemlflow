@@ -37,7 +37,7 @@ type Server struct {
 // trusted-network deployments.
 func defaultGRPCOptions() []grpc.ServerOption {
 	return []grpc.ServerOption{
-		grpc.MaxRecvMsgSize(64 * 1024 * 1024),  // 64 MiB
+		grpc.MaxRecvMsgSize(64 * 1024 * 1024), // 64 MiB
 		grpc.MaxSendMsgSize(64 * 1024 * 1024),
 		grpc.MaxConcurrentStreams(1024),
 	}

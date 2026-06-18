@@ -20,21 +20,21 @@ type Standard struct {
 	HTTPRequestDurationSeconds *Histogram
 
 	// Business events
-	RunsCreatedTotal    *Counter
-	MetricsLoggedTotal  *Counter
+	RunsCreatedTotal   *Counter
+	MetricsLoggedTotal *Counter
 
 	// Resource gauges (refreshed on /metrics fetch)
-	ActiveSessions  *Gauge
-	DBSizeBytes     *Gauge
+	ActiveSessions *Gauge
+	DBSizeBytes    *Gauge
 
 	// Build info (always 1)
 	BuildInfo *Gauge
 
 	// Process gauges
-	ProcessCPUSecondsTotal    *Gauge
-	ProcessResidentMemBytes   *Gauge
-	ProcessOpenFDs            *Gauge
-	ProcessGoroutines         *Gauge
+	ProcessCPUSecondsTotal  *Gauge
+	ProcessResidentMemBytes *Gauge
+	ProcessOpenFDs          *Gauge
+	ProcessGoroutines       *Gauge
 
 	// dbPath is stored so RefreshProcess can stat the db file.
 	dbPath string

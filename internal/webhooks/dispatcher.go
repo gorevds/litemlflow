@@ -91,10 +91,10 @@ type Dispatcher struct {
 }
 
 const (
-	queueCapacity  = 1024
-	maxWorkers     = 8
-	maxRetries     = 3
-	retryBase      = time.Second
+	queueCapacity   = 1024
+	maxWorkers      = 8
+	maxRetries      = 3
+	retryBase       = time.Second
 	retryMultiplier = 5 // 1s, 5s, 25s
 )
 

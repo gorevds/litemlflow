@@ -145,7 +145,11 @@ func TestMlflowLogBatch_TooManyMetrics(t *testing.T) {
 	_, runRaw := mustPostJSON(t, ts.URL+"/api/2.0/mlflow/runs/create",
 		fmt.Sprintf(`{"experiment_id":"%s"}`, ce.ExperimentID))
 	var cr struct {
-		Run struct{ Info struct{ RunID string `json:"run_id"` } } `json:"run"`
+		Run struct {
+			Info struct {
+				RunID string `json:"run_id"`
+			}
+		} `json:"run"`
 	}
 	_ = json.Unmarshal(runRaw, &cr)
 	runID := cr.Run.Info.RunID
@@ -230,12 +234,18 @@ func TestMlflowLogInputs_EmptyDatasets(t *testing.T) {
 
 	// Set up an experiment + run.
 	_, raw := mustPostJSON(t, ts.URL+"/api/2.0/mlflow/experiments/create", `{"name":"li-empty"}`)
-	var ce struct{ ExperimentID string `json:"experiment_id"` }
+	var ce struct {
+		ExperimentID string `json:"experiment_id"`
+	}
 	_ = json.Unmarshal(raw, &ce)
 	_, runRaw := mustPostJSON(t, ts.URL+"/api/2.0/mlflow/runs/create",
 		fmt.Sprintf(`{"experiment_id":"%s"}`, ce.ExperimentID))
 	var cr struct {
-		Run struct{ Info struct{ RunID string `json:"run_id"` } } `json:"run"`
+		Run struct {
+			Info struct {
+				RunID string `json:"run_id"`
+			}
+		} `json:"run"`
 	}
 	_ = json.Unmarshal(runRaw, &cr)
 

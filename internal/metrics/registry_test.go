@@ -150,10 +150,10 @@ func TestHistogramBuckets(t *testing.T) {
 	)
 
 	// Observe a value exactly at a bucket boundary.
-	h.Observe(0.1)   // lands in ≤0.1, ≤0.5, ≤1.0 buckets
-	h.Observe(0.5)   // lands in ≤0.5, ≤1.0 buckets (not ≤0.1)
-	h.Observe(0.05)  // lands in ≤0.1, ≤0.5, ≤1.0 buckets
-	h.Observe(2.0)   // lands only in +Inf
+	h.Observe(0.1)  // lands in ≤0.1, ≤0.5, ≤1.0 buckets
+	h.Observe(0.5)  // lands in ≤0.5, ≤1.0 buckets (not ≤0.1)
+	h.Observe(0.05) // lands in ≤0.1, ≤0.5, ≤1.0 buckets
+	h.Observe(2.0)  // lands only in +Inf
 
 	var buf bytes.Buffer
 	if err := reg.WriteText(&buf); err != nil {

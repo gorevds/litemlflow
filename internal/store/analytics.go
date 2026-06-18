@@ -182,9 +182,9 @@ func (q *AnalyticsQuery) Validate() error {
 //
 // Execution strategy:
 //   - max/min  →  one GROUP BY scan to get aggregate + run_count per group,
-//                 then ONE indexed lookup per group to resolve a representative
-//                 run id. Total cost: O(N) + O(K) where N is the filtered
-//                 metric count and K is the result groups (capped at q.Limit).
+//     then ONE indexed lookup per group to resolve a representative
+//     run id. Total cost: O(N) + O(K) where N is the filtered
+//     metric count and K is the result groups (capped at q.Limit).
 //   - avg/last →  single GROUP BY scan; best-run columns stay NULL.
 //
 // The single-pass-with-window-functions approach was tried and measured

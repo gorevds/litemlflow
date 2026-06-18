@@ -83,14 +83,14 @@ func validOTLPBody() []byte {
 					{
 						"spans": []map[string]any{
 							{
-								"traceId":            "abc123",
-								"spanId":             "span001",
-								"name":               "test-span",
-								"kind":               2,
-								"startTimeUnixNano":  "1000000000",
-								"endTimeUnixNano":    "2000000000",
-								"attributes":         []map[string]any{},
-								"status":             map[string]any{"code": 1, "message": "OK"},
+								"traceId":           "abc123",
+								"spanId":            "span001",
+								"name":              "test-span",
+								"kind":              2,
+								"startTimeUnixNano": "1000000000",
+								"endTimeUnixNano":   "2000000000",
+								"attributes":        []map[string]any{},
+								"status":            map[string]any{"code": 1, "message": "OK"},
 							},
 						},
 					},

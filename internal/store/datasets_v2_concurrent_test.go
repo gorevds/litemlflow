@@ -38,7 +38,7 @@ func TestLogInputsConcurrentMirror(t *testing.T) {
 	const N = 8
 	input := []model.DatasetInput{{
 		Dataset: model.Dataset{
-			Name:   "shared",
+			Name: "shared",
 			Digest: "deadbeef" + "deadbeef" + "deadbeef" + "deadbeef" +
 				"deadbeef" + "deadbeef" + "deadbeef" + "deadbeef",
 			Source: "s3://x/y",

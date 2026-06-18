@@ -1,7 +1,8 @@
 // prompt_data_source.go — read-only data source for litemlflow_prompt.
 // Can read the latest version or a specific version:
-//   GET /api/v1/prompts/{name}            (version = 0 or unset → latest)
-//   GET /api/v1/prompts/{name}/versions/N  (specific version)
+//
+//	GET /api/v1/prompts/{name}            (version = 0 or unset → latest)
+//	GET /api/v1/prompts/{name}/versions/N  (specific version)
 package provider
 
 import (
