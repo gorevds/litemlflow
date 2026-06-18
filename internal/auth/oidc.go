@@ -58,6 +58,9 @@ type Provider struct {
 	mu           sync.RWMutex
 	discoveryDoc *oidcDiscovery
 	jwks         *jwksCache
+	// discoveryMu single-flights EnsureDiscovery so concurrent callers don't
+	// each fetch the discovery doc + JWKS.
+	discoveryMu sync.Mutex
 }
 
 type oidcDiscovery struct {
@@ -106,6 +109,22 @@ func (p *Provider) EnsureDiscovery(ctx context.Context) error {
 	if already {
 		return nil
 	}
+
+	// Single-flight the discovery+JWKS fetch: without this, N concurrent
+	// callers all pass the check above and each performs the network fetch
+	// (independent-review). A dedicated mutex (not p.mu, which guards the
+	// cached fields) serialises the fetch; the double-check inside means only
+	// the first caller fetches and the rest return the cached result. On
+	// failure the lock is released so a later caller retries (unlike sync.Once).
+	p.discoveryMu.Lock()
+	defer p.discoveryMu.Unlock()
+	p.mu.RLock()
+	already = p.discoveryDoc != nil
+	p.mu.RUnlock()
+	if already {
+		return nil
+	}
+
 	if err := requireSecureURL("issuer", p.issuer); err != nil {
 		return err
 	}
