@@ -268,6 +268,12 @@ func TestEventsPruneBeforeRemovesOlderRows(t *testing.T) {
 	if err := st.SetTag(ctx, r.ID, model.KV{Key: "k", Value: "v1"}); err != nil {
 		t.Fatal(err)
 	}
+	// Sleep BEFORE capturing the cutoff so event A's millisecond timestamp is
+	// strictly less than cutoff. Without this, SetTag and time.Now() land in
+	// the same millisecond on a fast machine, leaving A == cutoff; since
+	// PruneEventsBefore deletes ts_ms < cutoff, A is not pruned (the test then
+	// fails consistently rather than flakily).
+	time.Sleep(10 * time.Millisecond)
 	cutoff := time.Now().UnixMilli()
 	time.Sleep(10 * time.Millisecond)
 
