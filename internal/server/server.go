@@ -131,9 +131,12 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Server, 
 func (s *Server) Run(ctx context.Context) error {
 	errCh := make(chan error, 2)
 
-	// Start the background janitor if enabled.
+	// Start the background janitor if enabled. stopJanitor cancels it and
+	// waits for the goroutine to exit; it must run before store.Close() so a
+	// tick in flight cannot hit a closed database.
+	stopJanitor := func() {}
 	if s.cfg.JanitorEnabled {
-		StartJanitor(ctx, s.store, s.cfg.JanitorInterval, s.cfg.RunStaleAfter, s.cfg.EventsRetention, s.logger)
+		stopJanitor = StartJanitor(ctx, s.store, s.cfg.JanitorInterval, s.cfg.RunStaleAfter, s.cfg.EventsRetention, s.logger)
 	}
 
 	// Start HTTP server.
@@ -165,6 +168,7 @@ func (s *Server) Run(ctx context.Context) error {
 		if s.grpcSrv != nil {
 			s.grpcSrv.Stop()
 		}
+		stopJanitor() // cancel + await the janitor before closing the store
 		_ = s.store.Close()
 	}
 
