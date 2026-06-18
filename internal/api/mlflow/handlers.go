@@ -631,10 +631,26 @@ func (h *Handler) SearchRuns(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", err.Error())
 		return
 	}
+	// as_of correctness (independent-review 2.6): the store evaluates filter,
+	// order_by and lifecycle against CURRENT run state, but as_of renders the
+	// historical state. So with as_of we (a) reject filter/order_by — they
+	// would silently apply to today's values, not the values at as_of — and
+	// (b) force lifecycle "all" so a run that was active at as_of but has since
+	// been deleted is still a candidate (it would otherwise be dropped by the
+	// current-state active filter before reconstruction).
+	stage := mapViewType(req.ViewType)
+	if asOf > 0 {
+		if req.Filter != "" || len(req.OrderBy) > 0 {
+			writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE",
+				"filter and order_by are not supported together with as_of (they would be evaluated against current run state, not the state at as_of)")
+			return
+		}
+		stage = "all"
+	}
 	res, err := h.Store.SearchRuns(r.Context(), store.SearchOptions{
 		ExperimentIDs:  expIDs,
 		Filter:         req.Filter,
-		LifecycleStage: mapViewType(req.ViewType),
+		LifecycleStage: stage,
 		MaxResults:     req.MaxResults,
 		OrderBy:        req.OrderBy,
 		PageToken:      req.PageToken,
