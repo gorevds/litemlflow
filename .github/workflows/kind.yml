@@ -79,9 +79,18 @@ jobs:
 
       - name: smoke /healthz inside the cluster
         run: |
+          # The image is distroless (no shell/wget/curl), so we can't exec a
+          # client inside the pod — port-forward and curl from the runner.
           POD=$(kubectl get pod -l app.kubernetes.io/name=litemlflow -o jsonpath='{.items[0].metadata.name}')
-          kubectl exec "$POD" -- wget -q -O- http://127.0.0.1:5000/healthz | grep -q '"ok":true'
-          echo "kind smoke passed"
+          kubectl port-forward "pod/$POD" 18080:5000 >/tmp/pf.log 2>&1 &
+          PF=$!
+          ok=
+          for _ in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:18080/healthz | grep -q '"ok":true'; then ok=1; break; fi
+            sleep 0.5
+          done
+          kill "$PF" 2>/dev/null || true
+          test -n "$ok" && echo "kind smoke passed"
 
       - name: dump diagnostics on failure
         if: failure()
