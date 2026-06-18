@@ -22,16 +22,38 @@ PRICING: dict[str, tuple[float, float]] = {
 }
 
 
+def _rates(model: str) -> tuple[float, float]:
+    """Resolve (input, output) USD/1M rates for a model name.
+
+    Real SDKs emit dated/versioned IDs ("gpt-4o-2024-08-06") and
+    provider-prefixed IDs ("openai/gpt-4o"), which an exact-match table misses.
+    Resolution order: exact match -> strip a leading "provider/" and match
+    exact -> longest known base name that is a prefix of the (de-prefixed)
+    model. Genuinely unknown models fall through to (0.0, 0.0).
+    """
+    if model in PRICING:
+        return PRICING[model]
+    name = model.rsplit("/", 1)[-1]  # strip "provider/" if present
+    if name in PRICING:
+        return PRICING[name]
+    best = ""
+    for key in PRICING:
+        if name.startswith(key) and len(key) > len(best):
+            best = key
+    return PRICING[best] if best else (0.0, 0.0)
+
+
 def cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
     """Compute USD cost for a given model and token counts.
 
     Args:
-        model: Model name (e.g., "gpt-4o-mini").
+        model: Model name (e.g., "gpt-4o-mini"). Dated/versioned and
+            provider-prefixed variants resolve to their base price; see _rates.
         prompt_tokens: Number of input/prompt tokens consumed.
         completion_tokens: Number of output/completion tokens generated.
 
     Returns:
         Cost in USD. Returns 0.0 if the model is not in the pricing table.
     """
-    pin, pout = PRICING.get(model, (0.0, 0.0))
+    pin, pout = _rates(model)
     return (prompt_tokens / 1_000_000) * pin + (completion_tokens / 1_000_000) * pout
