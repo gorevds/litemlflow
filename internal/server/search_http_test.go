@@ -279,3 +279,20 @@ func TestSearchMalformedPageTokenIs400(t *testing.T) {
 		}
 	}
 }
+
+// TestMLflowToleratesUnknownFields guards independent-review 2.x: the MLflow
+// REST surface must ignore unknown request fields (protobuf-JSON
+// ignore-unknown-fields semantics) so a newer client is not rejected with 400.
+func TestMLflowToleratesUnknownFields(t *testing.T) {
+	t.Parallel()
+	ts, _ := newTestServer(t, config.Config{})
+	body := `{"name":"fwd-compat-exp","future_field_v99":{"nested":true},"another":42}`
+	resp, err := http.Post(ts.URL+"/api/2.0/mlflow/experiments/create", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("create with unknown fields: want 200 (forward-compat), got %d", resp.StatusCode)
+	}
+}

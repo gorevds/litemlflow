@@ -1157,7 +1157,11 @@ func decodeJSON(r *http.Request, dst any) error {
 		return errors.New("empty body")
 	}
 	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
+	// Tolerate unknown fields: the MLflow REST API is protobuf-JSON with
+	// ignore-unknown-fields semantics, so a newer client that sends a field
+	// this server version doesn't know (e.g. model_id, dataset_name) must not
+	// get a 400 (independent-review: DisallowUnknownFields broke forward-compat
+	// and diverged from the native surface, which already tolerates them).
 	if err := dec.Decode(dst); err != nil && !errors.Is(err, io.EOF) {
 		return err
 	}
