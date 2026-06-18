@@ -55,7 +55,7 @@ type Provider struct {
 	redirectURL  string
 	scopes       []string
 
-	mu          sync.RWMutex
+	mu           sync.RWMutex
 	discoveryDoc *oidcDiscovery
 	jwks         *jwksCache
 }
@@ -421,6 +421,15 @@ func (p *Provider) resolveKey(kid string) (*rsa.PublicKey, error) {
 
 	for _, k := range cache.keys {
 		if k.Kty != "RSA" {
+			continue
+		}
+		// Only consider signing keys for RS256 (independent-review). When the
+		// IdP labels its keys, skip encryption keys (use!="sig") and non-RS256
+		// algorithms; absent labels are tolerated for IdPs that omit them.
+		if k.Use != "" && k.Use != "sig" {
+			continue
+		}
+		if k.Alg != "" && k.Alg != "RS256" {
 			continue
 		}
 		if kid != "" && k.Kid != kid {
