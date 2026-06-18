@@ -400,6 +400,14 @@ func (h *Handler) CreateModelVersion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "source is required")
 		return
 	}
+	// If a run is linked, it must live in the caller's workspace — otherwise a
+	// model version could reference (and leak the existence of) a foreign run.
+	if req.RunID != "" {
+		if err := h.ensureRunInWorkspace(r, req.RunID); err != nil {
+			writeStoreErr(w, err)
+			return
+		}
+	}
 	mv, err := h.Store.CreateModelVersion(r.Context(), currentWorkspace(r), &model.ModelVersion{
 		Name:        req.Name,
 		Source:      req.Source,

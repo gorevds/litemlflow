@@ -83,6 +83,18 @@ func currentWorkspace(r *http.Request) string {
 	return "default"
 }
 
+// ensureRunInWorkspace returns ErrNotFound (→404) when the run does not exist
+// or belongs to a different workspace. The run_id-addressed endpoints
+// (runs/get, runs/update, runs/log-*, runs/set-tag, …) otherwise looked runs
+// up by id alone, so a caller in workspace B could read or mutate a workspace-A
+// run by guessing its id — the cross-tenant gap the native API already closes.
+// "missing" and "foreign" share the same error shape so existence in other
+// workspaces can't be probed.
+func (h *Handler) ensureRunInWorkspace(r *http.Request, runID string) error {
+	_, err := h.Store.GetRunInWorkspace(r.Context(), runID, currentWorkspace(r))
+	return err
+}
+
 // ---- experiments ------------------------------------------------------------
 
 type createExperimentReq struct {
@@ -345,6 +357,23 @@ func (h *Handler) CreateRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "experiment_id is required")
 		return
 	}
+	// Workspace-scoped: a caller must not create a run inside another tenant's
+	// experiment. The FK only rejects a non-existent experiment, so without
+	// this a valid foreign experiment_id would be accepted. 404 (not 403) so
+	// foreign experiment ids are indistinguishable from missing ones.
+	exp, err := h.Store.GetExperiment(r.Context(), expID)
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	expWS := exp.WorkspaceID
+	if expWS == "" {
+		expWS = "default"
+	}
+	if expWS != currentWorkspace(r) {
+		writeError(w, http.StatusNotFound, "RESOURCE_DOES_NOT_EXIST", "experiment not found")
+		return
+	}
 	run := &model.Run{
 		ExperimentID: expID,
 		UserID:       req.UserID,
@@ -405,7 +434,8 @@ func (h *Handler) GetRun(w http.ResponseWriter, r *http.Request) {
 		// historical state of a ws-B run by guessing run_id.
 		run, tags, err = h.Store.GetRunAsOfInWorkspace(r.Context(), id, currentWorkspace(r), asOf)
 	} else {
-		run, err = h.Store.GetRun(r.Context(), id)
+		// Workspace-scoped: a caller in ws-B must not read a ws-A run by id.
+		run, err = h.Store.GetRunInWorkspace(r.Context(), id, currentWorkspace(r))
 	}
 	if err != nil {
 		writeStoreErr(w, err)
@@ -528,6 +558,10 @@ func (h *Handler) UpdateRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "run_id is required")
 		return
 	}
+	if err := h.ensureRunInWorkspace(r, id); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
 	var status *string
 	if req.Status != "" {
 		s := req.Status
@@ -570,6 +604,10 @@ func (h *Handler) DeleteRun(w http.ResponseWriter, r *http.Request) {
 		writeBadRequest(w, err)
 		return
 	}
+	if err := h.ensureRunInWorkspace(r, req.RunID); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
 	if err := h.Store.SetRunLifecycle(r.Context(), req.RunID, model.LifecycleDeleted); err != nil {
 		writeStoreErr(w, err)
 		return
@@ -584,6 +622,10 @@ func (h *Handler) RestoreRun(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeBadRequest(w, err)
+		return
+	}
+	if err := h.ensureRunInWorkspace(r, req.RunID); err != nil {
+		writeStoreErr(w, err)
 		return
 	}
 	if err := h.Store.SetRunLifecycle(r.Context(), req.RunID, model.LifecycleActive); err != nil {
@@ -726,6 +768,10 @@ func (h *Handler) LogMetric(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "run_id is required")
 		return
 	}
+	if err := h.ensureRunInWorkspace(r, runID); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
 	if err := h.Store.LogMetric(r.Context(), runID, model.Metric{
 		Key: req.Key, Value: req.Value, Timestamp: req.Timestamp, Step: req.Step,
 	}); err != nil {
@@ -753,6 +799,10 @@ func (h *Handler) LogParameter(w http.ResponseWriter, r *http.Request) {
 	if runID == "" {
 		runID = req.RunUUID
 	}
+	if err := h.ensureRunInWorkspace(r, runID); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
 	if err := h.Store.LogParam(r.Context(), runID, model.Param{Key: req.Key, Value: req.Value}); err != nil {
 		writeStoreErr(w, err)
 		return
@@ -776,6 +826,10 @@ func (h *Handler) LogBatch(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.RunID == "" {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "run_id is required")
+		return
+	}
+	if err := h.ensureRunInWorkspace(r, req.RunID); err != nil {
+		writeStoreErr(w, err)
 		return
 	}
 	// Caps matching MLflow.
@@ -827,6 +881,10 @@ func (h *Handler) SetTag(w http.ResponseWriter, r *http.Request) {
 	if runID == "" {
 		runID = req.RunUUID
 	}
+	if err := h.ensureRunInWorkspace(r, runID); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
 	if err := h.Store.SetTag(r.Context(), runID, model.KV{Key: req.Key, Value: req.Value}); err != nil {
 		writeStoreErr(w, err)
 		return
@@ -848,6 +906,10 @@ func (h *Handler) DeleteTag(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.RunID == "" || req.Key == "" {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "run_id and key are required")
+		return
+	}
+	if err := h.ensureRunInWorkspace(r, req.RunID); err != nil {
+		writeStoreErr(w, err)
 		return
 	}
 	if err := h.Store.DeleteTag(r.Context(), req.RunID, req.Key); err != nil {
@@ -880,6 +942,10 @@ func (h *Handler) LogInputs(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.RunID == "" {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "run_id is required")
+		return
+	}
+	if err := h.ensureRunInWorkspace(r, req.RunID); err != nil {
+		writeStoreErr(w, err)
 		return
 	}
 	inputs := make([]model.DatasetInput, 0, len(req.Datasets))
@@ -929,6 +995,10 @@ func (h *Handler) GetMetricHistory(w http.ResponseWriter, r *http.Request) {
 	key := r.URL.Query().Get("metric_key")
 	if runID == "" || key == "" {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "run_id and metric_key are required")
+		return
+	}
+	if err := h.ensureRunInWorkspace(r, runID); err != nil {
+		writeStoreErr(w, err)
 		return
 	}
 
@@ -1019,7 +1089,8 @@ func (h *Handler) ListArtifacts(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "run_id is required")
 		return
 	}
-	run, err := h.Store.GetRun(r.Context(), runID)
+	// Workspace-scoped: don't disclose a foreign run's artifact tree or URI.
+	run, err := h.Store.GetRunInWorkspace(r.Context(), runID, currentWorkspace(r))
 	if err != nil {
 		writeStoreErr(w, err)
 		return
@@ -1059,7 +1130,7 @@ func artifactsRouter(h *Handler) http.Handler {
 				writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "path is required")
 				return
 			}
-			if _, err := h.Store.GetRun(req.Context(), runID); err != nil {
+			if _, err := h.Store.GetRunInWorkspace(req.Context(), runID, currentWorkspace(req)); err != nil {
 				writeStoreErr(w, err)
 				return
 			}
@@ -1088,10 +1159,11 @@ func artifactsRouter(h *Handler) http.Handler {
 			writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", err.Error())
 			return
 		}
-		// Every artifact operation must reference a real run. Without this
-		// check, a client could create orphaned files outside any run that
-		// will never be garbage-collected.
-		if _, err := h.Store.GetRun(req.Context(), runID); err != nil {
+		// Every artifact operation must reference a real run IN THE CALLER'S
+		// workspace — without the workspace scope a ws-B caller could read,
+		// overwrite, or delete ws-A's artifact files by run id. (The run check
+		// also prevents orphaned files outside any run.)
+		if _, err := h.Store.GetRunInWorkspace(req.Context(), runID, currentWorkspace(req)); err != nil {
 			writeStoreErr(w, err)
 			return
 		}
