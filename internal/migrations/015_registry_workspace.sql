@@ -47,8 +47,11 @@ CREATE TABLE prompt_aliases_v2 (
 );
 INSERT INTO prompts_v2(name, version, workspace_id, content, content_hash, created_at, created_by, description)
 SELECT name, version, 'default', content, content_hash, created_at, created_by, description FROM prompts;
+-- Drop dangling aliases (a pre-015 schema could leave an alias whose prompt
+-- version no longer exists); they can't satisfy the new FK.
 INSERT INTO prompt_aliases_v2(workspace_id, name, alias, version)
-SELECT 'default', name, alias, version FROM prompt_aliases;
+SELECT 'default', pa.name, pa.alias, pa.version FROM prompt_aliases pa
+WHERE EXISTS (SELECT 1 FROM prompts_v2 p WHERE p.workspace_id = 'default' AND p.name = pa.name AND p.version = pa.version);
 DROP TABLE prompt_aliases;
 DROP TABLE prompts;
 ALTER TABLE prompts_v2 RENAME TO prompts;
@@ -117,17 +120,26 @@ CREATE TABLE model_aliases_v2 (
     FOREIGN KEY (workspace_id, name, version) REFERENCES model_versions_v2(workspace_id, name, version) ON DELETE CASCADE
 );
 
--- Copy parent -> child so each FK check passes at insert time.
+-- Copy parent -> child so each FK check passes at insert time. Each child
+-- copy filters to rows whose parent was actually carried into the *_v2 table:
+-- a pre-015 database can contain orphan child rows (e.g. model_version_tags
+-- left behind after a model_version was removed without cascade) that the old
+-- schema tolerated but the rebuilt FK graph rejects. Dropping them here is the
+-- correct outcome — they reference an entity that no longer exists.
 INSERT INTO registered_models_v2(name, workspace_id, description, creation_time, last_update_time)
 SELECT name, 'default', description, creation_time, last_update_time FROM registered_models;
 INSERT INTO model_versions_v2(name, version, workspace_id, description, user_id, current_stage, source, run_id, status, status_message, creation_time, last_update_time)
-SELECT name, version, 'default', description, user_id, current_stage, source, run_id, status, status_message, creation_time, last_update_time FROM model_versions;
+SELECT mv.name, mv.version, 'default', mv.description, mv.user_id, mv.current_stage, mv.source, mv.run_id, mv.status, mv.status_message, mv.creation_time, mv.last_update_time FROM model_versions mv
+WHERE EXISTS (SELECT 1 FROM registered_models_v2 rm WHERE rm.workspace_id = 'default' AND rm.name = mv.name);
 INSERT INTO registered_model_tags_v2(name, workspace_id, key, value)
-SELECT name, 'default', key, value FROM registered_model_tags;
+SELECT rt.name, 'default', rt.key, rt.value FROM registered_model_tags rt
+WHERE EXISTS (SELECT 1 FROM registered_models_v2 rm WHERE rm.workspace_id = 'default' AND rm.name = rt.name);
 INSERT INTO model_version_tags_v2(name, version, workspace_id, key, value)
-SELECT name, version, 'default', key, value FROM model_version_tags;
+SELECT mt.name, mt.version, 'default', mt.key, mt.value FROM model_version_tags mt
+WHERE EXISTS (SELECT 1 FROM model_versions_v2 mv WHERE mv.workspace_id = 'default' AND mv.name = mt.name AND mv.version = mt.version);
 INSERT INTO model_aliases_v2(name, workspace_id, alias, version)
-SELECT name, 'default', alias, version FROM model_aliases;
+SELECT ma.name, 'default', ma.alias, ma.version FROM model_aliases ma
+WHERE EXISTS (SELECT 1 FROM model_versions_v2 mv WHERE mv.workspace_id = 'default' AND mv.name = ma.name AND mv.version = ma.version);
 
 -- Drop originals child -> parent so no ON DELETE CASCADE fires.
 DROP INDEX IF EXISTS idx_mv_stage;
