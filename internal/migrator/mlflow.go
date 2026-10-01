@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -76,11 +77,18 @@ type MLflowImporter struct {
 	checkpointPath string
 	// imported is the set of run IDs already written (loaded from checkpoint).
 	imported map[string]bool
+	// importedExps maps source experiment ID → local experiment ID for
+	// experiments created by a previous (interrupted) run.
+	importedExps map[string]int64
 }
 
 // checkpoint is persisted to <data>/.import-state.json.
 type checkpoint struct {
 	ImportedRunIDs []string `json:"imported_run_ids"`
+	// Experiments maps source experiment ID → local experiment ID so a
+	// resumed import reuses the experiment it created instead of hitting a
+	// name collision and creating an "-imported-<ts>" duplicate.
+	Experiments map[string]int64 `json:"experiments,omitempty"`
 }
 
 // Run executes the full import and returns aggregate statistics.
@@ -121,6 +129,11 @@ func (m *MLflowImporter) Run(ctx context.Context) (Stats, error) {
 		if err != nil {
 			return Stats{}, fmt.Errorf("list runs for experiment %s: %w", exp.ExperimentID, err)
 		}
+		// MLflow returns runs newest-first, i.e. nested children before their
+		// parent. The mlflow.parentRunId tag is mirrored into the FK column
+		// parent_run_id, so a child imported before its parent loses the tag.
+		// Import oldest-first so parents exist when children reference them.
+		sort.SliceStable(runs, func(i, j int) bool { return runs[i].Info.StartTime < runs[j].Info.StartTime })
 		runsByExp[exp.ExperimentID] = runs
 		totalRuns += len(runs)
 	}
@@ -140,6 +153,12 @@ func (m *MLflowImporter) Run(ctx context.Context) (Stats, error) {
 			return stats, fmt.Errorf("import experiment %q: %w", exp.Name, err)
 		}
 		stats.Experiments++
+		if !m.DryRun && m.importedExps[exp.ExperimentID] != localExpID {
+			m.importedExps[exp.ExperimentID] = localExpID
+			if err := m.saveCheckpoint(); err != nil {
+				fmt.Fprintf(os.Stderr, "[import] warning: checkpoint save failed: %v\n", err)
+			}
+		}
 
 		for _, run := range runs {
 			if m.imported[run.Info.RunID] {
@@ -301,16 +320,11 @@ func (m *MLflowImporter) listExperiments(ctx context.Context) ([]mlflowExperimen
 		default:
 			u += "&view_type=ACTIVE_ONLY"
 		}
-		resp, err := m.get(ctx, u)
-		if err != nil {
-			return nil, err
-		}
-		defer resp.Body.Close()
 		var body struct {
 			Experiments   []mlflowExperiment `json:"experiments"`
 			NextPageToken string             `json:"next_page_token"`
 		}
-		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		if err := m.getJSON(ctx, u, &body); err != nil {
 			return nil, fmt.Errorf("decode experiments: %w", err)
 		}
 		all = append(all, body.Experiments...)
@@ -366,17 +380,12 @@ func (m *MLflowImporter) getMetricHistory(ctx context.Context, runID, key string
 		if pageToken != "" {
 			u += "&page_token=" + url.QueryEscape(pageToken)
 		}
-		resp, err := m.get(ctx, u)
-		if err != nil {
-			return nil, err
-		}
-		defer resp.Body.Close()
 		var body struct {
 			Metrics       []mlflowMetric `json:"metrics"`
 			NextPageToken string         `json:"next_page_token"`
 		}
-		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-			return nil, fmt.Errorf("decode metric history for %s/%s: %w", runID, key, err)
+		if err := m.getJSON(ctx, u, &body); err != nil {
+			return nil, fmt.Errorf("metric history for %s/%s: %w", runID, key, err)
 		}
 		all = append(all, body.Metrics...)
 		if body.NextPageToken == "" {
@@ -449,8 +458,14 @@ func (m *MLflowImporter) listArtifactsRecursive2(ctx context.Context, runID, dir
 
 func (m *MLflowImporter) downloadArtifact(ctx context.Context, runID, path string) (io.ReadCloser, error) {
 	// MLflow 2.x: GET /api/2.0/mlflow-artifacts/artifacts/<run_id>/<path>
+	// Escape each segment: artifact names may contain spaces, '?', '#' or
+	// '%', which would otherwise truncate or corrupt the request path.
+	segs := strings.Split(path, "/")
+	for i, seg := range segs {
+		segs[i] = url.PathEscape(seg)
+	}
 	u := fmt.Sprintf("/api/2.0/mlflow-artifacts/artifacts/%s/%s",
-		url.PathEscape(runID), path)
+		url.PathEscape(runID), strings.Join(segs, "/"))
 	resp, err := m.get(ctx, u)
 	if err != nil {
 		return nil, err
@@ -472,6 +487,13 @@ func (m *MLflowImporter) downloadArtifact(ctx context.Context, runID, path strin
 func (m *MLflowImporter) importExperiment(ctx context.Context, exp mlflowExperiment) (int64, error) {
 	if m.DryRun {
 		return 0, nil
+	}
+	if id, ok := m.importedExps[exp.ExperimentID]; ok {
+		if _, err := m.Store.GetExperiment(ctx, id); err == nil {
+			return id, nil
+		} else if !errors.Is(err, store.ErrNotFound) {
+			return 0, err
+		}
 	}
 
 	lifecycle := model.LifecycleActive
@@ -634,6 +656,7 @@ func (m *MLflowImporter) importArtifact(ctx context.Context, runID, path string)
 
 func (m *MLflowImporter) loadCheckpoint() error {
 	m.imported = make(map[string]bool)
+	m.importedExps = make(map[string]int64)
 	if m.checkpointPath == "" {
 		return nil
 	}
@@ -653,6 +676,9 @@ func (m *MLflowImporter) loadCheckpoint() error {
 	for _, id := range cp.ImportedRunIDs {
 		m.imported[id] = true
 	}
+	for src, local := range cp.Experiments {
+		m.importedExps[src] = local
+	}
 	if len(m.imported) > 0 {
 		fmt.Printf("[import] resuming: %d runs already imported\n", len(m.imported))
 	}
@@ -667,7 +693,7 @@ func (m *MLflowImporter) saveCheckpoint() error {
 	for id := range m.imported {
 		ids = append(ids, id)
 	}
-	cp := checkpoint{ImportedRunIDs: ids}
+	cp := checkpoint{ImportedRunIDs: ids, Experiments: m.importedExps}
 	data, err := json.MarshalIndent(cp, "", "  ")
 	if err != nil {
 		return err
@@ -680,6 +706,18 @@ func (m *MLflowImporter) saveCheckpoint() error {
 }
 
 // --- HTTP helpers ---
+
+// getJSON GETs path and decodes the JSON body into dst, closing the body
+// before returning (callers page in loops; a deferred Close there would hold
+// every page's connection open until the whole listing finished).
+func (m *MLflowImporter) getJSON(ctx context.Context, path string, dst any) error {
+	resp, err := m.get(ctx, path)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return json.NewDecoder(resp.Body).Decode(dst)
+}
 
 func (m *MLflowImporter) get(ctx context.Context, path string) (*http.Response, error) {
 	rawURL := strings.TrimRight(m.SourceURL, "/") + path

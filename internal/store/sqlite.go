@@ -119,7 +119,7 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 // Returns ErrAlreadyExists when the name is already used.
 // If e.WorkspaceID is empty, it defaults to "default".
 func (s *SQLiteStore) CreateExperiment(ctx context.Context, e *model.Experiment) (int64, error) {
-	if err := model.ValidName(e.Name, 250); err != nil {
+	if err := invalidValue(model.ValidName(e.Name, 250)); err != nil {
 		return 0, err
 	}
 	now := time.Now().UnixMilli()
@@ -240,7 +240,7 @@ func (s *SQLiteStore) UpdateExperiment(ctx context.Context, id int64, newName *s
 	if newName == nil {
 		return nil
 	}
-	if err := model.ValidName(*newName, 250); err != nil {
+	if err := invalidValue(model.ValidName(*newName, 250)); err != nil {
 		return err
 	}
 	now := time.Now().UnixMilli()
@@ -262,7 +262,7 @@ func (s *SQLiteStore) UpdateExperiment(ctx context.Context, id int64, newName *s
 // SetExperimentLifecycle marks an experiment active or deleted.
 func (s *SQLiteStore) SetExperimentLifecycle(ctx context.Context, id int64, stage string) error {
 	if stage != model.LifecycleActive && stage != model.LifecycleDeleted {
-		return fmt.Errorf("invalid lifecycle stage %q", stage)
+		return fmt.Errorf("%w: invalid lifecycle stage %q", ErrInvalidValue, stage)
 	}
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE experiments SET lifecycle_stage = ?, last_update_time = ? WHERE id = ?`,
@@ -279,7 +279,7 @@ func (s *SQLiteStore) SetExperimentLifecycle(ctx context.Context, id int64, stag
 
 // SetExperimentTag upserts a tag on an experiment.
 func (s *SQLiteStore) SetExperimentTag(ctx context.Context, id int64, key, value string) error {
-	if err := model.ValidKey(key); err != nil {
+	if err := invalidValue(model.ValidKey(key)); err != nil {
 		return err
 	}
 	_, err := s.db.ExecContext(ctx, `
@@ -400,14 +400,54 @@ func (s *SQLiteStore) SearchExperiments(ctx context.Context, opt SearchOptions) 
 		kcols[1].val = last.ID
 		token = encodeCursor(kcols)
 	}
-	for _, e := range out {
-		tags, err := s.getExperimentTags(ctx, e.ID)
-		if err != nil {
-			return SearchResult[*model.Experiment]{}, err
-		}
-		e.Tags = tags
+	if err := s.loadExperimentTags(ctx, out); err != nil {
+		return SearchResult[*model.Experiment]{}, err
 	}
 	return SearchResult[*model.Experiment]{Items: out, NextPageToken: token}, nil
+}
+
+// tagBatchSize bounds the IN (...) list of the batched tag loaders, well under
+// SQLite's bound-parameter limit.
+const tagBatchSize = 500
+
+// loadExperimentTags fills Tags for every experiment with one query per
+// tagBatchSize experiments instead of one query per experiment (a page can
+// hold up to 50k experiments).
+func (s *SQLiteStore) loadExperimentTags(ctx context.Context, exps []*model.Experiment) error {
+	byID := make(map[int64]*model.Experiment, len(exps))
+	for _, e := range exps {
+		byID[e.ID] = e
+	}
+	for start := 0; start < len(exps); start += tagBatchSize {
+		end := min(start+tagBatchSize, len(exps))
+		args := make([]any, 0, end-start)
+		for _, e := range exps[start:end] {
+			args = append(args, e.ID)
+		}
+		marks := strings.TrimRight(strings.Repeat("?,", len(args)), ",")
+		rows, err := s.db.QueryContext(ctx,
+			`SELECT experiment_id, key, value FROM experiment_tags WHERE experiment_id IN (`+marks+`) ORDER BY experiment_id, key`,
+			args...)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var id int64
+			var kv model.KV
+			if err := rows.Scan(&id, &kv.Key, &kv.Value); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			if e := byID[id]; e != nil {
+				e.Tags = append(e.Tags, kv)
+			}
+		}
+		_ = rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // parseExperimentFilter handles a tiny subset of MLflow's expression
@@ -418,13 +458,13 @@ func parseExperimentFilter(f string) (string, []any, error) {
 	if len(parts) >= 3 && parts[0] == "name" {
 		op := strings.ToUpper(parts[1])
 		if op != "=" && op != "LIKE" {
-			return "", nil, fmt.Errorf("unsupported operator %q in filter", parts[1])
+			return "", nil, invalidFilter("unsupported operator %q in filter", parts[1])
 		}
 		val := strings.TrimSpace(strings.Join(parts[2:], " "))
 		val = strings.Trim(val, "'\"")
 		return "name " + op + " ?", []any{val}, nil
 	}
-	return "", nil, fmt.Errorf("unsupported filter %q (only name = / name LIKE supported in v0.1)", f)
+	return "", nil, invalidFilter("unsupported filter %q (only name = / name LIKE supported in v0.1)", f)
 }
 
 // ----- runs -----
@@ -489,7 +529,7 @@ func (s *SQLiteStore) CreateRun(ctx context.Context, r *model.Run) error {
 	// Persist parent_run_id and mirror as tag in the same txn so the run row,
 	// parent column, mirror tag, and time-travel events are atomic.
 	if err := setParentRunID(ctx, tx, r.ID, r.ParentRunID); err != nil {
-		return err
+		return mapInsertErr(err)
 	}
 	return tx.Commit()
 }
@@ -525,7 +565,7 @@ func (s *SQLiteStore) UpdateRun(ctx context.Context, id string, status *string, 
 		switch *status {
 		case model.StatusRunning, model.StatusFinished, model.StatusFailed, model.StatusKilled, model.StatusScheduled:
 		default:
-			return fmt.Errorf("invalid status %q", *status)
+			return fmt.Errorf("%w: invalid status %q", ErrInvalidValue, *status)
 		}
 		sets = append(sets, "status = ?")
 		args = append(args, *status)
@@ -573,7 +613,7 @@ func (s *SQLiteStore) UpdateRun(ctx context.Context, id string, status *string, 
 // SetRunLifecycle marks a run active or deleted.
 func (s *SQLiteStore) SetRunLifecycle(ctx context.Context, id, stage string) error {
 	if stage != model.LifecycleActive && stage != model.LifecycleDeleted {
-		return fmt.Errorf("invalid lifecycle stage %q", stage)
+		return fmt.Errorf("%w: invalid lifecycle stage %q", ErrInvalidValue, stage)
 	}
 	// Capture pre-state before the txn (write-first; see UpdateRun).
 	before := captureRunBefore(ctx, s.db, id)
@@ -620,6 +660,12 @@ func (s *SQLiteStore) SearchRuns(ctx context.Context, opt SearchOptions) (Search
 		for _, id := range opt.ExperimentIDs {
 			baseArgs = append(baseArgs, id)
 		}
+	}
+	if opt.WorkspaceID != "" {
+		// TENANCY: without this, an empty or foreign experiment_ids list
+		// would return runs from every workspace.
+		where = append(where, "experiment_id IN (SELECT id FROM experiments WHERE workspace_id = ?)")
+		baseArgs = append(baseArgs, opt.WorkspaceID)
 	}
 	if stage != "all" {
 		where = append(where, "lifecycle_stage = ?")
@@ -1210,7 +1256,7 @@ func parseRunPredicate(c string) (string, []any, error) {
 			// Use the most recent metric value per (run, key).
 			val, err := strconv.ParseFloat(right, 64)
 			if err != nil {
-				return "", nil, fmt.Errorf("metric value must be numeric, got %q", right)
+				return "", nil, invalidFilter("metric value must be numeric, got %q", right)
 			}
 			return `id IN (
 				SELECT run_id FROM metrics m1
@@ -1233,7 +1279,7 @@ func parseRunPredicate(c string) (string, []any, error) {
 			}
 			scol, ok := whitelist[col]
 			if !ok {
-				return "", nil, fmt.Errorf("unsupported attribute %q", col)
+				return "", nil, invalidFilter("unsupported attribute %q", col)
 			}
 			return scol + " " + realOp + " ?", []any{right}, nil
 		}
@@ -1254,7 +1300,7 @@ func tryParseIN(c string) (string, []any, error, bool) {
 	// Find the closing paren
 	closeIdx := strings.LastIndex(rest, ")")
 	if closeIdx < 0 {
-		return "", nil, fmt.Errorf("IN predicate missing closing ')'"), true
+		return "", nil, invalidFilter("IN predicate missing closing ')'"), true
 	}
 	inner := rest[:closeIdx]
 	vals, err := parseINValues(inner)
@@ -1262,7 +1308,7 @@ func tryParseIN(c string) (string, []any, error, bool) {
 		return "", nil, err, true
 	}
 	if len(vals) == 0 {
-		return "", nil, fmt.Errorf("IN predicate has no values"), true
+		return "", nil, invalidFilter("IN predicate has no values"), true
 	}
 	marks := strings.TrimRight(strings.Repeat("?,", len(vals)), ",")
 	args := make([]any, len(vals))
@@ -1283,7 +1329,7 @@ func tryParseIN(c string) (string, []any, error, bool) {
 		}
 		scol, ok := whitelist[col]
 		if !ok {
-			return "", nil, fmt.Errorf("unsupported attribute %q in IN predicate", col), true
+			return "", nil, invalidFilter("unsupported attribute %q in IN predicate", col), true
 		}
 		return scol + " IN (" + marks + ")", args, nil, true
 	case strings.HasPrefix(left, "params."):
@@ -1293,7 +1339,7 @@ func tryParseIN(c string) (string, []any, error, bool) {
 		key := strings.TrimPrefix(left, "tags.")
 		return "id IN (SELECT run_id FROM tags WHERE key = ? AND value IN (" + marks + "))", append([]any{key}, args...), nil, true
 	}
-	return "", nil, fmt.Errorf("IN predicate on unsupported field %q", left), true
+	return "", nil, invalidFilter("IN predicate on unsupported field %q", left), true
 }
 
 // parseINValues splits the inside of an IN (...) list into individual string values.
@@ -1337,7 +1383,7 @@ func parseINValues(s string) ([]string, error) {
 		}
 	}
 	if inQ {
-		return nil, fmt.Errorf("unterminated quote in IN list")
+		return nil, invalidFilter("unterminated quote in IN list")
 	}
 	if remaining := strings.TrimSpace(cur.String()); remaining != "" {
 		vals = append(vals, remaining)
@@ -1357,7 +1403,7 @@ func tryParseBETWEEN(c string) (string, []any, error, bool) {
 	rest := strings.TrimSpace(c[betIdx+9:]) // skip " BETWEEN "
 	andIdx := strings.Index(strings.ToUpper(rest), " AND ")
 	if andIdx < 0 {
-		return "", nil, fmt.Errorf("BETWEEN predicate missing AND"), true
+		return "", nil, invalidFilter("BETWEEN predicate missing AND"), true
 	}
 	loStr := strings.TrimSpace(rest[:andIdx])
 	hiStr := strings.TrimSpace(rest[andIdx+5:])
@@ -1366,11 +1412,11 @@ func tryParseBETWEEN(c string) (string, []any, error, bool) {
 		key := strings.TrimPrefix(left, "metrics.")
 		lo, err := strconv.ParseFloat(loStr, 64)
 		if err != nil {
-			return "", nil, fmt.Errorf("BETWEEN lo must be numeric, got %q", loStr), true
+			return "", nil, invalidFilter("BETWEEN lo must be numeric, got %q", loStr), true
 		}
 		hi, err := strconv.ParseFloat(hiStr, 64)
 		if err != nil {
-			return "", nil, fmt.Errorf("BETWEEN hi must be numeric, got %q", hiStr), true
+			return "", nil, invalidFilter("BETWEEN hi must be numeric, got %q", hiStr), true
 		}
 		return `id IN (
 			SELECT run_id FROM metrics m1
@@ -1390,19 +1436,19 @@ func tryParseBETWEEN(c string) (string, []any, error, bool) {
 		}
 		scol, ok := whitelist[col]
 		if !ok {
-			return "", nil, fmt.Errorf("BETWEEN on unsupported attribute %q", col), true
+			return "", nil, invalidFilter("BETWEEN on unsupported attribute %q", col), true
 		}
 		lo, err := strconv.ParseFloat(loStr, 64)
 		if err != nil {
-			return "", nil, fmt.Errorf("BETWEEN lo must be numeric, got %q", loStr), true
+			return "", nil, invalidFilter("BETWEEN lo must be numeric, got %q", loStr), true
 		}
 		hi, err := strconv.ParseFloat(hiStr, 64)
 		if err != nil {
-			return "", nil, fmt.Errorf("BETWEEN hi must be numeric, got %q", hiStr), true
+			return "", nil, invalidFilter("BETWEEN hi must be numeric, got %q", hiStr), true
 		}
 		return scol + " BETWEEN ? AND ?", []any{lo, hi}, nil, true
 	}
-	return "", nil, fmt.Errorf("BETWEEN on unsupported field %q", left), true
+	return "", nil, invalidFilter("BETWEEN on unsupported field %q", left), true
 }
 
 // ----- metrics, params, tags -----
@@ -1436,7 +1482,7 @@ func (s *SQLiteStore) LogMetrics(ctx context.Context, runID string, ms []model.M
 	}
 	defer stmt.Close()
 	for _, m := range ms {
-		if err := model.ValidKey(m.Key); err != nil {
+		if err := invalidValue(model.ValidKey(m.Key)); err != nil {
 			return err
 		}
 		// Reject non-finite values: the JSON response layer cannot encode
@@ -1459,7 +1505,7 @@ func (s *SQLiteStore) LogMetrics(ctx context.Context, runID string, ms []model.M
 // LogParam writes an immutable parameter. Returns ErrAlreadyExists if a
 // different value is already set under the same key.
 func (s *SQLiteStore) LogParam(ctx context.Context, runID string, p model.Param) error {
-	if err := model.ValidKey(p.Key); err != nil {
+	if err := invalidValue(model.ValidKey(p.Key)); err != nil {
 		return err
 	}
 	if err := assertRunExists(ctx, s.db, runID); err != nil {
@@ -1499,7 +1545,7 @@ func (s *SQLiteStore) LogParams(ctx context.Context, runID string, ps []model.Pa
 // When the key is "mlflow.parentRunId" the value is also persisted into the
 // parent_run_id column to keep the structural field and the MLflow tag in sync.
 func (s *SQLiteStore) SetTag(ctx context.Context, runID string, t model.KV) error {
-	if err := model.ValidKey(t.Key); err != nil {
+	if err := invalidValue(model.ValidKey(t.Key)); err != nil {
 		return err
 	}
 	// Existence check and before-value read happen before the txn (write-first;
@@ -1531,6 +1577,9 @@ func (s *SQLiteStore) SetTag(ctx context.Context, runID string, t model.KV) erro
 	// same txn so the column, mirror tag, and events all commit together.
 	if t.Key == "mlflow.parentRunId" && t.Value != "" {
 		if err := syncParentRunIDFromTag(ctx, tx, runID, t.Value); err != nil {
+			if isFKViolation(err) {
+				return fmt.Errorf("%w: parent run %q", ErrNotFound, t.Value)
+			}
 			return err
 		}
 	}
@@ -1569,7 +1618,7 @@ func (s *SQLiteStore) SetTags(ctx context.Context, runID string, ts []model.KV) 
 	}
 	defer stmt.Close()
 	for _, t := range ts {
-		if err := model.ValidKey(t.Key); err != nil {
+		if err := invalidValue(model.ValidKey(t.Key)); err != nil {
 			return err
 		}
 		if _, err := stmt.ExecContext(ctx, runID, t.Key, t.Value); err != nil {
@@ -1640,10 +1689,13 @@ func (s *SQLiteStore) GetMetricHistory(ctx context.Context, runID, key string, o
 
 	if opt.PageToken != "" {
 		ts, step, err := decodeMetricPageToken(opt.PageToken)
-		if err == nil {
-			q += ` AND (timestamp > ? OR (timestamp = ? AND step > ?))`
-			args = append(args, ts, ts, step)
+		if err != nil {
+			// Silently ignoring a bad token restarted at page one, so a
+			// paging client looped forever.
+			return nil, "", invalidFilter("malformed page_token")
 		}
+		q += ` AND (timestamp > ? OR (timestamp = ? AND step > ?))`
+		args = append(args, ts, ts, step)
 	}
 	q += ` ORDER BY timestamp ASC, step ASC`
 
@@ -1813,11 +1865,14 @@ func (s *SQLiteStore) InsertSpans(ctx context.Context, spans []model.Span) error
 		                   attributes_json, events_json, status_code, status_message)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
+		  run_id = COALESCE(traces.run_id, excluded.run_id),
 		  end_time = excluded.end_time,
 		  attributes_json = excluded.attributes_json,
 		  events_json = excluded.events_json,
 		  status_code = excluded.status_code,
 		  status_message = excluded.status_message
+		WHERE traces.trace_id = excluded.trace_id
+		  AND (traces.run_id IS excluded.run_id OR traces.run_id IS NULL)
 	`)
 	if err != nil {
 		return err
@@ -1830,11 +1885,18 @@ func (s *SQLiteStore) InsertSpans(ctx context.Context, spans []model.Span) error
 		if sp.TraceID == "" {
 			sp.TraceID = sp.ID
 		}
-		if _, err := stmt.ExecContext(ctx, sp.ID, sp.TraceID, nilIfEmpty(sp.ParentID), nilIfEmpty(sp.RunID),
+		res, err := stmt.ExecContext(ctx, sp.ID, sp.TraceID, nilIfEmpty(sp.ParentID), nilIfEmpty(sp.RunID),
 			sp.Name, nilIfEmpty(sp.Kind), sp.StartTimeNS, sp.EndTimeNS,
 			nilIfEmpty(sp.AttributesJSON), nilIfEmpty(sp.EventsJSON),
-			nilIfEmpty(sp.StatusCode), nilIfEmpty(sp.StatusMessage)); err != nil {
+			nilIfEmpty(sp.StatusCode), nilIfEmpty(sp.StatusMessage))
+		if err != nil {
 			return err
+		}
+		// The upsert only updates a span that belongs to the same trace and
+		// run; a colliding span id from another trace/run (possibly another
+		// workspace) would otherwise overwrite that span's data.
+		if n, _ := res.RowsAffected(); n == 0 {
+			return fmt.Errorf("%w: span %q already exists in a different trace or run", ErrConflict, sp.ID)
 		}
 	}
 	return tx.Commit()
@@ -1893,7 +1955,7 @@ func (s *SQLiteStore) CreatePrompt(ctx context.Context, workspaceID string, p *m
 		workspaceID = "default"
 	}
 	p.WorkspaceID = workspaceID
-	if err := model.ValidName(p.Name, 250); err != nil {
+	if err := invalidValue(model.ValidName(p.Name, 250)); err != nil {
 		return 0, err
 	}
 	hash := sha256.Sum256([]byte(p.Content))
@@ -2194,6 +2256,29 @@ func (s *SQLiteStore) LogInputs(ctx context.Context, runID string, inputs []mode
 		}
 	}
 	return fmt.Errorf("LogInputs: snapshot-race retries exhausted (%d attempts)", maxAttempts)
+}
+
+// retryWriteRace runs fn (one complete transaction) and retries it with a
+// short backoff when it fails on a "read MAX(version), then INSERT" race: a
+// UNIQUE violation from a peer that committed the same version first, or
+// SQLITE_BUSY_SNAPSHOT because the peer's commit invalidated our snapshot.
+func retryWriteRace(ctx context.Context, fn func() error) error {
+	const maxAttempts = 6
+	var err error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		err = fn()
+		if err == nil || !(isUniqueViolation(err) || isSnapshotRaceErr(err)) {
+			return err
+		}
+		if attempt < maxAttempts-1 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Duration(1<<attempt) * 5 * time.Millisecond):
+			}
+		}
+	}
+	return err
 }
 
 // isSnapshotRaceErr matches SQLite transient busy/snapshot errors that

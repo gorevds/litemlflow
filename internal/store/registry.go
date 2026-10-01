@@ -3,8 +3,10 @@ package store
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,7 +22,7 @@ func (s *SQLiteStore) CreateRegisteredModel(ctx context.Context, workspaceID str
 		workspaceID = "default"
 	}
 	m.WorkspaceID = workspaceID
-	if err := model.ValidName(m.Name, 250); err != nil {
+	if err := invalidValue(model.ValidName(m.Name, 250)); err != nil {
 		return err
 	}
 	now := time.Now().UnixMilli()
@@ -96,15 +98,14 @@ func (s *SQLiteStore) getRegisteredModelTags(ctx context.Context, workspaceID, n
 
 // RenameRegisteredModel renames a model and cascades to all child tables.
 //
-// SQLite does not propagate ON UPDATE CASCADE for PRIMARY KEY changes; we work
-// around this by acquiring a dedicated connection, disabling FK enforcement on
-// that connection (PRAGMA foreign_keys is per-connection), updating the PK
-// and all FK columns, running a FK integrity check, and only then committing.
+// The schema declares no ON UPDATE CASCADE, so we acquire a dedicated
+// connection, disable FK enforcement on it (PRAGMA foreign_keys is
+// per-connection), and update the PK plus every FK column in one transaction.
 func (s *SQLiteStore) RenameRegisteredModel(ctx context.Context, workspaceID, name, newName string) (*model.RegisteredModel, error) {
 	if workspaceID == "" {
 		workspaceID = "default"
 	}
-	if err := model.ValidName(newName, 250); err != nil {
+	if err := invalidValue(model.ValidName(newName, 250)); err != nil {
 		return nil, err
 	}
 	now := time.Now().UnixMilli()
@@ -139,8 +140,12 @@ func (s *SQLiteStore) RenameRegisteredModel(ctx context.Context, workspaceID, na
 	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
 		return nil, fmt.Errorf("disable FK: %w", err)
 	}
-	// Ensure we always re-enable FK enforcement when we're done.
-	defer func() { _, _ = conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`) }()
+	// Always re-enable FK enforcement before the connection returns to the
+	// pool. Use a non-cancellable ctx: if the request ctx is already done the
+	// PRAGMA would fail and a pooled connection with FKs OFF would silently
+	// skip ON DELETE CASCADE for later, unrelated queries. If it still fails,
+	// discard the connection instead of returning it to the pool.
+	defer restoreForeignKeys(ctx, conn)
 
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
@@ -149,7 +154,7 @@ func (s *SQLiteStore) RenameRegisteredModel(ctx context.Context, workspaceID, na
 	defer func() { _ = tx.Rollback() }()
 
 	// Update child tables first (so they don't reference the old PK once it changes).
-	for _, tbl := range []string{"model_versions", "registered_model_tags", "model_aliases"} {
+	for _, tbl := range []string{"model_versions", "model_version_tags", "registered_model_tags", "model_aliases"} {
 		if _, err := tx.ExecContext(ctx, `UPDATE `+tbl+` SET name = ? WHERE workspace_id = ? AND name = ?`, newName, workspaceID, name); err != nil {
 			return nil, fmt.Errorf("rename cascade %s: %w", tbl, err)
 		}
@@ -263,14 +268,50 @@ func (s *SQLiteStore) SearchRegisteredModels(ctx context.Context, workspaceID, f
 		out = out[:maxResults]
 		token = out[len(out)-1].Name
 	}
-	for _, m := range out {
-		tags, err := s.getRegisteredModelTags(ctx, workspaceID, m.Name)
-		if err != nil {
-			return SearchResult[*model.RegisteredModel]{}, err
-		}
-		m.Tags = tags
+	if err := s.loadRegisteredModelTags(ctx, workspaceID, out); err != nil {
+		return SearchResult[*model.RegisteredModel]{}, err
 	}
 	return SearchResult[*model.RegisteredModel]{Items: out, NextPageToken: token}, nil
+}
+
+// loadRegisteredModelTags fills Tags for a page of models with one query per
+// tagBatchSize models instead of one query per model.
+func (s *SQLiteStore) loadRegisteredModelTags(ctx context.Context, workspaceID string, models []*model.RegisteredModel) error {
+	byName := make(map[string]*model.RegisteredModel, len(models))
+	for _, m := range models {
+		byName[m.Name] = m
+	}
+	for start := 0; start < len(models); start += tagBatchSize {
+		end := min(start+tagBatchSize, len(models))
+		args := make([]any, 0, end-start+1)
+		args = append(args, workspaceID)
+		for _, m := range models[start:end] {
+			args = append(args, m.Name)
+		}
+		marks := strings.TrimRight(strings.Repeat("?,", end-start), ",")
+		rows, err := s.db.QueryContext(ctx,
+			`SELECT name, key, value FROM registered_model_tags WHERE workspace_id = ? AND name IN (`+marks+`) ORDER BY name, key`,
+			args...)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var name string
+			var kv model.KV
+			if err := rows.Scan(&name, &kv.Key, &kv.Value); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			if m := byName[name]; m != nil {
+				m.Tags = append(m.Tags, kv)
+			}
+		}
+		_ = rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // parseRegistryFilter handles:
@@ -290,7 +331,7 @@ func parseRegistryFilter(workspaceID, f string) (string, []any, error) {
 	if strings.HasPrefix(strings.ToLower(f), "tags.") {
 		idx := strings.Index(f, "=")
 		if idx < 0 {
-			return "", nil, fmt.Errorf("unsupported registry filter %q", f)
+			return "", nil, invalidFilter("unsupported registry filter %q", f)
 		}
 		key := strings.TrimSpace(f[5:idx])
 		val := strings.TrimSpace(f[idx+1:])
@@ -301,13 +342,13 @@ func parseRegistryFilter(workspaceID, f string) (string, []any, error) {
 	if len(parts) >= 3 && strings.ToLower(parts[0]) == "name" {
 		op := strings.ToUpper(parts[1])
 		if op != "=" && op != "LIKE" {
-			return "", nil, fmt.Errorf("unsupported operator %q in registry filter", parts[1])
+			return "", nil, invalidFilter("unsupported operator %q in registry filter", parts[1])
 		}
 		val := strings.TrimSpace(strings.Join(parts[2:], " "))
 		val = strings.Trim(val, "'\"")
 		return "name " + op + " ?", []any{val}, nil
 	}
-	return "", nil, fmt.Errorf("unsupported registry filter %q (supports: name = / name LIKE / tags.X = '...')", f)
+	return "", nil, invalidFilter("unsupported registry filter %q (supports: name = / name LIKE / tags.X = '...')", f)
 }
 
 // stripPromptExclusion removes the "AND tag.`mlflow.prompt.is_prompt` != 'true'"
@@ -482,7 +523,7 @@ func (s *SQLiteStore) CreateModelVersion(ctx context.Context, workspaceID string
 		workspaceID = "default"
 	}
 	mv.WorkspaceID = workspaceID
-	if err := model.ValidName(mv.Name, 250); err != nil {
+	if err := invalidValue(model.ValidName(mv.Name, 250)); err != nil {
 		return nil, err
 	}
 	// Confirm model exists.
@@ -503,32 +544,37 @@ func (s *SQLiteStore) CreateModelVersion(ctx context.Context, workspaceID string
 		mv.Status = "READY"
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = tx.Rollback() }()
+	// MAX(version)+1 then INSERT races with a concurrent registration of the
+	// same model (UNIQUE violation or SQLITE_BUSY_SNAPSHOT); retry the txn.
+	err := retryWriteRace(ctx, func() error {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
 
-	// Auto-increment version per name.
-	var nextVersion int64
-	if err := tx.QueryRowContext(ctx,
-		`SELECT COALESCE(MAX(version), 0) + 1 FROM model_versions WHERE workspace_id = ? AND name = ?`,
-		workspaceID, mv.Name).Scan(&nextVersion); err != nil {
-		return nil, err
-	}
-	mv.Version = nextVersion
+		// Auto-increment version per name.
+		var nextVersion int64
+		if err := tx.QueryRowContext(ctx,
+			`SELECT COALESCE(MAX(version), 0) + 1 FROM model_versions WHERE workspace_id = ? AND name = ?`,
+			workspaceID, mv.Name).Scan(&nextVersion); err != nil {
+			return err
+		}
+		mv.Version = nextVersion
 
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO model_versions(workspace_id, name, version, description, user_id, current_stage, source,
-		                           run_id, status, status_message, creation_time, last_update_time)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, workspaceID, mv.Name, mv.Version, nilIfEmpty(mv.Description), nilIfEmpty(mv.UserID),
-		mv.CurrentStage, mv.Source, nilIfEmpty(mv.RunID), mv.Status,
-		nilIfEmpty(mv.StatusMessage), mv.CreationTime, mv.LastUpdateTime)
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO model_versions(workspace_id, name, version, description, user_id, current_stage, source,
+			                           run_id, status, status_message, creation_time, last_update_time)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, workspaceID, mv.Name, mv.Version, nilIfEmpty(mv.Description), nilIfEmpty(mv.UserID),
+			mv.CurrentStage, mv.Source, nilIfEmpty(mv.RunID), mv.Status,
+			nilIfEmpty(mv.StatusMessage), mv.CreationTime, mv.LastUpdateTime)
+		if err != nil {
+			return fmt.Errorf("insert model_version: %w", err)
+		}
+		return tx.Commit()
+	})
 	if err != nil {
-		return nil, fmt.Errorf("insert model_version: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return s.GetModelVersion(ctx, workspaceID, mv.Name, mv.Version)
@@ -620,12 +666,18 @@ func (s *SQLiteStore) SearchModelVersions(ctx context.Context, workspaceID, filt
 		args = append(args, fargs...)
 	}
 	if pageToken != "" {
-		// pageToken is "name:version" for model versions.
-		parts := strings.SplitN(pageToken, ":", 2)
-		if len(parts) == 2 {
-			where = append(where, "(name > ? OR (name = ? AND version > ?))")
-			args = append(args, parts[0], parts[0], parts[1])
+		// pageToken is "name:version" for model versions. Model names may
+		// themselves contain ':', so split on the LAST colon.
+		i := strings.LastIndex(pageToken, ":")
+		if i < 0 {
+			return SearchResult[*model.ModelVersion]{}, invalidFilter("malformed page_token")
 		}
+		ver, err := strconv.ParseInt(pageToken[i+1:], 10, 64)
+		if err != nil {
+			return SearchResult[*model.ModelVersion]{}, invalidFilter("malformed page_token")
+		}
+		where = append(where, "(name > ? OR (name = ? AND version > ?))")
+		args = append(args, pageToken[:i], pageToken[:i], ver)
 	}
 	q := `SELECT name, version, COALESCE(description,''), COALESCE(user_id,''), current_stage,
 	             source, COALESCE(run_id,''), status, COALESCE(status_message,''),
@@ -675,7 +727,7 @@ func parseModelVersionFilter(workspaceID, f string) (string, []any, error) {
 	if strings.HasPrefix(strings.ToLower(f), "tags.") {
 		idx := strings.Index(f, "=")
 		if idx < 0 {
-			return "", nil, fmt.Errorf("unsupported model version filter %q", f)
+			return "", nil, invalidFilter("unsupported model version filter %q", f)
 		}
 		key := strings.TrimSpace(f[5:idx])
 		val := strings.TrimSpace(f[idx+1:])
@@ -694,13 +746,13 @@ func parseModelVersionFilter(workspaceID, f string) (string, []any, error) {
 	if len(parts) >= 3 && strings.ToLower(parts[0]) == "name" {
 		op := strings.ToUpper(parts[1])
 		if op != "=" && op != "LIKE" {
-			return "", nil, fmt.Errorf("unsupported operator %q in model version filter", parts[1])
+			return "", nil, invalidFilter("unsupported operator %q in model version filter", parts[1])
 		}
 		val := strings.TrimSpace(strings.Join(parts[2:], " "))
 		val = strings.Trim(val, "'\"")
 		return "name " + op + " ?", []any{val}, nil
 	}
-	return "", nil, fmt.Errorf("unsupported model version filter %q (supports: name = / tags.X = / run_id = '...')", f)
+	return "", nil, invalidFilter("unsupported model version filter %q (supports: name = / tags.X = / run_id = '...')", f)
 }
 
 // TransitionModelStage sets the stage of a model version.
@@ -830,4 +882,13 @@ func scanModelVersionRow(rows *sql.Rows) (*model.ModelVersion, error) {
 		return nil, err
 	}
 	return &mv, nil
+}
+
+// restoreForeignKeys re-enables FK enforcement on a pinned connection that
+// had it switched off. On failure the connection is marked bad so the pool
+// drops it rather than handing out a connection without FK enforcement.
+func restoreForeignKeys(ctx context.Context, conn *sql.Conn) {
+	if _, err := conn.ExecContext(context.WithoutCancel(ctx), `PRAGMA foreign_keys = ON`); err != nil {
+		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+	}
 }

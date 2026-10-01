@@ -461,21 +461,31 @@ func (s *SQLiteStore) ArchiveStaleRuns(ctx context.Context, staleBefore int64) (
 	defer tagStmt.Close()
 
 	updateStmt, err := tx.PrepareContext(ctx, `
-		UPDATE runs SET status = 'FAILED', end_time = ? WHERE id = ?
+		UPDATE runs SET status = 'FAILED', end_time = ?
+		WHERE id = ? AND status = 'RUNNING' AND lifecycle_stage = 'active'
 	`)
 	if err != nil {
 		return 0, err
 	}
 	defer updateStmt.Close()
 
+	// Re-check the stale predicate in the UPDATE: a run that finished (or was
+	// deleted) after the SELECT above must not be clobbered to FAILED.
+	archived := ids[:0:0]
 	for _, id := range ids {
-		if _, err := updateStmt.ExecContext(ctx, now, id); err != nil {
+		res, err := updateStmt.ExecContext(ctx, now, id)
+		if err != nil {
 			return 0, fmt.Errorf("update run %s: %w", id, err)
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			continue
 		}
 		if _, err := tagStmt.ExecContext(ctx, id); err != nil {
 			return 0, fmt.Errorf("tag run %s: %w", id, err)
 		}
+		archived = append(archived, id)
 	}
+	ids = archived
 
 	// Events are written inside the same txn as the bulk update so the
 	// mutations and their time-travel events commit atomically
@@ -640,7 +650,9 @@ func (s *SQLiteStore) RecordWebhookAttempt(ctx context.Context, id int64, status
 // ----- experiment clone -----
 
 // CloneExperiment creates a new experiment with newName in workspaceID,
-// copying all tags from srcID. Returns the new experiment.
+// copying all tags from srcID. Returns the new experiment. The source must
+// live in workspaceID (ErrNotFound otherwise, without revealing whether it
+// exists elsewhere); an empty workspaceID means the source's own workspace.
 func (s *SQLiteStore) CloneExperiment(ctx context.Context, srcID int64, newName, workspaceID string) (*model.Experiment, error) {
 	src, err := s.GetExperiment(ctx, srcID)
 	if err != nil {
@@ -648,6 +660,9 @@ func (s *SQLiteStore) CloneExperiment(ctx context.Context, srcID int64, newName,
 	}
 	if workspaceID == "" {
 		workspaceID = src.WorkspaceID
+	}
+	if src.WorkspaceID != workspaceID {
+		return nil, ErrNotFound
 	}
 
 	newExp := &model.Experiment{

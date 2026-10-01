@@ -8,6 +8,7 @@ package migrations
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"embed"
 	"errors"
 	"fmt"
@@ -167,23 +168,80 @@ func Apply(ctx context.Context, db *sql.DB) error {
 }
 
 func applyOne(ctx context.Context, db *sql.DB, m Migration) error {
-	// SQLite does not support DDL inside arbitrary transactions for
-	// every statement type, but our migrations are pure DDL/DML and we
-	// want atomicity per migration. Use BEGIN IMMEDIATE.
-	tx, err := db.BeginTx(ctx, &sql.TxOptions{})
+	return runScript(ctx, db, m.Up, `INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)`,
+		m.Version, m.Name, time.Now().UnixMilli())
+}
+
+// runScript executes one migration script plus its schema_migrations
+// bookkeeping statement atomically, with foreign-key enforcement disabled.
+//
+// Several scripts rebuild a table (CREATE x_v2; copy; DROP x; RENAME). With
+// foreign_keys=ON, DROP TABLE performs an implicit DELETE that fires the
+// ON DELETE CASCADE actions of every child table, so e.g. 004 rebuilding
+// `experiments` wiped all runs, metrics and experiment tags of an existing
+// database. SQLite's documented procedure for schema changes is to turn FK
+// enforcement off (outside a transaction — the PRAGMA is a no-op inside one),
+// make the change, verify with foreign_key_check, then turn it back on.
+func runScript(ctx context.Context, db *sql.DB, script, bookkeeping string, args ...any) error {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		return fmt.Errorf("disable foreign keys: %w", err)
+	}
+	defer func() {
+		// Never hand a connection with FK enforcement off back to the pool.
+		if _, err := conn.ExecContext(context.WithoutCancel(ctx), `PRAGMA foreign_keys = ON`); err != nil {
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		}
+	}()
+
+	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if _, err := tx.ExecContext(ctx, m.Up); err != nil {
+	// Only violations introduced by this script are fatal: a pre-existing
+	// orphan must not make the binary refuse to start after an upgrade.
+	before, err := countFKViolations(ctx, tx)
+	if err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)`,
-		m.Version, m.Name, time.Now().UnixMilli()); err != nil {
+	if _, err := tx.ExecContext(ctx, script); err != nil {
+		return err
+	}
+	after, err := countFKViolations(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if after > before {
+		return fmt.Errorf("script would leave %d new foreign key violation(s)", after-before)
+	}
+	if _, err := tx.ExecContext(ctx, bookkeeping, args...); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+// countFKViolations returns the number of rows PRAGMA foreign_key_check
+// reports, i.e. rows referencing a missing parent.
+func countFKViolations(ctx context.Context, tx *sql.Tx) (int, error) {
+	rows, err := tx.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		return 0, fmt.Errorf("foreign_key_check: %w", err)
+	}
+	defer rows.Close()
+	n := 0
+	for rows.Next() {
+		n++
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("foreign_key_check: %w", err)
+	}
+	return n, nil
 }
 
 // Rollback runs the DOWN of the latest applied migration. Use for disaster
@@ -252,18 +310,7 @@ func rollbackImpl(ctx context.Context, db *sql.DB, force bool) error {
 		}
 	}
 
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx, target.Down); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version = ?`, cur); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return runScript(ctx, db, target.Down, `DELETE FROM schema_migrations WHERE version = ?`, cur)
 }
 
 // extractDroppedTables returns the table names referenced by `DROP TABLE`

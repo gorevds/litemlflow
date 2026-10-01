@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/gorevds/litemlflow/internal/model"
@@ -27,7 +26,7 @@ func (s *SQLiteStore) CreateDatasetVersion(ctx context.Context, d *model.Dataset
 	if d.Name == "" {
 		return nil, fmt.Errorf("name is required")
 	}
-	if err := model.ValidName(d.Name, 250); err != nil {
+	if err := invalidValue(model.ValidName(d.Name, 250)); err != nil {
 		return nil, fmt.Errorf("name: %w", err)
 	}
 	if d.ContentHash == "" {
@@ -43,9 +42,20 @@ func (s *SQLiteStore) CreateDatasetVersion(ctx context.Context, d *model.Dataset
 		d.LifecycleStage = "active"
 	}
 
+	// Concurrent uploads of the same name race on MAX(version)+1; retry the
+	// whole txn on a UNIQUE violation / snapshot conflict.
+	if err := retryWriteRace(ctx, func() error {
+		return s.createDatasetVersionOnce(ctx, d, parents)
+	}); err != nil {
+		return nil, err
+	}
+	return d, nil
+}
+
+func (s *SQLiteStore) createDatasetVersionOnce(ctx context.Context, d *model.DatasetVersion, parents []int64) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -55,12 +65,12 @@ func (s *SQLiteStore) CreateDatasetVersion(ctx context.Context, d *model.Dataset
 		err := tx.QueryRowContext(ctx, `SELECT workspace_id FROM datasets_v2 WHERE id = ?`, pid).Scan(&ws)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
-				return nil, fmt.Errorf("parent dataset %d not found", pid)
+				return fmt.Errorf("parent dataset %d not found", pid)
 			}
-			return nil, err
+			return err
 		}
 		if ws != d.WorkspaceID {
-			return nil, fmt.Errorf("parent %d is in workspace %q, child is in %q", pid, ws, d.WorkspaceID)
+			return fmt.Errorf("parent %d is in workspace %q, child is in %q", pid, ws, d.WorkspaceID)
 		}
 	}
 
@@ -71,7 +81,7 @@ func (s *SQLiteStore) CreateDatasetVersion(ctx context.Context, d *model.Dataset
 		d.WorkspaceID, d.Name,
 	).Scan(&maxVer)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	d.Version = maxVer.Int64 + 1
 
@@ -83,11 +93,11 @@ func (s *SQLiteStore) CreateDatasetVersion(ctx context.Context, d *model.Dataset
 		nilIfEmpty(d.SchemaJSON), nilIfEmpty(d.Description),
 		d.WorkspaceID, d.CreatedAt, nilIfEmpty(d.CreatedBy), d.LifecycleStage)
 	if err != nil {
-		return nil, fmt.Errorf("insert dataset_v2: %w", err)
+		return fmt.Errorf("insert dataset_v2: %w", err)
 	}
 	id, err := res.LastInsertId()
 	if err != nil {
-		return nil, err
+		return err
 	}
 	d.ID = id
 
@@ -95,7 +105,7 @@ func (s *SQLiteStore) CreateDatasetVersion(ctx context.Context, d *model.Dataset
 	// but defensive — and sets the contract for future edits).
 	for _, pid := range parents {
 		if pid == id {
-			return nil, fmt.Errorf("dataset cannot be its own parent")
+			return fmt.Errorf("dataset cannot be its own parent")
 		}
 	}
 
@@ -105,15 +115,12 @@ func (s *SQLiteStore) CreateDatasetVersion(ctx context.Context, d *model.Dataset
 			 ON CONFLICT(child_id, parent_id) DO NOTHING`,
 			id, pid,
 		); err != nil {
-			return nil, fmt.Errorf("insert lineage edge %d→%d: %w", pid, id, err)
+			return fmt.Errorf("insert lineage edge %d→%d: %w", pid, id, err)
 		}
 	}
 	d.Parents = append([]int64(nil), parents...)
 
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-	return d, nil
+	return tx.Commit()
 }
 
 // ListDatasets returns the latest active version of each dataset name in
@@ -273,6 +280,9 @@ descLoop:
 				cids = append(cids, cid)
 			}
 			rows.Close()
+			if err := rows.Err(); err != nil {
+				return nil, err
+			}
 			for _, cid := range cids {
 				if len(descendants) >= maxLineageNodes {
 					break descLoop
@@ -385,7 +395,3 @@ func scanDatasetVersions(rows *sql.Rows) ([]*model.DatasetVersion, error) {
 	}
 	return out, rows.Err()
 }
-
-// debug helper — prevents linter warnings about unused imports if the
-// strings package is referenced.
-var _ = strings.HasPrefix

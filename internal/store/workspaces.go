@@ -16,11 +16,11 @@ import (
 // CreateWorkspace inserts a new workspace.
 // Returns ErrAlreadyExists when the id or name is already taken.
 func (s *SQLiteStore) CreateWorkspace(ctx context.Context, w *model.Workspace) error {
-	if err := validateWorkspaceID(w.ID); err != nil {
+	if err := invalidValue(validateWorkspaceID(w.ID)); err != nil {
 		return err
 	}
 	if w.Name == "" {
-		return errors.New("workspace name cannot be empty")
+		return invalidValue(errors.New("workspace name cannot be empty"))
 	}
 	now := time.Now().UnixMilli()
 	if w.CreationTime == 0 {
@@ -79,7 +79,7 @@ func (s *SQLiteStore) UpdateWorkspace(ctx context.Context, id string, name *stri
 	args := []any{}
 	if name != nil {
 		if *name == "" {
-			return errors.New("workspace name cannot be empty")
+			return invalidValue(errors.New("workspace name cannot be empty"))
 		}
 		sets = append(sets, "name = ?")
 		args = append(args, *name)
@@ -106,30 +106,64 @@ func (s *SQLiteStore) UpdateWorkspace(ctx context.Context, id string, name *stri
 	return nil
 }
 
+// workspaceOwnedTables lists tables whose rows belong to a workspace and must
+// block its deletion. experiments / registered_models / prompts carry
+// ON DELETE CASCADE into workspaces, so deleting a non-empty workspace would
+// silently destroy them; the rest have no FK, so their rows would be
+// orphaned and resurface if a workspace with the same id were re-created.
+var workspaceOwnedTables = []string{
+	"experiments", "registered_models", "prompts", "datasets_v2", "webhooks", "peers",
+}
+
 // DeleteWorkspace removes a workspace. Returns ErrConflict if the workspace is
-// "default" or still has experiments assigned to it.
+// "default" or still owns experiments, registered models, prompts, datasets,
+// webhooks or peers. Per-workspace dashboards are removed with it.
+//
+// The emptiness check and the delete are one statement, so a row created
+// concurrently cannot be cascade-deleted between check and delete.
 func (s *SQLiteStore) DeleteWorkspace(ctx context.Context, id string) error {
 	if id == "default" {
 		return fmt.Errorf("%w: cannot delete the default workspace", ErrConflict)
 	}
-	// Check for experiments in this workspace (any lifecycle stage).
-	var count int
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM experiments WHERE workspace_id = ?`, id).Scan(&count); err != nil {
-		return err
+	q := `DELETE FROM workspaces WHERE id = ?`
+	args := []any{id}
+	for _, tbl := range workspaceOwnedTables {
+		q += ` AND NOT EXISTS (SELECT 1 FROM ` + tbl + ` WHERE workspace_id = ?)`
+		args = append(args, id)
 	}
-	if count > 0 {
-		return fmt.Errorf("%w: workspace %q has %d experiment(s); move or delete them first", ErrConflict, id, count)
-	}
-	res, err := s.db.ExecContext(ctx, `DELETE FROM workspaces WHERE id = ?`, id)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return ErrNotFound
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, q, args...)
+	if err != nil {
+		return err
 	}
-	return nil
+	if n, _ := res.RowsAffected(); n == 0 {
+		var exists int
+		if err := tx.QueryRowContext(ctx, `SELECT 1 FROM workspaces WHERE id = ?`, id).Scan(&exists); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrNotFound
+			}
+			return err
+		}
+		for _, tbl := range workspaceOwnedTables {
+			var count int
+			if err := tx.QueryRowContext(ctx,
+				`SELECT COUNT(*) FROM `+tbl+` WHERE workspace_id = ?`, id).Scan(&count); err != nil {
+				return err
+			}
+			if count > 0 {
+				return fmt.Errorf("%w: workspace %q has %d row(s) in %s; move or delete them first", ErrConflict, id, count, tbl)
+			}
+		}
+		return fmt.Errorf("%w: workspace %q is not empty", ErrConflict, id)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM dashboards WHERE workspace_id = ?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func scanWorkspace(row *sql.Row) (*model.Workspace, error) {
@@ -165,7 +199,7 @@ func validateWorkspaceID(id string) error {
 // AddMember sets or updates the role of a user in a workspace.
 func (s *SQLiteStore) AddMember(ctx context.Context, workspaceID, userID, role string) error {
 	if role != "viewer" && role != "editor" && role != "admin" {
-		return fmt.Errorf("invalid role %q: must be viewer, editor, or admin", role)
+		return fmt.Errorf("%w: invalid role %q: must be viewer, editor, or admin", ErrInvalidValue, role)
 	}
 	// Verify workspace exists.
 	if _, err := s.GetWorkspace(ctx, workspaceID); err != nil {

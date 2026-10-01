@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/gorevds/litemlflow/internal/model"
@@ -222,6 +223,8 @@ func (s *SQLiteStore) getRunAsOfImpl(ctx context.Context, runID, workspaceID str
 	for k, v := range tagMap {
 		out = append(out, model.KV{Key: k, Value: v})
 	}
+	// Map iteration is random; keep the GetTags (ORDER BY key) contract.
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 
 	return run, out, nil
 }

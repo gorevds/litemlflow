@@ -9,6 +9,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/gorevds/litemlflow/internal/model"
 )
@@ -30,6 +31,21 @@ var (
 	ErrInvalidValue = errors.New("invalid value")
 )
 
+// invalidValue tags a client-input validation error with ErrInvalidValue so
+// the HTTP layer maps it to 400 instead of 500. nil passes through.
+func invalidValue(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: %v", ErrInvalidValue, err)
+}
+
+// invalidFilter is the ErrInvalidFilter counterpart of invalidValue, used by
+// the filter / order_by / page_token parsers.
+func invalidFilter(format string, args ...any) error {
+	return fmt.Errorf("%w: "+format, append([]any{ErrInvalidFilter}, args...)...)
+}
+
 // SearchOptions controls listing endpoints.
 type SearchOptions struct {
 	ExperimentIDs  []int64  // empty means all
@@ -38,7 +54,10 @@ type SearchOptions struct {
 	OrderBy        []string // e.g., ["attributes.start_time DESC"]
 	MaxResults     int      // capped by impl (default 100, max 50000)
 	PageToken      string   // opaque cursor from previous response
-	WorkspaceID    string   // if set, scope experiments to this workspace (default "default")
+	// WorkspaceID scopes results to one workspace. SearchExperiments falls
+	// back to "default" when empty; SearchRuns applies no workspace scope
+	// when empty, so multi-tenant callers must set it.
+	WorkspaceID string
 }
 
 // SearchResult is a generic paginated result.
