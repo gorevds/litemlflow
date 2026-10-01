@@ -69,21 +69,24 @@ Locked-in via `.github/scripts/check_gosec.py`. CI fails on any new HIGH outside
 # rule  file:line                                            why
 
 # G115 — integer conversions where range is bounded by construction
-G115 cmd/litemlflow/main.go:553                              tar restore mode mask: hdr.Mode &= 0o640 then cast — values are bounded
-G115 internal/grpcotlp/ingest.go:79                          OTLP timestamps from gRPC peer; bounded by spec to fit int64
-G115 internal/grpcotlp/ingest.go:90                          ditto
+G115 cmd/litemlflow/main.go:677                              tar restore mode mask: hdr.Mode &= 0o640 then cast — values are bounded
+G115 internal/grpcotlp/ingest.go:117                         OTLP timestamps from gRPC peer; bounded by spec to fit int64
+G115 internal/grpcotlp/ingest.go:128                         ditto
 G115 internal/model/types.go:262                             id-gen byte extraction byte(t>>(8*i)); <=255 by construction
 G115 internal/model/types.go:268                             ditto
 G115 internal/model/types.go:283                             ditto
 G115 internal/model/types.go:308                             ditto
-G115 internal/server/middleware.go:365                       shortHash byte extraction byte(seed>>N); <=255 by construction
-G115 internal/server/middleware.go:366                       ditto
+G115 internal/server/middleware.go:423                       shortHash byte extraction byte(seed>>N); <=255 by construction
+G115 internal/server/middleware.go:424                       ditto
 
 # G118 — detached goroutine context (intentional, see code comment)
-G118 internal/server/middleware.go:268                       session-touch must outlive request; 5s timeout caps lifetime
+G118 internal/server/middleware.go:323                       session-touch must outlive request; 5s timeout caps lifetime
 
 # G122 — backup walk uses absolute path with a known root; not user-controllable
-G122 cmd/litemlflow/main.go:357                              backup tar walker; root is operator-supplied
+G122 cmd/litemlflow/main.go:514                              backup tar walker; root is operator-supplied
+
+# G704 — SSRF taint: healthcheck --url is supplied by the operator invoking the CLI
+G704 cmd/litemlflow/main.go:811                              `litemlflow healthcheck --url`; operator-supplied, no remote input
 
 # G701 — SQL injection via taint analysis: false positive
 G701 internal/store/sqlite.go:84                             PRAGMA mmap_size=%d; value is a validated int64 (>0) parsed from an operator env var, and SQLite PRAGMA arguments cannot be parameterized with placeholders

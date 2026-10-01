@@ -15,6 +15,7 @@ Lines outside that fenced block are ignored.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -59,18 +60,9 @@ def main() -> int:
     for issue in gosec.get("Issues", []):
         if issue.get("severity") != "HIGH":
             continue
-        # Strip absolute prefix; CI runs in the repo root.
-        f = issue["file"]
-        for prefix in ("/home/runner/work/", "/home/sber/gorev/litemlflow/"):
-            if f.startswith(prefix):
-                # strip first two path components for github runner / local
-                f = f[len(prefix):]
-                if "/" in f:
-                    parts = f.split("/")
-                    # On runner: <repo>/<repo>/file/path → keep from index 2
-                    if len(parts) >= 3 and parts[0] == parts[1]:
-                        f = "/".join(parts[2:])
-                break
+        # gosec reports absolute paths; make them repo-relative (the check
+        # runs from the repo root, locally and on the CI runner).
+        f = os.path.relpath(issue["file"])
         key = f"{issue['rule_id']}:{f}:{issue['line']}"
         if key not in accept:
             violators.append({
