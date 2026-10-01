@@ -9,17 +9,21 @@
 //	litemlflow backup       [--data DIR] [--out FILE]
 //	litemlflow restore      [--data DIR] [--in FILE]
 //	litemlflow import-mlflow --from URL --data DIR [--workspace WS] [--include-deleted] [--dry-run]
+//	litemlflow healthcheck  [--url URL]
 package main
 
 import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -37,6 +41,8 @@ import (
 	"github.com/gorevds/litemlflow/internal/server"
 	"github.com/gorevds/litemlflow/internal/store"
 	"github.com/gorevds/litemlflow/pkg/version"
+
+	_ "modernc.org/sqlite" // same "sqlite" driver the store registers; used for backup snapshots
 )
 
 func main() {
@@ -64,6 +70,8 @@ func main() {
 		err = runImportMLflow(args)
 	case "hash-password":
 		err = runHashPassword(args)
+	case "healthcheck":
+		err = runHealthcheck(args)
 	case "help", "-h", "--help":
 		usage(os.Stdout)
 	default:
@@ -93,6 +101,7 @@ Usage:
   litemlflow backup       [--data DIR] [--out FILE]
   litemlflow restore      [--data DIR] [--in FILE]
   litemlflow import-mlflow --from MLFLOW_URL --data DIR [--workspace WS] [--include-deleted] [--dry-run]
+  litemlflow healthcheck  [--url URL]   # exit 0 iff GET URL (default http://127.0.0.1:<port>/healthz) returns {"ok":true}
   litemlflow hash-password   # reads a password from stdin, prints a bcrypt hash for --basic-pass-hash
   litemlflow version
 
@@ -283,9 +292,14 @@ func runRollback(args []string) error {
 
 // runBackup tars the data directory into a single .tar.gz file.
 //
-// The server should be stopped or quiescent during a backup; SQLite WAL is
-// included verbatim, so even if writes are happening, the backup is at
-// least crash-consistent (matches a power-loss scenario).
+// The SQLite database is not copied byte-for-byte: copying the live db/-wal/
+// -shm files while the server writes can capture a torn, unrestorable state.
+// Instead the DB is snapshotted with `VACUUM INTO` (a transactionally
+// consistent copy containing every committed row, WAL folded in) into a
+// temp file under $TMPDIR, and that snapshot is archived under the DB's
+// usual name. The live -wal/-shm/-journal files are skipped. Artifacts and
+// any other files are copied as-is, so a backup is safe to take while the
+// server runs.
 //
 // **S3 artifact backend:** runBackup only tars cfg.DataDir, which on an
 // S3-configured server contains the SQLite DB but NOT the artifacts (those
@@ -350,7 +364,11 @@ func runBackup(args []string) error {
 	}
 	defer func() { _ = closeAll() }()
 
-	if err := writeDirToTar(tw, cfg.DataDir, target); err != nil {
+	dbSkip, err := writeDBSnapshotToTar(tw, cfg.DataDir, cfg.DBPath)
+	if err != nil {
+		return fmt.Errorf("backup: snapshot database: %w", err)
+	}
+	if err := writeDirToTar(tw, cfg.DataDir, append(dbSkip, target)...); err != nil {
 		return err
 	}
 
@@ -389,14 +407,83 @@ func runBackup(args []string) error {
 	return nil
 }
 
+// writeDBSnapshotToTar takes a consistent snapshot of the SQLite DB at
+// dbPath via `VACUUM INTO` and writes it to tw under the DB's data-dir-relative
+// name (or its base name when dbPath lies outside dataDir). It returns the
+// live DB file paths (db, -wal, -shm, -journal) that the directory walk must
+// skip. A missing DB is not an error: there is nothing to snapshot.
+func writeDBSnapshotToTar(tw *tar.Writer, dataDir, dbPath string) ([]string, error) {
+	skip := []string{dbPath, dbPath + "-wal", dbPath + "-shm", dbPath + "-journal"}
+	if _, err := os.Stat(dbPath); errors.Is(err, os.ErrNotExist) {
+		return skip, nil
+	} else if err != nil {
+		return nil, err
+	}
+	tmpDir, err := os.MkdirTemp("", "litemlflow-backup-*")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(tmpDir)
+	snap := filepath.Join(tmpDir, "snapshot.db")
+
+	// mode=ro: this connection never writes the live DB (VACUUM INTO only
+	// writes the target file). In WAL mode the snapshot read runs
+	// concurrently with the server's writer and sees the last commit.
+	dsn := "file:" + dbPath + "?mode=ro&_pragma=busy_timeout(10000)"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	if _, err := db.ExecContext(context.Background(), "VACUUM INTO ?", snap); err != nil {
+		return nil, fmt.Errorf("VACUUM INTO: %w", err)
+	}
+	if err := db.Close(); err != nil {
+		return nil, err
+	}
+
+	name := filepath.Base(dbPath)
+	if rel, err := filepath.Rel(dataDir, dbPath); err == nil && rel != "." && !strings.HasPrefix(rel, "..") {
+		name = filepath.ToSlash(rel)
+	}
+	fp, err := os.Open(snap)
+	if err != nil {
+		return nil, err
+	}
+	defer fp.Close()
+	info, err := fp.Stat()
+	if err != nil {
+		return nil, err
+	}
+	hdr := &tar.Header{
+		Typeflag: tar.TypeReg,
+		Name:     name,
+		Mode:     0o640,
+		Size:     info.Size(),
+		ModTime:  time.Now(),
+	}
+	if err := tw.WriteHeader(hdr); err != nil {
+		return nil, err
+	}
+	if _, err := io.Copy(tw, fp); err != nil {
+		return nil, err
+	}
+	return skip, nil
+}
+
 // writeDirToTar adds every entry under root to tw with root-relative names.
-// skip (the backup's own output path, when it lies inside root) is excluded so
-// the archive never tries to contain itself.
-func writeDirToTar(tw *tar.Writer, root, skip string) error {
-	skipAbs := ""
-	if skip != "" {
-		if a, err := filepath.Abs(skip); err == nil {
-			skipAbs = a
+// skip lists paths to exclude: the backup's own output path (when it lies
+// inside root, so the archive never tries to contain itself) and the live
+// SQLite files already archived as a snapshot.
+func writeDirToTar(tw *tar.Writer, root string, skip ...string) error {
+	skipAbs := map[string]bool{}
+	for _, sp := range skip {
+		if sp == "" {
+			continue
+		}
+		if a, err := filepath.Abs(sp); err == nil {
+			skipAbs[a] = true
 		}
 	}
 	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
@@ -407,8 +494,8 @@ func writeDirToTar(tw *tar.Writer, root, skip string) error {
 		if rel == "." {
 			return nil
 		}
-		if skipAbs != "" {
-			if a, aerr := filepath.Abs(path); aerr == nil && a == skipAbs {
+		if len(skipAbs) > 0 {
+			if a, aerr := filepath.Abs(path); aerr == nil && skipAbs[a] {
 				return nil
 			}
 		}
@@ -705,6 +792,57 @@ func runHashPassword(args []string) error {
 	}
 	fmt.Println(h)
 	return nil
+}
+
+// runHealthcheck GETs the server's /healthz and exits non-zero unless it
+// answers 200 with {"ok":true}. Intended for container HEALTHCHECKs on
+// shell-less images (distroless), where curl/wget are unavailable.
+func runHealthcheck(args []string) error {
+	fs := flag.NewFlagSet("healthcheck", flag.ContinueOnError)
+	url := fs.String("url", defaultHealthURL(os.Getenv("LITEMLFLOW_ADDR")), "health endpoint URL")
+	timeout := fs.Duration("timeout", 3*time.Second, "request timeout")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	return checkHealth(&http.Client{Timeout: *timeout}, *url)
+}
+
+func checkHealth(c *http.Client, url string) error {
+	resp, err := c.Get(url)
+	if err != nil {
+		return fmt.Errorf("healthcheck: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("healthcheck: %s returned %s", url, resp.Status)
+	}
+	var body struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&body); err != nil {
+		return fmt.Errorf("healthcheck: decode body: %w", err)
+	}
+	if !body.OK {
+		return errors.New(`healthcheck: response lacks "ok":true`)
+	}
+	return nil
+}
+
+// defaultHealthURL builds http://<host>:<port>/healthz from a listen address
+// such as ":5000" or "0.0.0.0:8080"; wildcard/empty hosts map to 127.0.0.1.
+func defaultHealthURL(addr string) string {
+	host, port := "127.0.0.1", "5000"
+	if addr != "" {
+		if h, p, err := net.SplitHostPort(addr); err == nil {
+			if p != "" {
+				port = p
+			}
+			if h != "" && h != "0.0.0.0" && h != "::" {
+				host = h
+			}
+		}
+	}
+	return "http://" + net.JoinHostPort(host, port) + "/healthz"
 }
 
 func newLogger(dev bool) *slog.Logger {

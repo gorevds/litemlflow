@@ -2,6 +2,21 @@
 
 All notable changes to LiteMLflow are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/) starting at v1.0.
 
+## [Unreleased]
+
+### Added
+- `litemlflow healthcheck [--url URL] [--timeout 3s]`: exits 0 iff `/healthz` returns 200 `{"ok":true}`; default URL follows `LITEMLFLOW_ADDR`. The Docker image now declares `HEALTHCHECK ["/litemlflow","healthcheck"]`.
+- `--trusted-proxies` / `LITEMLFLOW_TRUSTED_PROXIES` (IPs/CIDRs): honour `X-Forwarded-For` / `X-Real-IP` from listed proxies when keying the login rate limiter. Default: TCP peer only.
+
+### Fixed
+- **Backup**: the DB is captured with `VACUUM INTO` instead of copying live `db`/`-wal`/`-shm` files, so backups taken while the server runs are consistent. Archive errors are surfaced, files closed promptly, `--out` inside the data dir is not archived into itself.
+- **Docker**: `/data` is owned by `nonroot`; the default anonymous volume was root-owned and the server failed with "unable to open database file".
+- **Store**: migrations no longer cascade-delete child rows on table rebuilds (`foreign_keys=OFF` + `foreign_key_check`); `SearchRuns` / `CloneExperiment` respect workspaces; spans cannot be overwritten across traces; bad filters/ids/page tokens return 400 not 500; version-number races retried; importer resumable without duplicates.
+- **Server/auth**: RBAC checks the workspace in the path (no header/cookie takeover) and fails closed; OIDC host check, timeouts, JWKS refetch on unknown `kid`; rate limiter evicts idle buckets and groups IPv6 by /64; `MaxArtifactSize` enforced; CSP drops `'unsafe-inline'`; bounded metrics labels.
+- **API**: workspace isolation for search, webhooks, clone, evals, traces, analytics; SSRF-safe egress (per-dial IP checks, no redirects) for webhooks and federation; upload/body size caps; S3 path normalisation and folder delete; `{name}` params with `/` or `%` resolve; open-redirect fix in `return_to`.
+- **SDK/UI**: LlamaIndex spans are actually sent; LangChain handler handles LCEL/`serialized=None`; client no longer blindly retries non-idempotent creates; UI XSS (`span_kind`) and router fixes.
+- **Infra**: operator least-privilege RBAC and no panics on bad input; CI actions pinned to SHAs; GHCR image publishing; health-checked deploy script with rollback.
+
 ## [v2.1.0] — 2026-05-11
 
 Stable. Promotes v2.1.0-rc1 with 5 fixes from independent review.

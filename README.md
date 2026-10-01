@@ -107,7 +107,7 @@ LiteMLflow follows semver starting at v1.0. **v2.0 is the LTS stream.**
 - **Auth** — anonymous, basic, OIDC (PKCE + RS256 + JWKS), session cookies, RBAC (viewer/editor/admin)
 - **Storage backends** — filesystem (default, zero config) and S3-compatible (MinIO/AWS, pure-Go SigV4, multipart)
 - **Observability** — Prometheus `/metrics` endpoint (12 metric families), server-side LTTB downsampling
-- **CLI** — `up`, `migrate`, `rollback`, `backup`, `restore`, `import-mlflow`, `version`
+- **CLI** — `up`, `migrate`, `rollback`, `backup` (consistent online snapshot), `restore`, `import-mlflow`, `healthcheck`, `hash-password`, `version`
 - **Distribution** — Docker image, Helm chart, Kubernetes operator, raw binary (Snap / Homebrew / Debian / RPM / Terraform sunset in v1.2 — see `dist/_sunset/`)
 - **Python SDK** — `litemlflow[langchain]` (auto-instrument LangChain), `litemlflow[llamaindex]` (auto-instrument LlamaIndex)
 - **Tested against real MLflow Python client 3.x** — 31/31 compat checks pass live at https://lmf.gorev.space

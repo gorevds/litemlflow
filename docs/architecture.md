@@ -74,7 +74,10 @@ $DATA/
 └── plugins/                  # plugin sockets and config (future)
 ```
 
-A `litemlflow backup` is just `tar -czf snap.tgz $DATA`.
+A `litemlflow backup` is a `tar.gz` of `$DATA`, except that the SQLite DB is
+captured with `VACUUM INTO` (a transactionally consistent snapshot) instead of
+copying the live `litemlflow.db`/`-wal`/`-shm` files, so it is safe while the
+server is running.
 
 ### S3-compatible backend
 

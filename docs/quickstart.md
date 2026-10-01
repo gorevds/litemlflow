@@ -83,7 +83,21 @@ Open the UI at the run page — you'll see the metric chart *and* the trace wate
 ./bin/litemlflow restore --data ./fresh-data --in backup.tar.gz
 ```
 
-The data directory is the source of truth; copy it anywhere.
+The data directory is the source of truth. `backup` is safe while the server
+runs: the DB is snapshotted with `VACUUM INTO` (committed data only, WAL folded
+in) and artifacts are copied as-is. The snapshot is staged in `$TMPDIR`, so make
+sure it has room for one copy of the DB.
+
+## Health check
+
+```bash
+./bin/litemlflow healthcheck                                   # GET http://127.0.0.1:<port>/healthz
+./bin/litemlflow healthcheck --url http://10.0.0.5:5000/healthz --timeout 3s
+```
+
+Exits 0 when the endpoint returns 200 with `{"ok":true}`, 1 otherwise. The
+default URL uses the port from `LITEMLFLOW_ADDR` (fallback `5000`). The Docker
+image uses it as its `HEALTHCHECK` (distroless has no shell or curl).
 
 ## Auth
 
@@ -103,6 +117,24 @@ HASH=$(printf '%s' 'hunter2' | ./bin/litemlflow hash-password)
 ```
 
 Then put it behind a TLS-terminating proxy (Caddy, Traefik, Nginx) or use `--auth oidc`.
+
+### Behind a reverse proxy: `--trusted-proxies`
+
+The login rate limiter (`POST /api/v1/auth/login`) keys on the client IP. By
+default only the TCP peer address is used, so behind a proxy every user shares
+the proxy's bucket. Pass the proxy addresses to trust their forwarding headers:
+
+```bash
+./bin/litemlflow up --data ./data --trusted-proxies 127.0.0.1,10.0.0.0/8
+# or: LITEMLFLOW_TRUSTED_PROXIES="127.0.0.1, 10.0.0.0/8"
+```
+
+Comma/space-separated IPs or CIDRs; an invalid entry fails startup. Headers are
+honoured only when the TCP peer is in the list: `X-Forwarded-For` is walked
+right-to-left and the first untrusted hop is the client (a malformed hop stops
+the walk and the peer address is used); without XFF, `X-Real-IP` is used. IPv6
+clients are keyed by /64. Only list proxies you control and that overwrite or
+append to these headers — anything listed can choose the rate-limit key.
 
 ## What works today (v0.1)
 

@@ -8,7 +8,9 @@ Wants=network-online.target
 Type=simple
 User=lmf
 Group=lmf
-ExecStart=/opt/lmf/litemlflow up --data /var/lib/lmf --addr 127.0.0.1:5050
+# nginx on loopback is the only client; trust its X-Forwarded-For so the
+# login rate limiter keys on real client IPs.
+ExecStart=/opt/lmf/litemlflow up --data /var/lib/lmf --addr 127.0.0.1:5050 --trusted-proxies 127.0.0.1/32
 Restart=on-failure
 RestartSec=2s
 
