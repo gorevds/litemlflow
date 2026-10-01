@@ -8,7 +8,7 @@ require (
 	github.com/go-chi/chi/v5 v5.2.5
 	go.opentelemetry.io/proto/otlp v1.10.0
 	golang.org/x/crypto v0.57.0
-	google.golang.org/grpc v1.84.0
+	google.golang.org/grpc v1.83.2
 	modernc.org/sqlite v1.50.0
 )
 
