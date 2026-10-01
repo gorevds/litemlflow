@@ -17,6 +17,7 @@ import (
 	"github.com/gorevds/litemlflow/internal/artifact"
 	"github.com/gorevds/litemlflow/internal/model"
 	"github.com/gorevds/litemlflow/internal/store"
+	"github.com/gorevds/litemlflow/internal/webhooks"
 )
 
 // EventNotifier is the minimal interface the mlflow handler needs from
@@ -30,6 +31,9 @@ type Handler struct {
 	Store      store.Store
 	Artifacts  artifact.Store
 	Dispatcher EventNotifier // nil when webhooks are disabled
+	// MaxArtifactSize caps a single artifact upload in bytes
+	// (config.MaxArtifactSize). <= 0 uses the 5 GiB default.
+	MaxArtifactSize int64
 }
 
 // Mount attaches the MLflow REST API to the given router.
@@ -95,6 +99,32 @@ func (h *Handler) ensureRunInWorkspace(r *http.Request, runID string) error {
 	return err
 }
 
+// getExperimentInWorkspace loads an experiment by id and returns
+// store.ErrNotFound (→404) when it belongs to another workspace. The
+// experiment_id-addressed endpoints (get, delete, restore, update,
+// set-experiment-tag) otherwise let a caller in workspace B read or mutate
+// workspace A's experiments by id.
+func (h *Handler) getExperimentInWorkspace(r *http.Request, id int64) (*model.Experiment, error) {
+	e, err := h.Store.GetExperiment(r.Context(), id)
+	if err != nil {
+		return nil, err
+	}
+	ws := e.WorkspaceID
+	if ws == "" {
+		ws = "default"
+	}
+	if ws != currentWorkspace(r) {
+		return nil, fmt.Errorf("experiment %d: %w", id, store.ErrNotFound)
+	}
+	return e, nil
+}
+
+// notifyCtx carries the request's workspace to the webhook dispatcher so
+// only that workspace's webhooks fire.
+func notifyCtx(r *http.Request) context.Context {
+	return webhooks.WithWorkspace(r.Context(), currentWorkspace(r))
+}
+
 // ---- experiments ------------------------------------------------------------
 
 type createExperimentReq struct {
@@ -147,7 +177,7 @@ func (h *Handler) GetExperiment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "experiment_id is required")
 		return
 	}
-	e, err := h.Store.GetExperiment(r.Context(), id)
+	e, err := h.getExperimentInWorkspace(r, id)
 	if err != nil {
 		writeStoreErr(w, err)
 		return
@@ -252,6 +282,10 @@ func (h *Handler) DeleteExperiment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "experiment_id is required")
 		return
 	}
+	if _, err := h.getExperimentInWorkspace(r, id); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
 	if err := h.Store.SetExperimentLifecycle(r.Context(), id, model.LifecycleDeleted); err != nil {
 		writeStoreErr(w, err)
 		return
@@ -269,6 +303,10 @@ func (h *Handler) RestoreExperiment(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(req.ExperimentID, 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "experiment_id is required")
+		return
+	}
+	if _, err := h.getExperimentInWorkspace(r, id); err != nil {
+		writeStoreErr(w, err)
 		return
 	}
 	if err := h.Store.SetExperimentLifecycle(r.Context(), id, model.LifecycleActive); err != nil {
@@ -299,6 +337,10 @@ func (h *Handler) UpdateExperiment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "new_name is required")
 		return
 	}
+	if _, err := h.getExperimentInWorkspace(r, id); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
 	if err := h.Store.UpdateExperiment(r.Context(), id, &req.NewName); err != nil {
 		writeStoreErr(w, err)
 		return
@@ -322,6 +364,10 @@ func (h *Handler) SetExperimentTag(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(req.ExperimentID, 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "experiment_id is required")
+		return
+	}
+	if _, err := h.getExperimentInWorkspace(r, id); err != nil {
+		writeStoreErr(w, err)
 		return
 	}
 	if err := h.Store.SetExperimentTag(r.Context(), id, req.Key, req.Value); err != nil {
@@ -361,17 +407,8 @@ func (h *Handler) CreateRun(w http.ResponseWriter, r *http.Request) {
 	// experiment. The FK only rejects a non-existent experiment, so without
 	// this a valid foreign experiment_id would be accepted. 404 (not 403) so
 	// foreign experiment ids are indistinguishable from missing ones.
-	exp, err := h.Store.GetExperiment(r.Context(), expID)
-	if err != nil {
+	if _, err := h.getExperimentInWorkspace(r, expID); err != nil {
 		writeStoreErr(w, err)
-		return
-	}
-	expWS := exp.WorkspaceID
-	if expWS == "" {
-		expWS = "default"
-	}
-	if expWS != currentWorkspace(r) {
-		writeError(w, http.StatusNotFound, "RESOURCE_DOES_NOT_EXIST", "experiment not found")
 		return
 	}
 	run := &model.Run{
@@ -396,7 +433,7 @@ func (h *Handler) CreateRun(w http.ResponseWriter, r *http.Request) {
 	}
 	// Fire webhook for run creation.
 	if h.Dispatcher != nil {
-		h.Dispatcher.Notify(r.Context(), "run_started", run)
+		h.Dispatcher.Notify(notifyCtx(r), "run_started", run)
 	}
 	writeJSON(w, runResp{Run: runDTO{
 		Info: runInfoToDTO(run),
@@ -587,7 +624,7 @@ func (h *Handler) UpdateRun(w http.ResponseWriter, r *http.Request) {
 	// Fire webhook when status transitions to a terminal state.
 	if h.Dispatcher != nil && status != nil {
 		if event := statusToWebhookEvent(*status); event != "" {
-			h.Dispatcher.Notify(r.Context(), event, run)
+			h.Dispatcher.Notify(notifyCtx(r), event, run)
 		}
 	}
 	writeJSON(w, struct {
@@ -666,7 +703,25 @@ func (h *Handler) SearchRuns(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "invalid experiment_id "+s)
 			return
 		}
+		// Workspace scope: silently drop experiments that are missing or
+		// belong to another workspace (MLflow returns no runs for unknown
+		// experiment ids rather than an error).
+		if _, err := h.getExperimentInWorkspace(r, n); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			writeStoreErr(w, err)
+			return
+		}
 		expIDs = append(expIDs, n)
+	}
+	// An empty experiment list means "all experiments" to the store, which
+	// would return every tenant's runs. MLflow returns nothing for an empty
+	// experiment_ids list, so pin the query to an id that cannot exist
+	// (ids are positive) — the store still validates filter/order_by/
+	// page_token, keeping those 400s intact.
+	if len(expIDs) == 0 {
+		expIDs = []int64{-1}
 	}
 	asOf, err := parseAsOf(r)
 	if err != nil {
@@ -690,6 +745,7 @@ func (h *Handler) SearchRuns(w http.ResponseWriter, r *http.Request) {
 		stage = "all"
 	}
 	res, err := h.Store.SearchRuns(r.Context(), store.SearchOptions{
+		WorkspaceID:    currentWorkspace(r),
 		ExperimentIDs:  expIDs,
 		Filter:         req.Filter,
 		LifecycleStage: stage,
@@ -1097,7 +1153,7 @@ func (h *Handler) ListArtifacts(w http.ResponseWriter, r *http.Request) {
 	}
 	entries, err := h.Artifacts.List(runID, dir)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		writeArtifactErr(w, err)
 		return
 	}
 	files := make([]artifactFile, 0, len(entries))
@@ -1136,7 +1192,7 @@ func artifactsRouter(h *Handler) http.Handler {
 			}
 			entries, err := h.Artifacts.List(runID, rel)
 			if err != nil {
-				writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+				writeArtifactErr(w, err)
 				return
 			}
 			out := make([]artifactFile, 0, len(entries))
@@ -1171,11 +1227,7 @@ func artifactsRouter(h *Handler) http.Handler {
 		case http.MethodGet:
 			rc, size, err := h.Artifacts.Open(runID, rel)
 			if err != nil {
-				if errors.Is(err, artifact.ErrNotFound) {
-					writeError(w, http.StatusNotFound, "RESOURCE_DOES_NOT_EXIST", "artifact not found")
-					return
-				}
-				writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+				writeArtifactErr(w, err)
 				return
 			}
 			defer rc.Close()
@@ -1187,18 +1239,24 @@ func artifactsRouter(h *Handler) http.Handler {
 			w.Header().Set("Content-Disposition", `attachment; filename="`+safeName+`"`)
 			_, _ = io.Copy(w, rc)
 		case http.MethodPut:
-			if err := h.Artifacts.Upload(runID, rel, req.Body, 0); err != nil {
-				writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", err.Error())
+			// The global body-limit middleware skips this route (artifacts
+			// legitimately exceed it), so enforce the artifact cap here —
+			// previously maxSize=0 meant "unlimited" for the filesystem
+			// backend, letting one request fill the disk.
+			maxSize := h.maxArtifactSize()
+			req.Body = http.MaxBytesReader(w, req.Body, maxSize)
+			if err := h.Artifacts.Upload(runID, rel, req.Body, maxSize); err != nil {
+				var mbe *http.MaxBytesError
+				if errors.As(err, &mbe) {
+					err = artifact.ErrPayloadTooBig
+				}
+				writeArtifactErr(w, err)
 				return
 			}
 			writeJSON(w, struct{}{})
 		case http.MethodDelete:
 			if err := h.Artifacts.Delete(runID, rel); err != nil {
-				if errors.Is(err, artifact.ErrNotFound) {
-					writeError(w, http.StatusNotFound, "RESOURCE_DOES_NOT_EXIST", "artifact not found")
-					return
-				}
-				writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+				writeArtifactErr(w, err)
 				return
 			}
 			writeJSON(w, struct{}{})
@@ -1208,6 +1266,32 @@ func artifactsRouter(h *Handler) http.Handler {
 	}
 	r.HandleFunc("/*", handle)
 	return r
+}
+
+// defaultMaxArtifactSize mirrors config.MaxArtifactSize's default.
+const defaultMaxArtifactSize = int64(5) << 30 // 5 GiB
+
+func (h *Handler) maxArtifactSize() int64 {
+	if h.MaxArtifactSize > 0 {
+		return h.MaxArtifactSize
+	}
+	return defaultMaxArtifactSize
+}
+
+// writeArtifactErr maps artifact-store errors to MLflow-shaped responses:
+// missing → 404, bad path → 400, over the size cap → 413, anything else
+// (I/O, backend failures) → 500.
+func writeArtifactErr(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, artifact.ErrNotFound):
+		writeError(w, http.StatusNotFound, "RESOURCE_DOES_NOT_EXIST", "artifact not found")
+	case errors.Is(err, artifact.ErrInvalidPath):
+		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", err.Error())
+	case errors.Is(err, artifact.ErrPayloadTooBig):
+		writeError(w, http.StatusRequestEntityTooLarge, "INVALID_PARAMETER_VALUE", err.Error())
+	default:
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+	}
 }
 
 // splitArtifactPath parses /<run_id>/<rel> from chi.URLParam.

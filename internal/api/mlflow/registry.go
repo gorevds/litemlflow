@@ -337,9 +337,23 @@ func (h *Handler) SetModelAlias(w http.ResponseWriter, r *http.Request) {
 }
 
 // DeleteModelAlias handles DELETE .../registered-models/alias.
+//
+// The MLflow Python client sends non-GET request parameters as a JSON body
+// even for DELETE (rest_utils.call_endpoint), so accept the body and fall
+// back to the query string used by curl-style callers.
 func (h *Handler) DeleteModelAlias(w http.ResponseWriter, r *http.Request) {
-	name := r.URL.Query().Get("name")
-	alias := r.URL.Query().Get("alias")
+	var req struct {
+		Name  string `json:"name"`
+		Alias string `json:"alias"`
+	}
+	_ = decodeJSON(r, &req)
+	name, alias := req.Name, req.Alias
+	if name == "" {
+		name = r.URL.Query().Get("name")
+	}
+	if alias == "" {
+		alias = r.URL.Query().Get("alias")
+	}
 	if name == "" || alias == "" {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "name and alias are required")
 		return

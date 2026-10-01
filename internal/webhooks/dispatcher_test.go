@@ -34,6 +34,9 @@ func (m *mockStore) RecordWebhookAttempt(_ context.Context, _ int64, status int,
 }
 
 func TestDispatcherDeliversOnRunFinished(t *testing.T) {
+	// httptest receivers live on loopback, which the SSRF guard blocks
+	// unless the operator opts in.
+	t.Setenv(webhooks.AllowPrivateEnv, "1")
 	var receivedCount atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedCount.Add(1)
@@ -69,6 +72,9 @@ func TestDispatcherDeliversOnRunFinished(t *testing.T) {
 }
 
 func TestDispatcherSignatureVerification(t *testing.T) {
+	// httptest receivers live on loopback, which the SSRF guard blocks
+	// unless the operator opts in.
+	t.Setenv(webhooks.AllowPrivateEnv, "1")
 	secret := "my-secret-key"
 	type delivery struct {
 		sig  string
@@ -112,6 +118,9 @@ func TestDispatcherSignatureVerification(t *testing.T) {
 }
 
 func TestDispatcherRetries(t *testing.T) {
+	// httptest receivers live on loopback, which the SSRF guard blocks
+	// unless the operator opts in.
+	t.Setenv(webhooks.AllowPrivateEnv, "1")
 	var callCount atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := callCount.Add(1)
@@ -153,6 +162,9 @@ func TestDispatcherRetries(t *testing.T) {
 }
 
 func TestDispatcherSkipsDisabledWebhook(t *testing.T) {
+	// httptest receivers live on loopback, which the SSRF guard blocks
+	// unless the operator opts in.
+	t.Setenv(webhooks.AllowPrivateEnv, "1")
 	var called atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called.Store(true)
@@ -226,6 +238,9 @@ func TestDispatcherBackpressureDrop(t *testing.T) {
 }
 
 func TestSyncDeliveryPayload(t *testing.T) {
+	// httptest receivers live on loopback, which the SSRF guard blocks
+	// unless the operator opts in.
+	t.Setenv(webhooks.AllowPrivateEnv, "1")
 	received := make(chan []byte, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var buf bytes.Buffer
@@ -285,6 +300,9 @@ func TestSyncDeliveryPayload(t *testing.T) {
 // leak. With a large RetryBase the test would block for ~RetryBase before the
 // fix; after it, Stop returns promptly because the backoff aborts on stopCh.
 func TestDispatcherStopAbortsBackoff(t *testing.T) {
+	// httptest receivers live on loopback, which the SSRF guard blocks
+	// unless the operator opts in.
+	t.Setenv(webhooks.AllowPrivateEnv, "1")
 	// Always-failing target so the worker enters the retry backoff.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)

@@ -373,3 +373,38 @@ func TestConcurrentReadWrite(t *testing.T) {
 	close(stop)
 	wg.Wait()
 }
+
+// TestLabelCardinalityIsBounded: label values derived from request data
+// (method, unmatched paths) must not create unbounded series.
+func TestLabelCardinalityIsBounded(t *testing.T) {
+	t.Parallel()
+	reg := metrics.NewRegistry()
+	c := reg.Counter("c_total", "help", "path")
+	h := reg.Histogram("h_seconds", "help", []float64{1}, "path")
+	n := metrics.MaxSeriesPerFamily + 500
+	for i := 0; i < n; i++ {
+		p := fmt.Sprintf("/x/%d", i)
+		c.Inc(p)
+		h.Observe(0.5, p)
+	}
+	// An existing series keeps counting after the cap is reached.
+	c.Inc("/x/0")
+
+	var buf bytes.Buffer
+	if err := reg.WriteText(&buf); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if got := strings.Count(out, "\nc_total{"); got != metrics.MaxSeriesPerFamily+1 {
+		t.Errorf("counter series = %d, want cap %d + 1 overflow", got, metrics.MaxSeriesPerFamily)
+	}
+	if got := strings.Count(out, "\nh_seconds_count{"); got != metrics.MaxSeriesPerFamily+1 {
+		t.Errorf("histogram series = %d, want cap %d + 1 overflow", got, metrics.MaxSeriesPerFamily)
+	}
+	if !strings.Contains(out, `c_total{path="__overflow__"} 500`) {
+		t.Error("overflow series missing or wrong count")
+	}
+	if !strings.Contains(out, `c_total{path="/x/0"} 2`) {
+		t.Error("existing series stopped counting after cap")
+	}
+}

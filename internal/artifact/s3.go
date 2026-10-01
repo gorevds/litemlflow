@@ -15,10 +15,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path"
 	"sort"
 	"strings"
 	"time"
@@ -133,29 +136,37 @@ func (s *S3Store) Upload(runID, relPath string, r io.Reader, maxSize int64) erro
 	if err := validateRunID(runID); err != nil {
 		return err
 	}
+	if cleanRelPath(relPath) == "" {
+		// An upload must name an object inside the run, not the run root.
+		return ErrInvalidPath
+	}
 	key := s.key(runID, relPath)
 
 	if maxSize <= 0 {
 		maxSize = defaultUploadCap
 	}
 
-	// Read into buffer to (a) enforce size cap, (b) know Content-Length for
-	// SigV4 (S3 wants Content-Length on every PUT).
+	// Read up to one part into memory to (a) enforce the size cap and (b)
+	// know Content-Length for SigV4. Anything larger is spooled to a temp
+	// file and sent as a multipart upload, so memory stays bounded by the
+	// part size rather than by maxSize (previously the whole object — up to
+	// 5 GiB — was buffered in RAM per request).
+	firstCap := s.multipartThreshold
+	if maxSize < firstCap {
+		firstCap = maxSize
+	}
 	buf := &bytes.Buffer{}
-	lr := io.LimitReader(r, maxSize+1)
-	n, err := io.Copy(buf, lr)
+	n, err := io.Copy(buf, io.LimitReader(r, firstCap+1))
 	if err != nil {
 		return fmt.Errorf("s3 upload read: %w", err)
 	}
 	if n > maxSize {
 		return ErrPayloadTooBig
 	}
-	data := buf.Bytes()
-
-	// Dispatch to multipart when the payload exceeds the threshold.
-	if int64(len(data)) > s.multipartThreshold {
-		return s.uploadMultipart(key, data)
+	if n > s.multipartThreshold {
+		return s.uploadSpooled(key, buf, r, maxSize)
 	}
+	data := buf.Bytes()
 
 	body := bytes.NewReader(data)
 	req, err := s.newRequest(http.MethodPut, key, body, n, nil)
@@ -182,6 +193,32 @@ type multipartPart struct {
 	ETag   string
 }
 
+// uploadSpooled writes head followed by the rest of r (capped at maxSize in
+// total) to a temp file, then uploads it with the multipart API.
+func (s *S3Store) uploadSpooled(key string, head *bytes.Buffer, r io.Reader, maxSize int64) error {
+	tmp, err := os.CreateTemp("", "lmf-s3-upload-*")
+	if err != nil {
+		return fmt.Errorf("s3 upload spool: %w", err)
+	}
+	defer func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+	}()
+	headLen := int64(head.Len())
+	if _, err := head.WriteTo(tmp); err != nil {
+		return fmt.Errorf("s3 upload spool: %w", err)
+	}
+	rest, err := io.Copy(tmp, io.LimitReader(r, maxSize-headLen+1))
+	if err != nil {
+		return fmt.Errorf("s3 upload read: %w", err)
+	}
+	size := headLen + rest
+	if size > maxSize {
+		return ErrPayloadTooBig
+	}
+	return s.uploadMultipart(key, tmp, size)
+}
+
 // uploadMultipart sends body using the S3 multipart upload API:
 //
 //  1. POST /{bucket}/{key}?uploads           → UploadId
@@ -190,22 +227,28 @@ type multipartPart struct {
 //
 // On any error after step 1, AbortMultipartUpload is called so that S3 does
 // not retain orphaned parts.
-func (s *S3Store) uploadMultipart(key string, body []byte) error {
+func (s *S3Store) uploadMultipart(key string, body io.ReaderAt, size int64) error {
 	uploadID, err := s.initiateMultipart(key)
 	if err != nil {
 		return fmt.Errorf("s3 multipart initiate: %w", err)
 	}
 
-	// Split body into chunks of multipartThreshold bytes each.
+	// Split body into chunks of multipartThreshold bytes each, reusing one
+	// part-sized buffer.
 	var parts []multipartPart
 	partNum := 1
-	offset := 0
-	for offset < len(body) {
-		end := offset + int(s.multipartThreshold)
-		if end > len(body) {
-			end = len(body)
+	var offset int64
+	chunkBuf := make([]byte, s.multipartThreshold)
+	for offset < size {
+		end := offset + s.multipartThreshold
+		if end > size {
+			end = size
 		}
-		chunk := body[offset:end]
+		chunk := chunkBuf[:end-offset]
+		if _, err := body.ReadAt(chunk, offset); err != nil && !errors.Is(err, io.EOF) {
+			_ = s.abortMultipart(key, uploadID)
+			return fmt.Errorf("s3 multipart read part %d: %w", partNum, err)
+		}
 		etag, uploadErr := s.uploadPart(key, uploadID, partNum, chunk)
 		if uploadErr != nil {
 			// Guarantee cleanup of the in-progress multipart upload so orphaned
@@ -379,32 +422,36 @@ func (s *S3Store) Open(runID, relPath string) (io.ReadCloser, int64, error) {
 }
 
 // Delete removes a single object or all objects under a key prefix (directory).
+//
+// Existence is determined by listing, not by the DELETE status: real S3 (and
+// MinIO) answer DeleteObject with 204 whether or not the key exists, so the
+// previous "DELETE first, fall back to prefix on 404" logic never deleted a
+// directory's contents on a real backend and never reported ErrNotFound.
 func (s *S3Store) Delete(runID, relPath string) error {
 	if err := validateRunID(runID); err != nil {
 		return err
 	}
-	key := s.key(runID, relPath)
+	key := strings.TrimSuffix(s.key(runID, relPath), "/")
+	dirPrefix := key + "/"
 
-	// Try a direct DELETE first (covers the file case).
-	err := s.deleteObject(key)
-	if err == nil {
-		return nil
-	}
-	if !isNotFound(err) {
+	keys, err := s.listAllKeys(key)
+	if err != nil {
 		return err
 	}
-
-	// 404 → might be a directory-like prefix. List everything under it and
-	// delete each object in turn.
-	keys, listErr := s.listAllKeys(key + "/")
-	if listErr != nil {
-		return listErr
+	var targets []string
+	for _, k := range keys {
+		// The listing prefix also matches siblings sharing the name prefix
+		// (e.g. "a.txt" vs "a.txt.bak"); keep only the object itself and
+		// objects below it.
+		if k == key || strings.HasPrefix(k, dirPrefix) {
+			targets = append(targets, k)
+		}
 	}
-	if len(keys) == 0 {
+	if len(targets) == 0 {
 		return ErrNotFound
 	}
-	for _, k := range keys {
-		if delErr := s.deleteObject(k); delErr != nil {
+	for _, k := range targets {
+		if delErr := s.deleteObject(k); delErr != nil && !isNotFound(delErr) {
 			return delErr
 		}
 	}
@@ -422,8 +469,8 @@ func (s *S3Store) List(runID, dir string) ([]ListEntry, error) {
 	// If dir is empty we list the top level; otherwise append dir with trailing /.
 	baseKey := s.key(runID, "")
 	listPrefix := baseKey
-	if dir != "" && dir != "." {
-		listPrefix = baseKey + dir + "/"
+	if d := cleanRelPath(dir); d != "" {
+		listPrefix = baseKey + d + "/"
 	}
 
 	type xmlContents struct {
@@ -503,13 +550,18 @@ func (s *S3Store) List(runID, dir string) ([]ListEntry, error) {
 // key builds the full S3 object key for a run + relative path.
 // Layout: <Prefix>artifacts/<runID>/<relPath>
 func (s *S3Store) key(runID, relPath string) string {
-	base := s.prefix + "artifacts/" + runID + "/"
-	if relPath == "" || relPath == "." {
-		return base
-	}
-	// Normalise slashes; reject anything that looks like path traversal.
-	clean := strings.TrimPrefix(relPath, "/")
-	return base + clean
+	return s.prefix + "artifacts/" + runID + "/" + cleanRelPath(relPath)
+}
+
+// cleanRelPath normalises an artifact-relative path the same way
+// FilesystemStore does (Clean of "/"+rel): "." and ".." segments are
+// resolved and can never climb above the run root, duplicate slashes
+// collapse, and the result has no leading/trailing slash ("" = run root).
+// Previously relPath was used verbatim, so "../<other-run>/x" produced a key
+// containing "/../" — which path-normalising S3 gateways and proxies resolve
+// into another run's (or another prefix's) objects.
+func cleanRelPath(relPath string) string {
+	return strings.TrimPrefix(path.Clean("/"+relPath), "/")
 }
 
 // objectURL builds the full HTTP URL for a specific key. Each path segment
@@ -736,7 +788,7 @@ func (s *S3Store) listAllKeys(prefix string) ([]string, error) {
 
 // isNotFound reports whether err is an ErrNotFound sentinel.
 func isNotFound(err error) bool {
-	return err == ErrNotFound
+	return errors.Is(err, ErrNotFound)
 }
 
 // ---- SigV4 primitives -------------------------------------------------------

@@ -78,7 +78,9 @@ func TestSyncDeliveryHTTPRoundtrip(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d := &SyncDelivery{}
+	// Explicit client: the default guarded client refuses the loopback
+	// httptest receiver (see TestSyncDeliveryDefaultClientBlocksLoopback).
+	d := &SyncDelivery{Client: srv.Client()}
 	wh := &model.Webhook{URL: srv.URL, Secret: "secret-key"}
 	status, err := d.Deliver(wh, "run_finished", &model.Run{ID: "rid42", ExperimentID: 1, Status: "FINISHED"})
 	if err != nil {

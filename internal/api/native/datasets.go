@@ -24,7 +24,6 @@ package native
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -55,7 +54,7 @@ func (h *Handler) CreateDatasetVersion(w http.ResponseWriter, r *http.Request) {
 			"dataset CAS is not configured on this server")
 		return
 	}
-	name := chi.URLParam(r, "name")
+	name := nameParam(r)
 	if name == "" {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "name is required")
 		return
@@ -146,7 +145,7 @@ func (h *Handler) ListDatasets(w http.ResponseWriter, r *http.Request) {
 
 // ListDatasetVersions handles GET /api/v1/datasets/{name}.
 func (h *Handler) ListDatasetVersions(w http.ResponseWriter, r *http.Request) {
-	name := chi.URLParam(r, "name")
+	name := nameParam(r)
 	ws := workspaceFromReq(r)
 	rows, err := h.Store.ListDatasetVersions(r.Context(), ws, name)
 	if err != nil {
@@ -161,7 +160,7 @@ func (h *Handler) ListDatasetVersions(w http.ResponseWriter, r *http.Request) {
 
 // GetDatasetVersion handles GET /api/v1/datasets/{name}/versions/{version}.
 func (h *Handler) GetDatasetVersion(w http.ResponseWriter, r *http.Request) {
-	name := chi.URLParam(r, "name")
+	name := nameParam(r)
 	v, err := strconv.ParseInt(chi.URLParam(r, "version"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE",
@@ -180,7 +179,7 @@ func (h *Handler) GetDatasetVersion(w http.ResponseWriter, r *http.Request) {
 // DeleteDatasetVersion handles DELETE /api/v1/datasets/{name}/versions/{version}.
 // Soft delete only — content stays in CAS until an offline GC pass.
 func (h *Handler) DeleteDatasetVersion(w http.ResponseWriter, r *http.Request) {
-	name := chi.URLParam(r, "name")
+	name := nameParam(r)
 	v, err := strconv.ParseInt(chi.URLParam(r, "version"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE",
@@ -203,7 +202,7 @@ func (h *Handler) GetDatasetContent(w http.ResponseWriter, r *http.Request) {
 			"dataset CAS is not configured on this server")
 		return
 	}
-	name := chi.URLParam(r, "name")
+	name := nameParam(r)
 	v, err := strconv.ParseInt(chi.URLParam(r, "version"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE",
@@ -240,7 +239,7 @@ func (h *Handler) GetDatasetContent(w http.ResponseWriter, r *http.Request) {
 
 // GetDatasetLineage handles GET /api/v1/datasets/{name}/versions/{version}/lineage.
 func (h *Handler) GetDatasetLineage(w http.ResponseWriter, r *http.Request) {
-	name := chi.URLParam(r, "name")
+	name := nameParam(r)
 	v, err := strconv.ParseInt(chi.URLParam(r, "version"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE",
@@ -284,6 +283,3 @@ func sanitizeFilename(name string) string {
 	}
 	return out
 }
-
-// _ ensures errors-package is referenced in case future edits remove it.
-var _ = errors.New

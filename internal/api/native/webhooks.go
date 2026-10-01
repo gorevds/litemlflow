@@ -7,9 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -54,14 +52,15 @@ func validateOutboundURL(rawURL string) error {
 		return fmt.Errorf("url is missing host")
 	}
 	// Allow override at server level for legitimate intra-cluster delivery.
-	if strings.EqualFold(strings.TrimSpace(os.Getenv("LITEMLFLOW_WEBHOOK_ALLOW_PRIVATE")), "1") {
+	if webhooks.AllowPrivateTargets() {
 		return nil
 	}
 	// Resolve the host to one or more IPs and reject if any is private/loopback.
 	// (We resolve here so a name like "localhost" is caught even though it
-	// isn't a literal IP. This is best-effort — DNS rebinding could still
-	// bypass it, which is why operators behind multi-tenant deployments
-	// should put a network egress filter in front.)
+	// isn't a literal IP, giving the operator early 4xx feedback. This is
+	// only the first line of defence: DNS rebinding and redirects are
+	// handled at connection time by webhooks.NewGuardedClient, which every
+	// outbound webhook/federation request uses.)
 	// Use a background context for the lookup; we cap implicitly via DNS
 	// timeout in the resolver.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -80,16 +79,11 @@ func validateOutboundURL(rawURL string) error {
 	return nil
 }
 
-// isBlockedIP returns true for loopback (127.0.0.0/8, ::1), link-local
-// (169.254.0.0/16, fe80::/10 — including AWS metadata 169.254.169.254),
-// RFC1918 private ranges (10/8, 172.16/12, 192.168/16), and unique-local
-// IPv6 (fc00::/7).
+// isBlockedIP delegates to webhooks.IsBlockedIP so URL validation and the
+// connection-time guard agree on what is blocked (loopback, link-local incl.
+// cloud metadata, RFC1918/ULA, CGNAT, 0.0.0.0/8, NAT64/6to4-embedded, …).
 func isBlockedIP(ip net.IP) bool {
-	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
-		ip.IsPrivate() || ip.IsUnspecified() || ip.IsMulticast() {
-		return true
-	}
-	return false
+	return webhooks.IsBlockedIP(ip)
 }
 
 // mountWebhookRoutes registers webhook CRUD routes on the router.
@@ -132,6 +126,31 @@ func workspaceFromReq(r *http.Request) string {
 		return ws
 	}
 	return "default"
+}
+
+// getWebhookInWorkspace loads a webhook by id and returns store.ErrNotFound
+// when it belongs to another workspace. The id-addressed webhook routes
+// (PATCH/DELETE/test) previously looked webhooks up by id alone, letting a
+// caller in workspace B read (via the PATCH response), retarget, delete, or
+// fire workspace A's webhooks by guessing small integer ids.
+func (h *Handler) getWebhookInWorkspace(r *http.Request, id int64) (*model.Webhook, error) {
+	wh, err := h.Store.GetWebhook(r.Context(), id)
+	if err != nil {
+		return nil, err
+	}
+	if !sameWorkspace(wh.WorkspaceID, workspaceFromReq(r)) {
+		return nil, store.ErrNotFound
+	}
+	return wh, nil
+}
+
+// sameWorkspace compares a stored workspace id (empty means "default") with
+// the request's workspace.
+func sameWorkspace(stored, current string) bool {
+	if stored == "" {
+		stored = "default"
+	}
+	return stored == current
 }
 
 // ListWebhooks handles GET /api/v1/webhooks.
@@ -229,7 +248,7 @@ func (h *Handler) UpdateWebhook(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "id must be an integer")
 		return
 	}
-	existing, err := h.Store.GetWebhook(r.Context(), id)
+	existing, err := h.getWebhookInWorkspace(r, id)
 	if err != nil {
 		writeStoreErr(w, err)
 		return
@@ -275,6 +294,10 @@ func (h *Handler) DeleteWebhook(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "id must be an integer")
 		return
 	}
+	if _, err := h.getWebhookInWorkspace(r, id); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
 	if err := h.Store.DeleteWebhook(r.Context(), id); err != nil {
 		writeStoreErr(w, err)
 		return
@@ -290,7 +313,7 @@ func (h *Handler) TestWebhook(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "id must be an integer")
 		return
 	}
-	wh, err := h.Store.GetWebhook(r.Context(), id)
+	wh, err := h.getWebhookInWorkspace(r, id)
 	if err != nil {
 		writeStoreErr(w, err)
 		return
@@ -425,16 +448,23 @@ func (h *Handler) CloneExperiment(w http.ResponseWriter, r *http.Request) {
 	var req cloneExperimentReq
 	_ = decodeJSON(r, &req) // body is optional
 
+	// The source must be in the caller's workspace: cloning copies its name
+	// and tags, so a foreign source would leak another tenant's metadata.
+	src, err := h.Store.GetExperiment(r.Context(), srcID)
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	if !sameWorkspace(src.WorkspaceID, workspaceFromReq(r)) {
+		writeStoreErr(w, store.ErrNotFound)
+		return
+	}
+
 	var newName string
 	if req.Name != "" {
 		newName = req.Name
 	} else {
 		// Auto-suffix: <source>-clone-<ts>
-		src, err := h.Store.GetExperiment(r.Context(), srcID)
-		if err != nil {
-			writeStoreErr(w, err)
-			return
-		}
 		newName = src.Name + "-clone-" + strconv.FormatInt(time.Now().Unix(), 10)
 	}
 

@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -102,7 +103,8 @@ const (
 type Options struct {
 	// RetryBase overrides the first retry delay (default 1s).
 	RetryBase time.Duration
-	// HTTPClient overrides the default 10s-timeout client.
+	// HTTPClient overrides the default client (10s timeout, SSRF-guarded
+	// dialer, no redirect following — see NewGuardedClient).
 	HTTPClient *http.Client
 	// Echo is the in-process echo ring buffer. If non-nil, deliveries to
 	// lmf://echo URLs are routed here instead of dispatched as HTTP.
@@ -121,7 +123,7 @@ func NewWithOptions(ctx context.Context, store WebhookLookup, logger *slog.Logge
 	}
 	client := opts.HTTPClient
 	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
+		client = NewGuardedClient(10 * time.Second)
 	}
 	base := opts.RetryBase
 	if base == 0 {
@@ -189,7 +191,8 @@ func (d *Dispatcher) Stop(drainTimeout time.Duration) {
 }
 
 // Notify enqueues webhook deliveries for all matching webhooks.
-// It resolves webhooks for the given run's experiment and workspace, then
+// It resolves webhooks for the given run's experiment in the workspace
+// carried by ctx (see WithWorkspace; empty means "default"), then
 // enqueues one job per webhook that subscribes to the event. If the queue is
 // full a warning is logged and the job is dropped (backpressure design).
 //
@@ -217,7 +220,10 @@ func (d *Dispatcher) Notify(ctx context.Context, event string, run *model.Run) {
 	default:
 	}
 	expID := run.ExperimentID
-	whs, err := d.store.ListWebhooks(ctx, "", &expID)
+	// Scope to the triggering request's workspace. Passing "" here used to
+	// resolve to "default" in the store, so webhooks registered in any other
+	// workspace never fired.
+	whs, err := d.store.ListWebhooks(ctx, WorkspaceFromContext(ctx), &expID)
 	if err != nil {
 		d.logger.Warn("webhooks: list failed", slog.String("err", err.Error()))
 		return
@@ -327,7 +333,7 @@ func (d *Dispatcher) deliver(ctx context.Context, j job) {
 			backoff *= retryMultiplier
 		}
 
-		status, err := d.post(j.wh, body)
+		status, err := d.post(ctx, j.wh, j.event, body)
 		lastStatus = status
 		if err == nil && status >= 200 && status < 300 {
 			// Success.
@@ -352,17 +358,15 @@ func (d *Dispatcher) deliver(ctx context.Context, j job) {
 	_ = d.store.RecordWebhookAttempt(ctx, j.wh.ID, lastStatus, time.Now().UnixMilli())
 }
 
-func (d *Dispatcher) post(wh *model.Webhook, body []byte) (int, error) {
-	req, err := http.NewRequest(http.MethodPost, wh.URL, bytes.NewReader(body))
+func (d *Dispatcher) post(ctx context.Context, wh *model.Webhook, event string, body []byte) (int, error) {
+	// Bind the request to the worker ctx so a server shutdown cancels an
+	// in-flight delivery instead of waiting out the client timeout.
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, wh.URL, bytes.NewReader(body))
 	if err != nil {
 		return 0, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-
-	// Parse event name back from body for the header.
-	var p Payload
-	_ = json.Unmarshal(body, &p)
-	req.Header.Set("X-LiteMLflow-Event", p.Event)
+	req.Header.Set("X-LiteMLflow-Event", event)
 
 	if wh.Secret != "" {
 		sig := hmacSHA256(wh.Secret, body)
@@ -373,6 +377,8 @@ func (d *Dispatcher) post(wh *model.Webhook, body []byte) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	// Drain (bounded) so the keep-alive connection can be reused.
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 	_ = resp.Body.Close()
 	return resp.StatusCode, nil
 }
@@ -387,17 +393,7 @@ func hmacSHA256(secret string, body []byte) string {
 // the HMAC-SHA256 of body with secret. Exported for test use.
 func VerifySignature(secret string, body []byte, header string) bool {
 	expected := "sha256=" + hmacSHA256(secret, body)
-	// constant-time comparison
-	if len(header) != len(expected) {
-		return false
-	}
-	a := []byte(header)
-	b := []byte(expected)
-	result := 0
-	for i := range a {
-		result |= int(a[i] ^ b[i])
-	}
-	return result == 0
+	return hmac.Equal([]byte(header), []byte(expected))
 }
 
 func matchesEvent(events, event string) bool {

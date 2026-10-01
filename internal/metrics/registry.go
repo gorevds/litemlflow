@@ -23,6 +23,31 @@ import (
 	"sync"
 )
 
+// MaxSeriesPerFamily caps the number of distinct label sets one labelled
+// metric family will track. Label values on the HTTP metrics derive from
+// request data (method, unmatched-path fallback), so without a cap a client
+// can mint unbounded series and grow memory and /metrics output without
+// limit. Observations for new label sets beyond the cap are folded into a
+// single series whose label values are all OverflowLabelValue.
+const MaxSeriesPerFamily = 10000
+
+// OverflowLabelValue is the label value used for the overflow series.
+const OverflowLabelValue = "__overflow__"
+
+// boundedKey returns key unless it is a new label set and the family is
+// already at MaxSeriesPerFamily, in which case it returns the overflow key.
+// Caller must hold the family's mutex.
+func boundedKey(key string, size int, has func(string) bool, labelKeys []string) string {
+	if len(labelKeys) == 0 || size < MaxSeriesPerFamily || has(key) {
+		return key
+	}
+	vals := make([]string, len(labelKeys))
+	for i := range vals {
+		vals[i] = OverflowLabelValue
+	}
+	return labelSetKey(labelKeys, vals)
+}
+
 // DefaultHistogramBuckets are suitable for HTTP latency measured in seconds.
 var DefaultHistogramBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10}
 
@@ -132,6 +157,7 @@ func (c *Counter) Inc(labelValues ...string) { c.Add(1, labelValues...) }
 func (c *Counter) Add(delta float64, labelValues ...string) {
 	key := labelSetKey(c.labelKeys, labelValues)
 	c.mu.Lock()
+	key = boundedKey(key, len(c.values), func(k string) bool { _, ok := c.values[k]; return ok }, c.labelKeys)
 	c.values[key] += delta
 	c.mu.Unlock()
 }
@@ -226,6 +252,7 @@ type Histogram struct {
 func (h *Histogram) Observe(value float64, labelValues ...string) {
 	key := labelSetKey(h.labelKeys, labelValues)
 	h.mu.Lock()
+	key = boundedKey(key, len(h.obs), func(k string) bool { _, ok := h.obs[k]; return ok }, h.labelKeys)
 	s, ok := h.obs[key]
 	if !ok {
 		s = &histogramSample{counts: make([]uint64, len(h.buckets))}

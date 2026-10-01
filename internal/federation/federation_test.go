@@ -3,6 +3,7 @@ package federation
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gorevds/litemlflow/internal/webhooks"
 )
 
 func TestNewSecretIs32BytesHex(t *testing.T) {
@@ -109,6 +112,9 @@ func TestClientDoSendsHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The default client is SSRF-guarded and refuses the loopback httptest
+	// server (see TestClientDefaultRefusesLoopback).
+	c.httpClient = srv.Client()
 	body := []byte(`{"q":"hi"}`)
 	resp, respBody, err := c.Do("POST", "/api/v1/federate/search", body)
 	if err != nil {
@@ -248,9 +254,62 @@ func TestClientRejectsHugeResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	c.httpClient = srv.Client()
 	_, _, err = c.Do("POST", "/oversize", []byte(`{}`))
 	if err != ErrResponseTooLarge {
 		t.Errorf("expected ErrResponseTooLarge, got %v", err)
+	}
+}
+
+// TestClientDefaultRefusesLoopback: peer URLs are validated only when the
+// peer is added, so the client itself must refuse internal targets (DNS
+// rebinding) and must not follow redirects carrying the HMAC headers.
+func TestClientDefaultRefusesLoopback(t *testing.T) {
+	t.Setenv(webhooks.AllowPrivateEnv, "")
+	secret, _ := NewSecret()
+	hit := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit = true
+	}))
+	defer srv.Close()
+	c, err := NewClient(srv.URL, "lmf-A", secret, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = c.Do("POST", "/api/v1/federate/echo", []byte(`{}`))
+	if !errors.Is(err, webhooks.ErrBlockedAddress) {
+		t.Fatalf("want ErrBlockedAddress, got %v", err)
+	}
+	if hit {
+		t.Fatal("loopback peer was reached")
+	}
+}
+
+func TestClientDoesNotFollowRedirects(t *testing.T) {
+	t.Setenv(webhooks.AllowPrivateEnv, "1")
+	secret, _ := NewSecret()
+	var leakedSig string
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		leakedSig = r.Header.Get(HeaderSignature)
+	}))
+	defer target.Close()
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/x", http.StatusTemporaryRedirect)
+	}))
+	defer peer.Close()
+	c, err := NewClient(peer.URL, "lmf-A", secret, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, _, err := c.Do("POST", "/api/v1/federate/search", []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusTemporaryRedirect {
+		t.Errorf("status = %d, want 307", resp.StatusCode)
+	}
+	if leakedSig != "" {
+		t.Error("redirect followed; signature forwarded to another host")
 	}
 }
 

@@ -69,6 +69,13 @@ func (f *FilesystemStore) Upload(runID, relPath string, r io.Reader, maxSize int
 	if err != nil {
 		return err
 	}
+	// An upload must name a file inside the run. relPath "" (or "/", ".")
+	// resolves to the run directory itself; the temp file would then be
+	// created as a sibling of the run dir (<root>/<runID>.part), outside
+	// the run's subtree, and the final rename onto a directory fails.
+	if root, _ := filepath.Abs(filepath.Join(f.Root, runID)); abs == root {
+		return ErrInvalidPath
+	}
 	if err := os.MkdirAll(filepath.Dir(abs), 0o750); err != nil {
 		return fmt.Errorf("mkdir parent: %w", err)
 	}

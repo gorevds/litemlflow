@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -13,7 +14,8 @@ import (
 // SyncDelivery performs a single synchronous webhook delivery.
 // Used by the /test endpoint to validate a webhook configuration immediately.
 type SyncDelivery struct {
-	// Client is the HTTP client to use; defaults to a 10s timeout client.
+	// Client is the HTTP client to use; defaults to NewGuardedClient(10s)
+	// (SSRF-guarded dialer, redirects not followed).
 	Client *http.Client
 	// Echo is the in-process echo ring buffer. If non-nil and the webhook URL
 	// uses the lmf:// scheme, the delivery is recorded here instead of HTTP.
@@ -51,7 +53,7 @@ func (s *SyncDelivery) Deliver(wh *model.Webhook, event string, run *model.Run) 
 
 	client := s.Client
 	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
+		client = NewGuardedClient(10 * time.Second)
 	}
 
 	req, err := http.NewRequest(http.MethodPost, wh.URL, bytes.NewReader(body))
@@ -69,6 +71,7 @@ func (s *SyncDelivery) Deliver(wh *model.Webhook, event string, run *model.Run) 
 	if err != nil {
 		return 0, err
 	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 	_ = resp.Body.Close()
 	return resp.StatusCode, nil
 }

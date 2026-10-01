@@ -12,6 +12,8 @@ package grpcotlp
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
+	"math"
 	"strconv"
 
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
@@ -160,70 +162,26 @@ func protoAttrMap(attrs []*commonpb.KeyValue) map[string]any {
 
 // marshalAttrs serialises attrs to a JSON string. Returns "" on empty input
 // or marshal error (matching jsonOrEmpty in the HTTP handler).
+//
+// It uses encoding/json: the previous hand-rolled encoder did not escape
+// control characters other than \n\r\t, passed invalid UTF-8 through, and
+// emitted NaN/±Inf literally — all of which produce invalid JSON that the
+// read path then silently drops (span attributes vanish from the UI).
+// Non-finite doubles, which JSON cannot represent, are stored as strings.
 func marshalAttrs(attrs map[string]any) string {
 	if len(attrs) == 0 {
 		return ""
 	}
-	// Inline simple JSON marshalling to avoid importing encoding/json here;
-	// use the same approach as the HTTP handler.
-	var sb []byte
-	sb = append(sb, '{')
-	first := true
 	for k, v := range attrs {
-		if !first {
-			sb = append(sb, ',')
+		if f, ok := v.(float64); ok && (math.IsNaN(f) || math.IsInf(f, 0)) {
+			attrs[k] = strconv.FormatFloat(f, 'g', -1, 64)
 		}
-		first = false
-		sb = appendJSONString(sb, k)
-		sb = append(sb, ':')
-		sb = appendJSONValue(sb, v)
 	}
-	sb = append(sb, '}')
-	if string(sb) == "{}" {
+	b, err := json.Marshal(attrs)
+	if err != nil || string(b) == "{}" {
 		return ""
 	}
-	return string(sb)
-}
-
-func appendJSONString(dst []byte, s string) []byte {
-	dst = append(dst, '"')
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch c {
-		case '"':
-			dst = append(dst, '\\', '"')
-		case '\\':
-			dst = append(dst, '\\', '\\')
-		case '\n':
-			dst = append(dst, '\\', 'n')
-		case '\r':
-			dst = append(dst, '\\', 'r')
-		case '\t':
-			dst = append(dst, '\\', 't')
-		default:
-			dst = append(dst, c)
-		}
-	}
-	return append(dst, '"')
-}
-
-func appendJSONValue(dst []byte, v any) []byte {
-	switch val := v.(type) {
-	case string:
-		return appendJSONString(dst, val)
-	case int64:
-		return strconv.AppendInt(dst, val, 10)
-	case float64:
-		return strconv.AppendFloat(dst, val, 'f', -1, 64)
-	case bool:
-		if val {
-			return append(dst, "true"...)
-		}
-		return append(dst, "false"...)
-	default:
-		// Fallback: treat as string.
-		return appendJSONString(dst, strconv.Itoa(0))
-	}
+	return string(b)
 }
 
 // protoKindToString maps the OTel SpanKind enum to the string we store.

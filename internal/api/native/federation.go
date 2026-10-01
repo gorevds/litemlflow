@@ -272,6 +272,10 @@ func (h *Handler) FederateSearch(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// maxFederationRequestBytes bounds inbound peer request bodies (a search
+// query or echo ping is a few hundred bytes).
+const maxFederationRequestBytes = 1 << 20 // 1 MiB
+
 // validateFederationRequest reads r.Body once, checks the HMAC, and
 // returns the body bytes (for the handler to unmarshal) along with an
 // error. On any auth failure the error wraps the federation.Err*
@@ -290,10 +294,15 @@ func (h *Handler) validateFederationRequest(r *http.Request) ([]byte, error) {
 	}
 
 	// Read body up-front so we can verify the HMAC and hand the same
-	// bytes to the handler without a second read.
-	body, err := io.ReadAll(r.Body)
+	// bytes to the handler without a second read. These endpoints are
+	// unauthenticated until the HMAC is checked, so cap the read
+	// independently of the server-wide body limit.
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxFederationRequestBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("read body: %w", err)
+	}
+	if int64(len(body)) > maxFederationRequestBytes {
+		return nil, fmt.Errorf("federation request body exceeds %d bytes", maxFederationRequestBytes)
 	}
 
 	// Look up the peer by name in the request's workspace.

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -140,12 +141,10 @@ func (h *Handler) AnalyticsQuery(w http.ResponseWriter, r *http.Request) {
 		writeBadRequest(w, err)
 		return
 	}
-	if q.WorkspaceID == "" {
-		q.WorkspaceID = r.Header.Get("X-LiteMLflow-Workspace")
-	}
-	if q.WorkspaceID == "" {
-		q.WorkspaceID = "default"
-	}
+	// Always scope to the request's workspace. The DSL body carries a
+	// workspace_id field, but honouring it let any caller aggregate metrics
+	// across another tenant's runs simply by naming that workspace.
+	q.WorkspaceID = workspaceFromReq(r)
 	res, err := h.Store.AnalyticsQuery(r.Context(), q)
 	if err != nil {
 		// Validation errors map to 400; other failures to 500.
@@ -209,6 +208,24 @@ func (h *Handler) ensureRunInWorkspace(w http.ResponseWriter, r *http.Request, r
 	if _, err := h.Store.GetRunInWorkspace(r.Context(), runID, workspaceFromReq(r)); err != nil {
 		writeStoreErr(w, err)
 		return false
+	}
+	return true
+}
+
+// ensureSpanRunsInWorkspace checks that every distinct run_id referenced by
+// spans belongs to the caller's workspace (writing a 404 otherwise). Without
+// it a caller could attach spans to — and thereby inject content into the
+// trace view of — another tenant's run.
+func (h *Handler) ensureSpanRunsInWorkspace(w http.ResponseWriter, r *http.Request, spans []model.Span) bool {
+	seen := map[string]bool{}
+	for _, sp := range spans {
+		if sp.RunID == "" || seen[sp.RunID] {
+			continue
+		}
+		seen[sp.RunID] = true
+		if !h.ensureRunInWorkspace(w, r, sp.RunID) {
+			return false
+		}
 	}
 	return true
 }
@@ -510,6 +527,9 @@ func (h *Handler) IngestTraces(w http.ResponseWriter, r *http.Request) {
 			StatusMessage:  s.StatusMessage,
 		})
 	}
+	if !h.ensureSpanRunsInWorkspace(w, r, spans) {
+		return
+	}
 	if err := h.Store.InsertSpans(r.Context(), spans); err != nil {
 		writeStoreErr(w, err)
 		return
@@ -701,6 +721,9 @@ func (h *Handler) IngestOTLP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if !h.ensureSpanRunsInWorkspace(w, r, spans) {
+		return
+	}
 	if err := h.Store.InsertSpans(r.Context(), spans); err != nil {
 		writeStoreErr(w, err)
 		return
@@ -834,7 +857,7 @@ func (h *Handler) CreatePrompt(w http.ResponseWriter, r *http.Request) {
 
 // GetLatestPrompt handles GET /api/v1/prompts/{name}.
 func (h *Handler) GetLatestPrompt(w http.ResponseWriter, r *http.Request) {
-	name := chi.URLParam(r, "name")
+	name := nameParam(r)
 	p, err := h.Store.GetLatestPrompt(r.Context(), workspaceFromReq(r), name)
 	if err != nil {
 		writeStoreErr(w, err)
@@ -845,7 +868,7 @@ func (h *Handler) GetLatestPrompt(w http.ResponseWriter, r *http.Request) {
 
 // ListPromptVersions handles GET /api/v1/prompts/{name}/versions.
 func (h *Handler) ListPromptVersions(w http.ResponseWriter, r *http.Request) {
-	name := chi.URLParam(r, "name")
+	name := nameParam(r)
 	versions, err := h.Store.ListPromptVersions(r.Context(), workspaceFromReq(r), name)
 	if err != nil {
 		writeStoreErr(w, err)
@@ -856,7 +879,7 @@ func (h *Handler) ListPromptVersions(w http.ResponseWriter, r *http.Request) {
 
 // GetPromptVersion handles GET /api/v1/prompts/{name}/versions/{version}.
 func (h *Handler) GetPromptVersion(w http.ResponseWriter, r *http.Request) {
-	name := chi.URLParam(r, "name")
+	name := nameParam(r)
 	v, err := strconv.ParseInt(chi.URLParam(r, "version"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMETER_VALUE", "version must be a positive integer")
@@ -877,7 +900,7 @@ type setPromptAliasReq struct {
 
 // SetPromptAlias handles POST /api/v1/prompts/{name}/aliases.
 func (h *Handler) SetPromptAlias(w http.ResponseWriter, r *http.Request) {
-	name := chi.URLParam(r, "name")
+	name := nameParam(r)
 	var req setPromptAliasReq
 	if err := decodeJSON(r, &req); err != nil {
 		writeBadRequest(w, err)
@@ -892,7 +915,7 @@ func (h *Handler) SetPromptAlias(w http.ResponseWriter, r *http.Request) {
 
 // GetPromptByAlias handles GET /api/v1/prompts/{name}/aliases/{alias}.
 func (h *Handler) GetPromptByAlias(w http.ResponseWriter, r *http.Request) {
-	name := chi.URLParam(r, "name")
+	name := nameParam(r)
 	alias := chi.URLParam(r, "alias")
 	p, err := h.Store.GetPromptByAlias(r.Context(), workspaceFromReq(r), name, alias)
 	if err != nil {
@@ -921,6 +944,11 @@ func (h *Handler) CreateEval(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.RunID == "" {
 		writeMissingField(w, "run_id")
+		return
+	}
+	// Evals are upserted by run_id; without the workspace check a caller
+	// could overwrite another tenant's eval (GetEval is already scoped).
+	if !h.ensureRunInWorkspace(w, r, req.RunID) {
 		return
 	}
 	mJSON, _ := jsonOrEmpty(req.Metrics)
@@ -982,10 +1010,11 @@ func safeReturnTo(s string) string {
 	if strings.HasPrefix(s, "//") || strings.HasPrefix(s, "/\\") {
 		return fallback
 	}
-	// Reject control characters that could smuggle headers / break the
-	// Location header (\r, \n, NUL).
+	// Reject all control characters: \r/\n/NUL could smuggle headers, and
+	// browsers strip \t/\n inside URLs, so "/\t/evil.com" becomes the
+	// protocol-relative "//evil.com" (open redirect).
 	for _, r := range s {
-		if r == '\r' || r == '\n' || r == 0x00 {
+		if r < 0x20 || r == 0x7f {
 			return fallback
 		}
 	}
@@ -1301,4 +1330,19 @@ func jsonOrEmpty(v any) (string, error) {
 		return "", nil
 	}
 	return string(b), nil
+}
+
+// nameParam returns the decoded {name} route parameter. chi matches against
+// r.URL.RawPath when the client escaped reserved characters, so a prompt or
+// dataset named "team/summarizer" arrives as "team%2Fsummarizer" and would
+// never match the stored name without unescaping.
+func nameParam(r *http.Request) string {
+	name := chi.URLParam(r, "name")
+	if r.URL.RawPath == "" {
+		return name
+	}
+	if dec, err := url.PathUnescape(name); err == nil {
+		return dec
+	}
+	return name
 }

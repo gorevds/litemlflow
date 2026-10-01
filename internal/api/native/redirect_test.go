@@ -31,6 +31,8 @@ func TestSafeReturnTo(t *testing.T) {
 		{"/\rinjection", fallback},
 		{"/\ninjection", fallback},
 		{"/\x00null", fallback},
+		{"/\t/evil.com", fallback}, // browsers strip tabs → "//evil.com"
+		{"/\x7f", fallback},
 	}
 	for _, tc := range cases {
 		if got := safeReturnTo(tc.in); got != tc.want {

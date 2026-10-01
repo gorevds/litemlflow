@@ -26,6 +26,9 @@ type s3Object struct {
 type mockS3 struct {
 	mu      sync.Mutex
 	objects map[string]*s3Object // key → object
+	// realDeleteSemantics mimics AWS S3/MinIO: DeleteObject answers 204
+	// whether or not the key exists.
+	realDeleteSemantics bool
 }
 
 func newMockS3() *mockS3 {
@@ -111,8 +114,9 @@ func (m *mockS3) handleDelete(w http.ResponseWriter, key string) {
 	if ok {
 		delete(m.objects, key)
 	}
+	real := m.realDeleteSemantics
 	m.mu.Unlock()
-	if !ok {
+	if !ok && !real {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
@@ -787,4 +791,93 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// TestS3DeleteDirectoryRealS3Semantics: real S3 answers DELETE with 204 even
+// for a missing key, so "DELETE first, list on 404" never removed a
+// directory's contents nor reported ErrNotFound.
+func TestS3DeleteDirectoryRealS3Semantics(t *testing.T) {
+	t.Parallel()
+	mock := newMockS3()
+	mock.realDeleteSemantics = true
+	srv := httptest.NewServer(mock)
+	defer srv.Close()
+
+	s := newTestStore(t, srv)
+	for _, p := range []string{"dir/a.txt", "dir/sub/b.txt", "dirx.txt"} {
+		if err := s.Upload("run1", p, strings.NewReader("x"), 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Delete("run1", "dir"); err != nil {
+		t.Fatalf("Delete dir: %v", err)
+	}
+	for _, p := range []string{"dir/a.txt", "dir/sub/b.txt"} {
+		if _, _, err := s.Open("run1", p); !errors.Is(err, artifact.ErrNotFound) {
+			t.Errorf("%s should be deleted, got %v", p, err)
+		}
+	}
+	// A sibling sharing the name prefix must survive.
+	if rc, _, err := s.Open("run1", "dirx.txt"); err != nil {
+		t.Errorf("sibling dirx.txt was deleted: %v", err)
+	} else {
+		rc.Close()
+	}
+	if err := s.Delete("run1", "missing"); !errors.Is(err, artifact.ErrNotFound) {
+		t.Errorf("Delete(missing): want ErrNotFound, got %v", err)
+	}
+}
+
+// TestS3RelPathTraversalStaysInRun: relPath was concatenated verbatim, so
+// "../run2/x" produced a key with "/../" that normalising gateways resolve
+// into another run's objects.
+func TestS3RelPathTraversalStaysInRun(t *testing.T) {
+	t.Parallel()
+	mock := newMockS3()
+	srv := httptest.NewServer(mock)
+	defer srv.Close()
+
+	s := newTestStore(t, srv)
+	if err := s.Upload("run1", "../run2/evil.txt", strings.NewReader("x"), 0); err != nil {
+		t.Fatal(err)
+	}
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	for k := range mock.objects {
+		if strings.Contains(k, "..") || !strings.HasPrefix(k, "artifacts/run1/") {
+			t.Errorf("object key escaped the run prefix: %q", k)
+		}
+	}
+	if _, ok := mock.objects["artifacts/run1/run2/evil.txt"]; !ok {
+		t.Errorf("expected cleaned key artifacts/run1/run2/evil.txt; have %v", mock.objects)
+	}
+}
+
+func TestS3UploadRejectsRunRoot(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(newMockS3())
+	defer srv.Close()
+	s := newTestStore(t, srv)
+	for _, p := range []string{"", ".", "/", "a/.."} {
+		if err := s.Upload("run1", p, strings.NewReader("x"), 0); !errors.Is(err, artifact.ErrInvalidPath) {
+			t.Errorf("Upload(%q): want ErrInvalidPath, got %v", p, err)
+		}
+	}
+}
+
+// TestS3SpooledMultipartSizeCap: the spooled (>threshold) path must still
+// enforce maxSize and send the full content.
+func TestS3SpooledMultipartSizeCap(t *testing.T) {
+	t.Parallel()
+	mock := newMockMultipartS3()
+	srv := httptest.NewServer(mock)
+	defer srv.Close()
+	s := newTestStoreWithThreshold(t, srv, 16)
+
+	if err := s.Upload("run1", "big.bin", bytes.NewReader(make([]byte, 100)), 50); !errors.Is(err, artifact.ErrPayloadTooBig) {
+		t.Fatalf("want ErrPayloadTooBig, got %v", err)
+	}
+	if err := s.Upload("run1", "ok.bin", bytes.NewReader(bytes.Repeat([]byte("ab"), 25)), 50); err != nil {
+		t.Fatalf("upload at exactly maxSize: %v", err)
+	}
 }

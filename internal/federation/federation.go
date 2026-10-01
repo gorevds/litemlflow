@@ -36,6 +36,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gorevds/litemlflow/internal/webhooks"
 )
 
 // Header names for the federation transport.
@@ -153,7 +155,12 @@ func NewClient(baseURL, ourName, secretHex string, timeout time.Duration) (*Clie
 		timeout = 5 * time.Second
 	}
 	return &Client{
-		httpClient: &http.Client{Timeout: timeout},
+		// SSRF-guarded: peer URLs are validated when added, but a peer
+		// hostname can later re-resolve to an internal address (DNS
+		// rebinding) or answer with a redirect. The guarded client checks
+		// every dialed IP and never follows redirects, so the signed
+		// request (and its HMAC headers) cannot be bounced elsewhere.
+		httpClient: webhooks.NewGuardedClient(timeout),
 		baseURL:    strings.TrimRight(baseURL, "/"),
 		ourName:    ourName,
 		secret:     secret,

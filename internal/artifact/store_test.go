@@ -127,3 +127,14 @@ func TestRunIDValidation(t *testing.T) {
 		}
 	}
 }
+
+// TestUploadRejectsRunRoot: relPath "" resolved to the run dir itself, so the
+// temp file was created as <root>/<runID>.part — outside the run subtree.
+func TestUploadRejectsRunRoot(t *testing.T) {
+	s := newStore(t)
+	for _, p := range []string{"", ".", "/", "a/.."} {
+		if err := s.Upload("run1", p, strings.NewReader("x"), 0); !errors.Is(err, artifact.ErrInvalidPath) {
+			t.Errorf("Upload(%q): want ErrInvalidPath, got %v", p, err)
+		}
+	}
+}
