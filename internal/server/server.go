@@ -226,10 +226,12 @@ func buildRouter(cfg config.Config, logger *slog.Logger, st store.Store, art art
 	// failures consume a token, so legitimate Basic clients are unaffected).
 	// Placed after apiV2Alias so the path is already normalized.
 	authLimiter := newAuthRateLimiter(5, 1.0/12.0)
+	// Validated in config.Validate; a parse error here cannot happen.
+	authLimiter.trusted, _ = config.ParseTrustedProxies(cfg.TrustedProxies)
 	r.Use(rateLimitAuthMiddleware(authLimiter))
-	// Body limit applies to all non-artifact endpoints; artifact subrouter
-	// re-applies its own (larger) limit.
-	r.Use(bodyLimitMiddleware(cfg.MaxRequestSize))
+	// Body limit: MaxRequestSize for ordinary endpoints, MaxArtifactSize for
+	// MLflow artifact uploads (the artifact handler applies no cap itself).
+	r.Use(bodyLimitMiddleware(cfg.MaxRequestSize, cfg.MaxArtifactSize))
 
 	// AUTH-OIDC: wire the session-aware auth middleware. The SQLiteStore
 	// implements SessionLookup via the methods in store/sessions.go.
@@ -246,6 +248,9 @@ func buildRouter(cfg config.Config, logger *slog.Logger, st store.Store, art art
 	// and for the default workspace with no members it is a no-op, preserving
 	// backward compat for solo users and the MLflow compat test suite.
 	r.Use(rbacMiddleware(cfg, st))
+	// Large artifact/dataset transfers outlive the server-wide Read/Write
+	// timeouts; extend them only once the caller is authenticated+authorized.
+	r.Use(largeTransferDeadlineMiddleware)
 
 	// /metrics is public (see isPublicPath). Auth middleware skips it, so
 	// Prometheus can scrape without credentials even when auth=basic.
@@ -255,7 +260,7 @@ func buildRouter(cfg config.Config, logger *slog.Logger, st store.Store, art art
 	})
 
 	// Mount API surfaces.
-	mlh := &mlflow.Handler{Store: st, Artifacts: art, Dispatcher: dispatcher}
+	mlh := &mlflow.Handler{Store: st, Artifacts: art, Dispatcher: dispatcher, MaxArtifactSize: cfg.MaxArtifactSize}
 	mlh.Mount(r)
 
 	// AUTH-OIDC: build native handler with full auth wiring.

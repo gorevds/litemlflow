@@ -6,9 +6,12 @@ package config
 
 import (
 	"errors"
+	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -100,6 +103,12 @@ type Config struct {
 	// to delete rows older than now-EventsRetention on each tick.
 	// Configure via LITEMLFLOW_EVENTS_RETENTION env var.
 	EventsRetention time.Duration
+
+	// TrustedProxies is a comma-separated list of IPs/CIDRs of reverse
+	// proxies whose X-Forwarded-For / X-Real-IP headers are trusted when
+	// keying the login rate limiter. Empty (default) = use the TCP peer
+	// address only. Env: LITEMLFLOW_TRUSTED_PROXIES; flag --trusted-proxies.
+	TrustedProxies string
 }
 
 // FromEnv returns a Config populated from environment variables, then
@@ -231,6 +240,9 @@ func overlayFromEnv(c Config) Config {
 			c.EventsRetention = d
 		}
 	}
+	if v := os.Getenv("LITEMLFLOW_TRUSTED_PROXIES"); v != "" {
+		c.TrustedProxies = v
+	}
 	return c
 }
 
@@ -338,6 +350,9 @@ func overlay(base, explicit Config) Config {
 	if explicit.FederationName != "" {
 		base.FederationName = explicit.FederationName
 	}
+	if explicit.TrustedProxies != "" {
+		base.TrustedProxies = explicit.TrustedProxies
+	}
 	return base
 }
 
@@ -357,6 +372,23 @@ func (c *Config) Validate() error {
 	// AUTH-OIDC: oidc mode requires issuer and client_id at minimum.
 	if c.Auth == "oidc" && (c.OIDCIssuer == "" || c.OIDCClientID == "") {
 		return errors.New("oidc auth requires oidc-issuer and oidc-client-id to be set")
+	}
+	// Without a redirect URL the authorization request carries an empty
+	// redirect_uri and every login fails at the IdP; fail at startup instead.
+	if c.Auth == "oidc" && c.OIDCRedirectURL == "" {
+		return errors.New("oidc auth requires oidc-redirect-url to be set")
+	}
+	// Negative limits/durations are never meaningful and silently disable
+	// protections (a negative MaxRequestSize turns the body cap off, a
+	// negative timeout removes it, a negative SessionTTL mints dead sessions).
+	if c.MaxRequestSize < 0 || c.MaxArtifactSize < 0 {
+		return errors.New("max request / artifact size must not be negative")
+	}
+	if c.ReadTimeout < 0 || c.WriteTimeout < 0 || c.IdleTimeout < 0 || c.SessionTTL < 0 {
+		return errors.New("timeouts and session-ttl must not be negative")
+	}
+	if _, err := ParseTrustedProxies(c.TrustedProxies); err != nil {
+		return err
 	}
 	// STORAGE-S3: validate artifact backend selection.
 	switch c.ArtifactBackend {
@@ -392,4 +424,23 @@ func (c *Config) fillDerivedPaths() {
 	if c.ArtifactsDir == "" {
 		c.ArtifactsDir = filepath.Join(c.DataDir, "artifacts")
 	}
+}
+
+// ParseTrustedProxies parses a comma/space separated list of CIDRs or bare
+// IPs (config TrustedProxies).
+func ParseTrustedProxies(list string) ([]netip.Prefix, error) {
+	var out []netip.Prefix
+	for _, f := range strings.FieldsFunc(list, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' }) {
+		if p, err := netip.ParsePrefix(f); err == nil {
+			out = append(out, p.Masked())
+			continue
+		}
+		ip, err := netip.ParseAddr(f)
+		if err != nil {
+			return nil, fmt.Errorf("invalid trusted proxy %q: want IP or CIDR", f)
+		}
+		ip = ip.Unmap()
+		out = append(out, netip.PrefixFrom(ip, ip.BitLen()))
+	}
+	return out, nil
 }

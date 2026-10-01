@@ -87,7 +87,7 @@ Usage:
                           [--s3-endpoint URL] [--s3-bucket BUCKET] [--s3-region REGION]
                           [--s3-access-key KEY] [--s3-secret-key SECRET] [--s3-prefix PREFIX]
                           [--s3-multipart-threshold BYTES]
-                          [--otlp-grpc-addr HOST:PORT]
+                          [--otlp-grpc-addr HOST:PORT] [--trusted-proxies CIDRS]
   litemlflow migrate      [--data DIR]
   litemlflow rollback     [--data DIR]
   litemlflow backup       [--data DIR] [--out FILE]
@@ -116,6 +116,7 @@ Environment variables override defaults; flags override env vars.
   LITEMLFLOW_S3_ACCESS_KEY       S3 access key ID
   LITEMLFLOW_S3_SECRET_KEY       S3 secret access key
   LITEMLFLOW_S3_PREFIX           optional S3 key prefix (e.g. litemlflow/)
+  LITEMLFLOW_TRUSTED_PROXIES     comma-separated proxy IPs/CIDRs whose X-Forwarded-For is trusted
   LITEMLFLOW_DEV=1               dev-mode logs and verbose errors
 `)
 }
@@ -149,10 +150,13 @@ func runUp(args []string) error {
 	// the workspace selector + member-management pages in the front-end).
 	enableMultiTenant := fs.Bool("enable-multi-tenant", false,
 		"expose workspace selector + member-management UI (default off; engine always runs)")
+	trustedProxies := fs.String("trusted-proxies", "",
+		"comma-separated IPs/CIDRs of reverse proxies whose X-Forwarded-For is trusted for login rate limiting")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	cfg, err := config.FromEnv(config.Config{
+		TrustedProxies:       *trustedProxies,
 		DataDir:              *dataDir,
 		Addr:                 *addr,
 		Auth:                 *auth,
@@ -330,42 +334,23 @@ func runBackup(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	// The tar and gzip trailers are only written on Close, so their errors
+	// (e.g. disk full while flushing) must be surfaced: a deferred, ignored
+	// Close reported "backup written" for a truncated, unrestorable archive.
+	// closeAll is idempotent so the deferred call is a no-op after success.
 	gz := gzip.NewWriter(f)
-	defer gz.Close()
 	tw := tar.NewWriter(gz)
-	defer tw.Close()
-
-	root := cfg.DataDir
-	err = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, _ := filepath.Rel(root, path)
-		if rel == "." {
+	closed := false
+	closeAll := func() error {
+		if closed {
 			return nil
 		}
-		hdr, err := tar.FileInfoHeader(info, "")
-		if err != nil {
-			return err
-		}
-		hdr.Name = rel
-		if err := tw.WriteHeader(hdr); err != nil {
-			return err
-		}
-		if info.Mode().IsRegular() {
-			fp, err := os.Open(path)
-			if err != nil {
-				return err
-			}
-			defer fp.Close()
-			if _, err := io.Copy(tw, fp); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	if err != nil {
+		closed = true
+		return errors.Join(tw.Close(), gz.Close(), f.Close())
+	}
+	defer func() { _ = closeAll() }()
+
+	if err := writeDirToTar(tw, cfg.DataDir, target); err != nil {
 		return err
 	}
 
@@ -394,11 +379,63 @@ func runBackup(args []string) error {
 		fmt.Printf("backup wrote %d S3 objects (%d bytes) into the tar\n", count, bytes)
 	}
 
+	if err := closeAll(); err != nil {
+		return fmt.Errorf("finalize backup %s: %w", target, err)
+	}
 	fmt.Println("backup written to", target)
 	if cfg.ArtifactBackend == "s3" && *includeOnlyDB {
 		fmt.Println("WARNING: artifacts in S3 are NOT in this tar; snapshot the bucket separately to avoid restore-time link rot.")
 	}
 	return nil
+}
+
+// writeDirToTar adds every entry under root to tw with root-relative names.
+// skip (the backup's own output path, when it lies inside root) is excluded so
+// the archive never tries to contain itself.
+func writeDirToTar(tw *tar.Writer, root, skip string) error {
+	skipAbs := ""
+	if skip != "" {
+		if a, err := filepath.Abs(skip); err == nil {
+			skipAbs = a
+		}
+	}
+	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(root, path)
+		if rel == "." {
+			return nil
+		}
+		if skipAbs != "" {
+			if a, aerr := filepath.Abs(path); aerr == nil && a == skipAbs {
+				return nil
+			}
+		}
+		hdr, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return err
+		}
+		hdr.Name = filepath.ToSlash(rel)
+		if err := tw.WriteHeader(hdr); err != nil {
+			return err
+		}
+		if info.Mode().IsRegular() {
+			// Close each file before moving on: a deferred Close inside the
+			// Walk callback kept every file open until the whole walk ended,
+			// exhausting file descriptors on large artifact trees.
+			fp, err := os.Open(path)
+			if err != nil {
+				return err
+			}
+			_, cerr := io.Copy(tw, fp)
+			_ = fp.Close()
+			if cerr != nil {
+				return cerr
+			}
+		}
+		return nil
+	})
 }
 
 // streamS3IntoTar walks every artifact under every active run via the
@@ -559,7 +596,9 @@ func runRestore(args []string) error {
 				_ = out.Close()
 				return err
 			}
-			_ = out.Close()
+			if err := out.Close(); err != nil {
+				return fmt.Errorf("restore %s: %w", clean, err)
+			}
 		}
 	}
 	fmt.Println("restored to", cfg.DataDir)

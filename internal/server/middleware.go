@@ -87,13 +87,12 @@ func requestIDMiddleware(next http.Handler) http.Handler {
 // arrived over TLS (directly or via a trusted proxy) so local plaintext dev is
 // not pinned to HTTPS.
 //
-// The CSP keeps 'unsafe-inline' for scripts and styles because the bundled UI
-// uses inline onclick handlers and inline style attributes; it still restricts
-// every resource origin to 'self' and forbids framing (frame-ancestors 'none').
-// Removing 'unsafe-inline' requires refactoring the UI and is a follow-up.
+// Scripts are restricted to 'self' (no inline handlers), so an HTML-injection
+// bug in the UI cannot execute script. Styles keep 'unsafe-inline' because the
+// bundled UI uses inline style attributes heavily.
 func securityHeadersMiddleware(next http.Handler) http.Handler {
 	const csp = "default-src 'self'; img-src 'self' data:; " +
-		"style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; " +
+		"style-src 'self' 'unsafe-inline'; script-src 'self'; " +
 		"connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
@@ -157,6 +156,10 @@ func (w *statusWriter) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
+// Unwrap lets http.ResponseController reach the underlying connection (to
+// adjust per-request deadlines) through this wrapper.
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 func (w *statusWriter) Write(b []byte) (int, error) {
 	if !w.wroteHeader {
 		w.WriteHeader(http.StatusOK)
@@ -184,23 +187,71 @@ func recoveryMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 }
 
 // bodyLimitMiddleware caps request body size with http.MaxBytesReader.
-func bodyLimitMiddleware(maxBytes int64) func(http.Handler) http.Handler {
+//
+// Large-upload paths (see isLargeUploadPath) are exempt from maxBytes. MLflow
+// artifact uploads are instead capped at maxArtifactBytes (config
+// MaxArtifactSize) — the artifact handler streams the body straight to the
+// backend without any limit of its own, so without this any editor could
+// fill the disk / bucket with a single unbounded PUT. Dataset version uploads
+// install their own MaxBytesReader in the handler.
+func bodyLimitMiddleware(maxBytes, maxArtifactBytes int64) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Dataset uploads (POST /api/v1/datasets/{name}/versions) and
-			// artifact uploads stream gigabytes; the dataset handler installs
-			// its own MaxBytesReader. The MLflow artifact subrouter does the
-			// same. Skip the global limit for those paths.
+			limit := maxBytes
 			if isLargeUploadPath(r.Method, r.URL.Path) {
-				next.ServeHTTP(w, r)
-				return
+				limit = 0
+				if isArtifactUploadPath(r.Method, r.URL.Path) {
+					limit = maxArtifactBytes
+				}
 			}
-			if r.Body != nil && maxBytes > 0 {
-				r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+			if r.Body != nil && limit > 0 {
+				r.Body = http.MaxBytesReader(w, r.Body, limit)
 			}
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// isArtifactUploadPath reports whether the request is an MLflow artifact
+// upload, which is bounded by MaxArtifactSize rather than MaxRequestSize.
+func isArtifactUploadPath(method, path string) bool {
+	return (method == http.MethodPost || method == http.MethodPut) &&
+		strings.HasPrefix(path, "/api/2.0/mlflow-artifacts/artifacts")
+}
+
+// isLargeTransferPath reports requests whose body or response can legitimately
+// take far longer than the server-wide Read/WriteTimeout: artifact uploads and
+// downloads and dataset version uploads.
+func isLargeTransferPath(method, path string) bool {
+	if isLargeUploadPath(method, path) {
+		return true
+	}
+	return method == http.MethodGet && strings.HasPrefix(path, "/api/2.0/mlflow-artifacts/artifacts/")
+}
+
+// largeTransferTimeout bounds a single large artifact / dataset transfer.
+const largeTransferTimeout = 6 * time.Hour
+
+// largeTransferDeadlineMiddleware lifts the server-wide read/write deadlines
+// for large artifact / dataset transfers. http.Server's ReadTimeout and
+// WriteTimeout (30 s by default) cover the WHOLE request body and response,
+// so without this a multi-GiB artifact upload or download over an ordinary
+// link is cut off mid-stream despite MaxArtifactSize advertising 5 GiB. It
+// runs after auth + RBAC so only authorized callers get the extended window;
+// body size stays bounded by bodyLimitMiddleware / the dataset handler.
+func largeTransferDeadlineMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isLargeTransferPath(r.Method, r.URL.Path) {
+			// A generous but finite window: long enough for multi-GiB
+			// transfers, still bounded so a stalled client cannot pin a
+			// connection forever.
+			deadline := time.Now().Add(largeTransferTimeout)
+			rc := http.NewResponseController(w)
+			_ = rc.SetReadDeadline(deadline)
+			_ = rc.SetWriteDeadline(deadline)
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // isLargeUploadPath returns true for routes that legitimately stream more
@@ -249,6 +300,10 @@ func authMiddlewareWithSessions(cfg config.Config, sessions SessionLookup, authL
 			// 1. Strip identity header so clients cannot smuggle it.
 			r.Header.Del("X-LiteMLflow-User")
 			r.Header.Del("X-LiteMLflow-Auth-Method")
+			// The role header is only set by rbacMiddleware when a role was
+			// actually resolved; in open mode it would otherwise pass through
+			// verbatim from the client.
+			r.Header.Del("X-LiteMLflow-Role")
 
 			// Public paths bypass auth entirely.
 			if isPublicPath(r.URL.Path) {
@@ -302,7 +357,7 @@ func authMiddlewareWithSessions(cfg config.Config, sessions SessionLookup, authL
 					// successful auth never consumes a token, so legitimate
 					// clients are unaffected. Once the budget is spent, reject
 					// further failures with 429 (independent-review).
-					if authLimiter != nil && !authLimiter.allow(clientIP(r)) {
+					if authLimiter != nil && !authLimiter.allow(authLimiter.clientKey(r)) {
 						w.Header().Set("Retry-After", "60")
 						writeError(w, http.StatusTooManyRequests, CodeTooManyRequests,
 							"too many failed authentication attempts; slow down and retry later")
@@ -320,7 +375,10 @@ func authMiddlewareWithSessions(cfg config.Config, sessions SessionLookup, authL
 				// If the client accepts HTML (browser), redirect to OIDC start.
 				// Otherwise return 401 so API clients get a machine-readable error.
 				if strings.Contains(r.Header.Get("Accept"), "text/html") {
-					http.Redirect(w, r, "/api/v1/auth/oidc/start?return_to="+r.URL.RequestURI(), http.StatusFound)
+					// QueryEscape: an unescaped RequestURI carrying its own
+					// query string would be split at '&' and the tail
+					// re-interpreted as parameters of /oidc/start.
+					http.Redirect(w, r, "/api/v1/auth/oidc/start?return_to="+url.QueryEscape(r.URL.RequestURI()), http.StatusFound)
 					return
 				}
 				writeError(w, http.StatusUnauthorized, CodeUnauthenticated, "OIDC authentication required; visit /api/v1/auth/oidc/start")
@@ -393,7 +451,12 @@ func workspaceMiddleware(st store.Store) func(http.Handler) http.Handler {
 			}
 			// Validate the workspace exists to prevent spoofing arbitrary IDs.
 			if wsID != "default" {
-				if _, err := st.GetWorkspace(r.Context(), wsID); err != nil {
+				if _, err := st.GetWorkspace(r.Context(), wsID); err != nil && isWorkspaceAgnosticPath(r.URL.Path) {
+					// A stale lmf_workspace cookie (workspace deleted) must
+					// not lock the browser out of the UI shell, health checks,
+					// or login/logout — those never act on a workspace.
+					wsID = "default"
+				} else if err != nil {
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusBadRequest)
 					_ = json.NewEncoder(w).Encode(map[string]string{
@@ -410,6 +473,17 @@ func workspaceMiddleware(st store.Store) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// isWorkspaceAgnosticPath reports public paths that never read workspace
+// data. Federation peer endpoints are public too but DO scope their results
+// by the requested workspace, so they keep strict validation.
+func isWorkspaceAgnosticPath(p string) bool {
+	switch p {
+	case "/api/v1/federate/echo", "/api/v1/federate/search":
+		return false
+	}
+	return isPublicPath(p)
 }
 
 // CurrentWorkspace extracts the current workspace ID from the request context.
@@ -445,24 +519,76 @@ func rbacMiddleware(cfg config.Config, st store.Store) func(http.Handler) http.H
 				return
 			}
 
+			// Public paths (login/logout/OIDC callback, health, UI assets,
+			// federation peer endpoints) carry no workspace role requirement.
+			// Without this, a browser holding an lmf_workspace cookie for a
+			// non-default workspace could not even reach /auth/login or load
+			// the UI after its session expired: the anonymous caller is not a
+			// member, so every request was rejected with 403.
+			if isPublicPath(r.URL.Path) {
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			ws, _ := r.Context().Value(ctxKeyWorkspace).(string)
 			if ws == "" {
 				ws = "default"
-			}
-
-			// 2. default workspace with zero members → open mode.
-			if ws == "default" {
-				members, err := st.ListMembers(r.Context(), ws)
-				if err != nil || len(members) == 0 {
-					next.ServeHTTP(w, r)
-					return
-				}
 			}
 
 			// Resolve user identity.
 			user, _ := r.Context().Value(ctxKeyUser).(string)
 			if user == "" {
 				user = r.Header.Get("X-LiteMLflow-User")
+			}
+
+			// Workspace-management routes (/api/v1/workspaces/{id}/...) act on
+			// the workspace named in the PATH, not the one selected by the
+			// X-Workspace header / cookie. Authorize against the target:
+			// otherwise an admin of their own workspace — or any caller in
+			// the open-mode default workspace — could rename/delete another
+			// workspace or grant themselves admin in it. A target with no
+			// members yet is still bootstrappable from the caller's current
+			// workspace (that is how the first admin is added).
+			if target := workspacePathTarget(r.URL.Path); target != "" && target != ws {
+				members, err := st.ListMembers(r.Context(), target)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, CodeInternalError, "membership lookup failed")
+					return
+				}
+				if len(members) > 0 {
+					role, err := st.GetMemberRole(r.Context(), target, user)
+					if err != nil {
+						writeError(w, http.StatusForbidden, CodePermissionDenied,
+							"you are not a member of workspace "+target)
+						return
+					}
+					if required := requiredRole(r.Method, r.URL.Path); required != "" && !roleAtLeast(role, required) {
+						writeError(w, http.StatusForbidden, CodePermissionDenied,
+							"role "+role+" in workspace "+target+" cannot perform this operation (requires "+required+")")
+						return
+					}
+					// Authorized against the target, which is the only
+					// workspace the handler acts on.
+					r = r.WithContext(context.WithValue(r.Context(), ctxKeyRole, role))
+					r.Header.Set("X-LiteMLflow-Role", role)
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+
+			// 2. default workspace with zero members → open mode. A lookup
+			// error fails closed: treating it as "no members" would silently
+			// disable RBAC whenever the database hiccups.
+			if ws == "default" {
+				members, err := st.ListMembers(r.Context(), ws)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, CodeInternalError, "membership lookup failed")
+					return
+				}
+				if len(members) == 0 {
+					next.ServeHTTP(w, r)
+					return
+				}
 			}
 
 			// Look up membership.
@@ -491,6 +617,21 @@ func rbacMiddleware(cfg config.Config, st store.Store) func(http.Handler) http.H
 	}
 }
 
+// workspacePathTarget returns the {id} of a /api/v1/workspaces/{id}[/...]
+// route, or "" for any other path (including /api/v1/workspaces/current,
+// which reports on the header-selected workspace).
+func workspacePathTarget(p string) string {
+	rest, ok := strings.CutPrefix(p, "/api/v1/workspaces/")
+	if !ok {
+		return ""
+	}
+	id, _, _ := strings.Cut(rest, "/")
+	if id == "current" {
+		return ""
+	}
+	return id
+}
+
 // roleAtLeast returns true if actual satisfies the minimum required role.
 // Role hierarchy: admin > editor > viewer.
 func roleAtLeast(actual, required string) bool {
@@ -515,32 +656,32 @@ func metricsMiddleware(std *metrics.Standard) func(http.Handler) http.Handler {
 			next.ServeHTTP(ww, r)
 			dur := time.Since(start).Seconds()
 
-			// Prefer the chi route pattern to avoid label cardinality explosion.
-			path := r.URL.Path
+			// Label cardinality must stay bounded no matter what clients
+			// send: use the chi route pattern (never the raw path, which
+			// carries run/experiment ids or attacker-chosen junk), collapse
+			// unmatched routes to one label, and bucket non-standard methods.
+			path := "unmatched"
 			if rctx := chi.RouteContext(r.Context()); rctx != nil {
 				if p := rctx.RoutePattern(); p != "" {
 					path = p
 				}
 			}
-			// Fallback truncation: keep only the first two path segments for
-			// unmatched routes so we don't create unbounded label values.
-			if path == r.URL.Path {
-				path = truncatePath(path, 2)
-			}
+			method := metricsMethod(r.Method)
 
 			status := strconv.Itoa(ww.status)
-			std.HTTPRequestsTotal.Inc(r.Method, path, status)
-			std.HTTPRequestDurationSeconds.Observe(dur, r.Method, path)
+			std.HTTPRequestsTotal.Inc(method, path, status)
+			std.HTTPRequestDurationSeconds.Observe(dur, method, path)
 		})
 	}
 }
 
-// truncatePath returns the first n segments of a slash-delimited path,
-// preserving the leading slash. E.g. truncatePath("/a/b/c/d", 2) → "/a/b".
-func truncatePath(p string, n int) string {
-	parts := strings.SplitN(strings.TrimPrefix(p, "/"), "/", n+1)
-	if len(parts) > n {
-		parts = parts[:n]
+// metricsMethod maps the request method to a bounded label set; arbitrary
+// client-chosen method tokens would otherwise mint unbounded series.
+func metricsMethod(m string) string {
+	switch m {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+		http.MethodPatch, http.MethodDelete, http.MethodOptions:
+		return m
 	}
-	return "/" + strings.Join(parts, "/")
+	return "OTHER"
 }

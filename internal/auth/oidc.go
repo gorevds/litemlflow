@@ -4,9 +4,9 @@ package auth
 //
 // Design notes:
 //   - We fetch <issuer>/.well-known/openid-configuration once and cache it.
-//   - JWKS is also fetched once per provider lifecycle and cached; key rotation
-//     is handled by re-creating the Provider (server restart) or by adding a
-//     refresh mechanism in v0.2.
+//   - JWKS is fetched with the discovery doc and cached; when an ID token's kid
+//     is not in the cache (IdP key rotation) it is re-fetched, at most once
+//     per jwksRefreshMinInterval.
 //   - Only RS256 JWT signatures are verified in v0.1; other algorithms return
 //     ErrUnsupportedAlg. This covers Google, Okta, Auth0, Keycloak defaults.
 //   - The code_challenge is S256 (SHA-256 of the code_verifier, base64url
@@ -37,11 +37,26 @@ import (
 	"time"
 )
 
+// httpClient bounds every outbound IdP call (discovery, JWKS, token). Using
+// http.DefaultClient (no timeout) meant a stalled IdP could hang a login
+// request — and, because discovery is single-flighted under discoveryMu,
+// every other login waiting behind it — for as long as the caller's context
+// allowed.
+var httpClient = &http.Client{Timeout: 15 * time.Second}
+
+// jwksRefreshMinInterval rate-limits JWKS re-fetches triggered by an unknown
+// kid so a stream of forged tokens cannot turn us into an IdP flooder.
+const jwksRefreshMinInterval = time.Minute
+
 // ErrUnsupportedAlg is returned when the JWT uses an algorithm we don't support.
 var ErrUnsupportedAlg = errors.New("unsupported JWT algorithm (only RS256 supported in v1)")
 
 // ErrInvalidToken is the catch-all for JWT validation failures.
 var ErrInvalidToken = errors.New("invalid ID token")
+
+// errNoMatchingKey wraps ErrInvalidToken when no JWKS key matches the token's
+// kid — the signal to refresh the cached key set.
+var errNoMatchingKey = fmt.Errorf("%w: no matching key", ErrInvalidToken)
 
 // ErrNonceMismatch is returned by Exchange when the nonce in the ID token
 // does not match the expected nonce from the PKCE state cookie.
@@ -58,6 +73,8 @@ type Provider struct {
 	mu           sync.RWMutex
 	discoveryDoc *oidcDiscovery
 	jwks         *jwksCache
+	// jwksFetchedAt records the last JWKS fetch, for refresh rate-limiting.
+	jwksFetchedAt time.Time
 	// discoveryMu single-flights EnsureDiscovery so concurrent callers don't
 	// each fetch the discovery doc + JWKS.
 	discoveryMu sync.Mutex
@@ -149,27 +166,61 @@ func (p *Provider) EnsureDiscovery(ctx context.Context) error {
 	p.mu.Lock()
 	p.discoveryDoc = doc
 	p.jwks = jwks
+	p.jwksFetchedAt = time.Now()
 	p.mu.Unlock()
 	return nil
+}
+
+// refreshJWKS re-downloads the JWKS (IdP key rotation). It reports whether a
+// new key set was installed; refreshes are rate-limited to one per
+// jwksRefreshMinInterval and single-flighted under discoveryMu.
+func (p *Provider) refreshJWKS(ctx context.Context) bool {
+	p.discoveryMu.Lock()
+	defer p.discoveryMu.Unlock()
+	p.mu.RLock()
+	doc, last := p.discoveryDoc, p.jwksFetchedAt
+	p.mu.RUnlock()
+	if doc == nil || time.Since(last) < jwksRefreshMinInterval {
+		return false
+	}
+	jwks, err := fetchJWKS(ctx, doc.JWKSURI)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.jwksFetchedAt = time.Now() // also on failure: keep the rate limit
+	if err != nil {
+		slog.Warn("oidc: JWKS refresh failed", slog.String("err", err.Error()))
+		return false
+	}
+	p.jwks = jwks
+	return true
 }
 
 // requireSecureURL rejects plaintext-HTTP URLs unless they target a loopback
 // host (allowed for local dev). This stops the OIDC handshake from sending
 // the auth code, client secret, or JWKS over plaintext.
+//
+// The URL is parsed and the HOST compared exactly: a string-prefix check on
+// "http://localhost" would also admit http://localhost.evil.com/,
+// http://127.0.0.1.evil.com/ or http://localhost@evil.com/ — all plaintext
+// endpoints on an attacker-controlled host.
 func requireSecureURL(label, raw string) error {
 	if raw == "" {
 		return fmt.Errorf("%s URL is empty", label)
 	}
-	switch {
-	case strings.HasPrefix(raw, "https://"):
-		return nil
-	case strings.HasPrefix(raw, "http://127.0.0.1"),
-		strings.HasPrefix(raw, "http://localhost"),
-		strings.HasPrefix(raw, "http://[::1]"):
-		return nil
-	default:
-		return fmt.Errorf("%s URL must use HTTPS (or loopback HTTP for dev): %s", label, raw)
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.User != nil {
+		return fmt.Errorf("%s URL is invalid: %s", label, raw)
 	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		switch u.Hostname() {
+		case "127.0.0.1", "localhost", "::1":
+			return nil
+		}
+	}
+	return fmt.Errorf("%s URL must use HTTPS (or loopback HTTP for dev): %s", label, raw)
 }
 
 // NewPKCEVerifier generates a high-entropy PKCE code verifier (RFC 7636 §4.1).
@@ -283,7 +334,7 @@ func (p *Provider) Exchange(ctx context.Context, code, codeVerifier, expectedNon
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", nil, fmt.Errorf("token endpoint: %w", err)
 	}
@@ -305,6 +356,12 @@ func (p *Provider) Exchange(ctx context.Context, code, codeVerifier, expectedNon
 	}
 
 	claims, err := p.verifyIDToken(tr.IDToken)
+	if errors.Is(err, errNoMatchingKey) && p.refreshJWKS(ctx) {
+		// The JWKS was cached at discovery time and never refreshed, so an
+		// IdP signing-key rotation broke every login until restart. Retry
+		// once against the freshly fetched key set.
+		claims, err = p.verifyIDToken(tr.IDToken)
+	}
 	if err != nil {
 		return "", nil, err
 	}
@@ -460,7 +517,7 @@ func (p *Provider) resolveKey(kid string) (*rsa.PublicKey, error) {
 		}
 		return pub, nil
 	}
-	return nil, fmt.Errorf("%w: no matching key for kid=%q", ErrInvalidToken, kid)
+	return nil, fmt.Errorf("%w: kid=%q", errNoMatchingKey, kid)
 }
 
 // rsaPublicKeyFromJWK reconstructs an *rsa.PublicKey from a JWK.
@@ -507,7 +564,7 @@ func fetchJSON[T any](ctx context.Context, uri string) (*T, error) {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}

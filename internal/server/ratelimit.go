@@ -3,6 +3,8 @@ package server
 import (
 	"net"
 	"net/http"
+	"net/netip"
+	"strings"
 	"sync"
 	"time"
 )
@@ -18,6 +20,9 @@ type authRateLimiter struct {
 	refill    float64 // tokens per second
 	now       func() time.Time
 	lastSweep time.Time
+	// trusted lists reverse proxies whose X-Forwarded-For / X-Real-IP are
+	// believed (config TrustedProxies). Empty = RemoteAddr only.
+	trusted []netip.Prefix
 }
 
 type tokenBucket struct {
@@ -64,7 +69,12 @@ func (rl *authRateLimiter) sweep(now time.Time) {
 	}
 	rl.lastSweep = now
 	for k, b := range rl.buckets {
-		if now.Sub(b.last) > time.Minute && b.tokens >= rl.capacity {
+		// b.tokens is only updated on access, so project the refill forward
+		// to now. Comparing the stale stored value would never evict a bucket
+		// that was left partially drained — an attacker rotating source
+		// addresses (one failed attempt each) would grow the map without bound.
+		idle := now.Sub(b.last)
+		if idle > time.Minute && b.tokens+idle.Seconds()*rl.refill >= rl.capacity {
 			delete(rl.buckets, k)
 		}
 	}
@@ -76,7 +86,7 @@ func (rl *authRateLimiter) sweep(now time.Time) {
 func rateLimitAuthMiddleware(rl *authRateLimiter) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if isRateLimitedAuthPath(r) && !rl.allow(clientIP(r)) {
+			if isRateLimitedAuthPath(r) && !rl.allow(rl.clientKey(r)) {
 				w.Header().Set("Retry-After", "60")
 				writeError(w, http.StatusTooManyRequests, CodeTooManyRequests,
 					"too many authentication attempts; slow down and retry later")
@@ -94,14 +104,76 @@ func isRateLimitedAuthPath(r *http.Request) bool {
 	return r.Method == http.MethodPost && r.URL.Path == "/api/v1/auth/login"
 }
 
-// clientIP returns the remote IP without the port. We deliberately use
-// RemoteAddr rather than X-Forwarded-For: a spoofable header would let an
-// attacker rotate the rate-limit key trivially. Deployments behind a trusted
-// proxy should rate-limit at the proxy.
+// clientIP returns the rate-limit key for the remote peer, derived from
+// RemoteAddr only. Forwarded headers are honoured solely via
+// authRateLimiter.clientKey when the peer is a configured trusted proxy: a
+// spoofable header from an arbitrary client would let an attacker rotate the
+// rate-limit key trivially.
 func clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		host = r.RemoteAddr
 	}
-	return host
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return host
+	}
+	return ipKey(ip)
+}
+
+// ipKey normalises an address into a rate-limit key. IPv6 clients are keyed
+// by their /64 prefix: a single end site is routinely delegated a whole /64
+// (or larger), so keying on the full /128 would let one attacker rotate
+// through 2^64 source addresses and never be throttled.
+func ipKey(ip netip.Addr) string {
+	ip = ip.Unmap().WithZone("")
+	if ip.Is4() {
+		return ip.String()
+	}
+	p, _ := ip.Prefix(64)
+	return p.String()
+}
+
+func isTrusted(trusted []netip.Prefix, ip netip.Addr) bool {
+	ip = ip.Unmap().WithZone("")
+	for _, p := range trusted {
+		if p.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// clientKey resolves the rate-limit key for r. When RemoteAddr is a trusted
+// proxy, the real client is the right-most X-Forwarded-For hop that is NOT
+// itself a trusted proxy (left-most entries are client-controlled and must
+// not be believed); X-Real-IP is used when XFF is absent. Otherwise — and
+// always when no proxies are configured — RemoteAddr is used.
+func (rl *authRateLimiter) clientKey(r *http.Request) string {
+	if len(rl.trusted) == 0 {
+		return clientIP(r)
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	remote, err := netip.ParseAddr(host)
+	if err != nil || !isTrusted(rl.trusted, remote) {
+		return clientIP(r)
+	}
+	if xffs := r.Header.Values("X-Forwarded-For"); len(xffs) > 0 {
+		hops := strings.Split(strings.Join(xffs, ","), ",")
+		for i := len(hops) - 1; i >= 0; i-- {
+			ip, err := netip.ParseAddr(strings.TrimSpace(hops[i]))
+			if err != nil {
+				break // malformed hop: stop trusting the chain
+			}
+			if !isTrusted(rl.trusted, ip) {
+				return ipKey(ip)
+			}
+		}
+	} else if ip, err := netip.ParseAddr(strings.TrimSpace(r.Header.Get("X-Real-IP"))); err == nil {
+		return ipKey(ip)
+	}
+	return ipKey(remote)
 }
