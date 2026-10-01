@@ -13,6 +13,7 @@ Exit code: 0 on full pass, 1 on first failure.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import socket
 import subprocess
@@ -473,7 +474,11 @@ def main() -> int:
         return 0
 
     port = _free_port()
-    with tempfile.TemporaryDirectory(prefix="litemlflow-compat-") as tmp:
+    # With --keep the server outlives this process, so its data dir must not
+    # be a TemporaryDirectory (that would be deleted from under it on exit).
+    keep_dir = tempfile.mkdtemp(prefix="litemlflow-compat-") if args.keep else None
+    with (contextlib.nullcontext(keep_dir) if args.keep
+          else tempfile.TemporaryDirectory(prefix="litemlflow-compat-")) as tmp:
         data = Path(tmp)
         proc = _start_server(data, port)
         url = f"http://127.0.0.1:{port}"

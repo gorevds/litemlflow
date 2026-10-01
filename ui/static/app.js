@@ -82,6 +82,22 @@
     });
   }
 
+  // fetchOK is fetch() + workspace header + throw on non-2xx, for calls whose
+  // response may have no JSON body (DELETE → 204). A bare fetch() resolves on
+  // 403/404/500, so failures were silently treated as success.
+  function fetchOK(url, init) {
+    init = init || {};
+    init.headers = Object.assign(
+      { "Content-Type": "application/json" },
+      Workspace.header(),
+      init.headers || {}
+    );
+    return fetch(url, init).then(r => {
+      if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+      return r;
+    });
+  }
+
   function escapeHTML(s) {
     return String(s).replace(/[&<>"']/g, ch => ({
       "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
@@ -506,7 +522,12 @@
     },
 
     async _search(query) {
-      let items = [...this._staticCmds];
+      // Static commands are filtered client-side; server hits are already
+      // matched by the server (on fields the label may not show, e.g. ids).
+      const ql = (query || "").toLowerCase();
+      let items = query
+        ? this._staticCmds.filter(i => i.label.toLowerCase().includes(ql))
+        : [...this._staticCmds];
 
       if (query) {
         try {
@@ -565,12 +586,6 @@
             });
           }
         } catch {}
-      }
-
-      // Filter static by query
-      if (query) {
-        const ql = query.toLowerCase();
-        items = items.filter(i => i.label.toLowerCase().includes(ql));
       }
 
       this._items = items.slice(0, 10);
@@ -952,6 +967,11 @@
 
     route() {
       const hash = (window.location.hash || "#/experiments").slice(1);
+      // Views read their own ?query (as_of, direction, ids, ...) from
+      // location.hash; route on the path only, or anchored patterns like the
+      // run route never match once a query is present.
+      const path = hash.split("?")[0];
+      const dec = (s) => { try { return decodeURIComponent(s); } catch { return s; } };
       const main = $("#app");
       main.innerHTML = '<div class="loading">Loading…</div>';
 
@@ -959,21 +979,21 @@
       const bar = $("#bulk-action-bar");
       if (bar) bar.remove();
 
-      const expMatch      = hash.match(/^\/experiments\/(\d+)$/);
-      const runMatch      = hash.match(/^\/experiments\/(\d+)\/runs\/([0-9a-f]+)$/);
-      const lineageMatch  = hash.match(/^\/experiments\/(\d+)\/runs\/([0-9a-f]+)\/lineage$/);
-      const cmpMatch      = hash.match(/^\/experiments\/(\d+)\/compare/);
-      const promptMatch   = hash.match(/^\/prompts\/(.+)$/);
-      const wsMembersMatch = hash.match(/^\/workspaces\/([^/]+)\/members$/);
-      const dashMatch      = hash.match(/^\/dashboards\/(.+)$/);
+      const expMatch      = path.match(/^\/experiments\/(\d+)$/);
+      const runMatch      = path.match(/^\/experiments\/(\d+)\/runs\/([0-9a-f]+)$/);
+      const lineageMatch  = path.match(/^\/experiments\/(\d+)\/runs\/([0-9a-f]+)\/lineage$/);
+      const cmpMatch      = path.match(/^\/experiments\/(\d+)\/compare/);
+      const promptMatch   = path.match(/^\/prompts\/(.+)$/);
+      const wsMembersMatch = path.match(/^\/workspaces\/([^/]+)\/members$/);
+      const dashMatch      = path.match(/^\/dashboards\/(.+)$/);
 
       if (lineageMatch)    return this.renderRunLineage(parseInt(lineageMatch[1], 10), lineageMatch[2]);
       if (runMatch)        return this.renderRun(parseInt(runMatch[1], 10), runMatch[2]);
       if (cmpMatch)        return this.renderCompare(parseInt(cmpMatch[1], 10));
       if (expMatch)        return this.renderExperiment(parseInt(expMatch[1], 10));
-      if (promptMatch)     return this.renderPromptDetail(promptMatch[1]);
-      if (wsMembersMatch)  return this.renderWorkspaceMembers(wsMembersMatch[1]);
-      if (dashMatch)       return this.renderDashboard(decodeURIComponent(dashMatch[1]));
+      if (promptMatch)     return this.renderPromptDetail(dec(promptMatch[1]));
+      if (wsMembersMatch)  return this.renderWorkspaceMembers(dec(wsMembersMatch[1]));
+      if (dashMatch)       return this.renderDashboard(dec(dashMatch[1]));
       if (hash.startsWith("/workspaces")) return this.renderWorkspaces();
       if (hash.startsWith("/prompts")) return this.renderPrompts();
       if (hash.startsWith("/about"))   return this.renderAbout();
@@ -981,8 +1001,11 @@
       if (hash.startsWith("/dashboards")) return this.renderDashboardsIndex();
       if (hash.startsWith("/analytics")) return this.renderAnalytics();
       if (hash.startsWith("/federation")) return this.renderFederation();
-      const dsDetail = hash.match(/^\/datasets\/(.+)$/);
-      if (dsDetail) return this.renderDatasetDetail(decodeURIComponent(dsDetail[1]));
+      // Lineage links deep-link as #/datasets/<name>/v<N>; the detail page
+      // lists every version, so drop the version suffix (names are
+      // percent-encoded, so a literal "/" can only be this separator).
+      const dsDetail = path.match(/^\/datasets\/([^/]+)(?:\/v\d+)?$/);
+      if (dsDetail) return this.renderDatasetDetail(dec(dsDetail[1]));
       if (hash.startsWith("/datasets")) return this.renderDatasetsIndex();
       return this.renderExperiments();
     },
@@ -1443,14 +1466,6 @@ mlflow.log_metric("loss", 0.42)</pre>
             starredFirst = sfCb.checked;
             localStorage.setItem(starredFirstKey, String(starredFirst));
             renderTable();
-            // Rewire checkboxes after table re-render.
-            $$(".bulk-cb", main).forEach(cb => {
-              cb.checked = BulkSelect.has(cb.dataset.runId);
-              cb.addEventListener("change", () => {
-                BulkSelect.toggle(cb.dataset.runId);
-                App._updateBulkBar(expID, runs);
-              });
-            });
           });
         }
 
@@ -1513,13 +1528,19 @@ mlflow.log_metric("loss", 0.42)</pre>
           window.addEventListener("hashchange", detachOutside, { once: true });
         }
 
-        // Checkbox wiring
-        $$(".bulk-cb", main).forEach(cb => {
-          cb.addEventListener("change", () => {
-            BulkSelect.toggle(cb.dataset.runId);
+        // Checkbox wiring — delegated on the tbody, which survives
+        // renderTable() (column toggle / starred-first replace its rows, and
+        // per-checkbox listeners were lost after a column toggle).
+        const bulkTbody = $("#exp-tbody");
+        if (bulkTbody) {
+          bulkTbody.addEventListener("change", (ev) => {
+            const cb = ev.target.closest(".bulk-cb");
+            if (!cb) return;
+            if (cb.checked) BulkSelect._checked.add(cb.dataset.runId);
+            else BulkSelect._checked.delete(cb.dataset.runId);
             this._updateBulkBar(expID, runs);
           });
-        });
+        }
         const allCb = $("#bulk-all");
         if (allCb) {
           allCb.addEventListener("change", () => {
@@ -2262,11 +2283,14 @@ mlflow.log_metric("loss", 0.42)</pre>
             <details class="artifact-entry" data-path="${escapeHTML(path)}" data-ext="${escapeHTML(ext)}" data-run="${escapeHTML(runID)}">
               <summary style="cursor:pointer;font-family:var(--mono);font-size:12px;padding:4px 0">
                 ${escapeHTML(path)}${size}
-                <a href="${escapeHTML(dlURL)}" download="${escapeHTML(path.split("/").pop())}" onclick="event.stopPropagation()" style="margin-left:8px;font-size:11px">&#x2B07; download</a>
+                <a href="${escapeHTML(dlURL)}" download="${escapeHTML(path.split("/").pop())}" class="artifact-dl" style="margin-left:8px;font-size:11px">&#x2B07; download</a>
               </summary>
               <div class="artifact-preview-slot" style="margin-top:4px"></div>
             </details>`;
         }).join("");
+
+        // Download link must not toggle the surrounding <details>.
+        $$(".artifact-dl", container).forEach(a => a.addEventListener("click", e => e.stopPropagation()));
 
         // Lazy preview — only fetch when <details> is opened.
         $$(".artifact-entry", container).forEach(det => {
@@ -2639,7 +2663,7 @@ mlflow.log_metric("loss", 0.42)</pre>
           <div class="span-row">
             <div>
               <strong>${escapeHTML(s.name)}</strong>
-              ${s.span_kind ? `<span class="kind-pill">${s.span_kind}</span>` : ""}
+              ${s.span_kind ? `<span class="kind-pill">${escapeHTML(s.span_kind)}</span>` : ""}
               <div class="span-bar" style="margin-left:${start.toFixed(2)}%; width:${Math.max(width, 0.3).toFixed(2)}%"></div>
             </div>
             <div class="mono">${formatNS((s.end_time_ns || s.start_time_ns) - s.start_time_ns)}</div>
@@ -3155,12 +3179,9 @@ c.create_prompt("rag.system", "You are a helpful assistant.", description="seed 
             danger: true, primaryLabel: "Remove",
           })) return;
           try {
-            await fetch(
+            await fetchOK(
               `/api/v1/workspaces/${encodeURIComponent(wsID)}/members/${encodeURIComponent(userID)}`,
-              {
-                method: "DELETE",
-                headers: Object.assign({ "Content-Type": "application/json" }, Workspace.header()),
-              }
+              { method: "DELETE" }
             );
             // Remove row optimistically
             const row = main.querySelector(`tr[data-member-id="${CSS.escape(userID)}"]`);
@@ -3516,10 +3537,7 @@ c.create_prompt("rag.system", "You are a helpful assistant.", description="seed 
               danger: true, primaryLabel: "Delete",
             })) return;
             try {
-              await fetch(`/api/v1/webhooks/${id}`, {
-                method: "DELETE",
-                headers: Object.assign({ "Content-Type": "application/json" }, Workspace.header()),
-              });
+              await fetchOK(`/api/v1/webhooks/${id}`, { method: "DELETE" });
               renderPage();
             } catch (err) {
               alert(`Failed: ${err}`);
@@ -3657,8 +3675,7 @@ requests.post("${location.origin}/api/v1/datasets/my-dataset/versions",
             danger: true, primaryLabel: "Soft-delete",
           })) return;
           try {
-            const r = await fetch(`/api/v1/datasets/${encodeURIComponent(name)}/versions/${v}`, { method: "DELETE" });
-            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            await fetchOK(`/api/v1/datasets/${encodeURIComponent(name)}/versions/${v}`, { method: "DELETE" });
             showToast(`Deleted ${name} v${v}`);
             App.renderDatasetDetail(name);
           } catch (err) {
@@ -3831,7 +3848,7 @@ requests.post("${location.origin}/api/v1/datasets/my-dataset/versions",
           danger: true, primaryLabel: "Remove",
         })) return;
         try {
-          await fetch(`/api/v1/federate/peers/${id}`, { method: "DELETE" });
+          await fetchOK(`/api/v1/federate/peers/${id}`, { method: "DELETE" });
           showToast("Peer removed.");
           App.renderFederation();
         } catch (err) {
@@ -3897,7 +3914,7 @@ requests.post("${location.origin}/api/v1/datasets/my-dataset/versions",
           if (!secret && resp.secret) {
             await Modal.confirm({
               title: "Peer created — copy this secret",
-              message: `Paste this 64-char HMAC secret into the same form on ${escapeHTML(resp.peer.name)}'s server. It is shown ONLY ONCE.\n\n${resp.secret}`,
+              message: `Paste this 64-char HMAC secret into the same form on ${resp.peer.name}'s server. It is shown ONLY ONCE.\n\n${resp.secret}`,
               primaryLabel: "I copied it",
             });
             try { await navigator.clipboard.writeText(resp.secret); showToast("Secret copied to clipboard."); } catch {}

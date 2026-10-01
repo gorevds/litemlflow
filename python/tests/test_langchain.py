@@ -435,3 +435,91 @@ class TestEndToEndTrace:
         assert "tokens.total" in metrics
         assert "cost.usd" in metrics
         assert abs(metrics["cost.usd"] - 0.000045) < 1e-10
+
+
+# ---------------------------------------------------------------------------
+# 5. Regressions: LCEL serialized=None, untracked parents, retriever errors
+# ---------------------------------------------------------------------------
+
+class TestCallbackRegressions:
+    def test_serialized_none_does_not_drop_chain_span(self) -> None:
+        # langchain-core >= 0.2 passes serialized=None for LCEL runnables
+        # (RunnableLambda, RunnableSequence) and the name via kwargs.
+        handler = _make_handler()
+        rid = uuid4()
+        handler.on_chain_start(None, {"x": 1}, run_id=rid, name="RunnableSequence")
+        handler.on_chain_end({"y": 2}, run_id=rid)
+        spans = _get_flushed_spans(handler)
+        assert [s["name"] for s in spans] == ["chain:RunnableSequence"]
+
+    def test_real_lcel_chain_records_spans(self) -> None:
+        from langchain_core.runnables import RunnableLambda
+
+        handler = _make_handler()
+        chain = RunnableLambda(lambda x: x + 1) | RunnableLambda(lambda x: x * 2)
+        assert chain.invoke(1, config={"callbacks": [handler]}) == 4
+        names = sorted(s["name"] for s in _get_all_flushed_spans(handler))
+        assert names == ["chain:RunnableLambda", "chain:RunnableLambda", "chain:RunnableSequence"]
+
+    def test_untracked_parent_span_flushed_with_its_children(self) -> None:
+        # Handler attached mid-tree: the span's LangChain parent is unknown to
+        # us. It must act as a root so its children are not posted before it
+        # (the server enforces a parent_id foreign key).
+        handler = _make_handler()
+        outer_untracked = uuid4()
+        mid, leaf = uuid4(), uuid4()
+        handler.on_chain_start({"name": "Mid"}, {}, run_id=mid, parent_run_id=outer_untracked)
+        handler.on_chain_start({"name": "Leaf"}, {}, run_id=leaf, parent_run_id=mid)
+        handler.on_chain_end({}, run_id=leaf)
+        assert all(
+            c.args[1] != "/api/v1/traces" for c in handler._client._request.call_args_list
+        ), "child flushed before its parent"
+        handler.on_chain_end({}, run_id=mid)
+        spans = _get_flushed_spans(handler)
+        assert [s["name"] for s in spans] == ["chain:Mid", "chain:Leaf"]
+        assert spans[0]["parent_id"] is None
+        assert spans[1]["parent_id"] == spans[0]["id"]
+
+    def test_retriever_error_closes_span(self) -> None:
+        handler = _make_handler()
+        rid = uuid4()
+        handler.on_retriever_start({"name": "R"}, "q", run_id=rid)
+        handler.on_retriever_error(ValueError("index down"), run_id=rid)
+        spans = _get_flushed_spans(handler)
+        assert spans[0]["status_code"] == "ERROR"
+        assert handler._open == {}
+
+    def test_error_traceback_taken_from_exception(self) -> None:
+        handler = _make_handler()
+        rid = uuid4()
+        handler.on_chain_start({"name": "C"}, {}, run_id=rid)
+        try:
+            raise RuntimeError("kaboom")
+        except RuntimeError as exc:
+            err = exc
+        # Called outside the except block, as LangChain may do.
+        handler.on_chain_error(err, run_id=rid)
+        tb = _get_flushed_spans(handler)[0]["attributes"]["traceback"]
+        assert "RuntimeError: kaboom" in tb
+
+    def test_usage_metadata_fallback(self) -> None:
+        from langchain_core.messages import AIMessage
+        from langchain_core.outputs import ChatGeneration
+
+        handler = _make_handler()
+        rid = uuid4()
+        handler.on_chat_model_start(
+            {}, [[]], run_id=rid, invocation_params={"model": "claude-3-5-haiku-20241022"}
+        )
+        msg = AIMessage(
+            content="hi",
+            usage_metadata={"input_tokens": 10, "output_tokens": 4, "total_tokens": 14},
+        )
+        handler.on_llm_end(
+            LLMResult(generations=[[ChatGeneration(message=msg)]], llm_output={}), run_id=rid
+        )
+        logged = {c.args[1]: c.args[2] for c in handler._client.log_metric.call_args_list}
+        assert logged["tokens.prompt"] == 10.0
+        assert logged["tokens.completion"] == 4.0
+        assert logged["tokens.total"] == 14.0
+        assert logged["cost.usd"] == pytest.approx(cost("claude-3-5-haiku-20241022", 10, 4))

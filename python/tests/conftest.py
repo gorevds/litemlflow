@@ -25,7 +25,8 @@ def _project_root() -> Path:
 
 
 def _binary_path() -> Path:
-    bin_path = _project_root() / "bin" / "litemlflow"
+    override = os.environ.get("LITEMLFLOW_BIN")
+    bin_path = Path(override) if override else _project_root() / "bin" / "litemlflow"
     if not bin_path.exists():
         raise pytest.UsageError(
             f"binary not found at {bin_path}; build with: make build"

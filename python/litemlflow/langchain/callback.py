@@ -30,6 +30,7 @@ call (e.g., a bare LLM call) is flushed immediately on close.
 from __future__ import annotations
 
 import secrets
+import threading
 import time
 import traceback
 from typing import Any
@@ -52,13 +53,72 @@ def _truncate(text: str, max_len: int = 1000) -> str:
     return text[:max_len] + f"... [truncated {len(text) - max_len} chars]"
 
 
+def _format_error(error: BaseException) -> str:
+    """Format the traceback carried by ``error`` itself.
+
+    ``traceback.format_exc()`` only works while an exception is being handled
+    in the current frame; LangChain may invoke error callbacks outside the
+    ``except`` block (e.g. from an executor thread), which yields "NoneType: None".
+    """
+    return "".join(traceback.format_exception(type(error), error, error.__traceback__))
+
+
+def _component_name(serialized: dict[str, Any] | None, kwargs: dict[str, Any], default: str) -> str:
+    """Resolve a display name for a LangChain component.
+
+    ``serialized`` is ``None`` for many LCEL runnables (RunnableLambda,
+    RunnableSequence, ...) in langchain-core >= 0.2, so fall back to the
+    ``name`` kwarg LangChain passes alongside it.
+    """
+    ser = serialized or {}
+    name = ser.get("name") or kwargs.get("name")
+    if not name:
+        ids = ser.get("id")
+        if isinstance(ids, list) and ids:
+            name = ids[-1]
+    return str(name or default)
+
+
+def _usage_from_generations(response: Any) -> dict[str, int]:
+    """Sum ``usage_metadata`` from chat generations (langchain-core standard).
+
+    Providers such as Anthropic do not put ``token_usage`` in ``llm_output``;
+    the provider-neutral source is ``AIMessage.usage_metadata``.
+    """
+    total = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    found = False
+    for gen_list in getattr(response, "generations", None) or []:
+        for gen in gen_list or []:
+            usage = getattr(getattr(gen, "message", None), "usage_metadata", None)
+            if not isinstance(usage, dict):
+                continue
+            found = True
+            pt = int(usage.get("input_tokens", 0) or 0)
+            ct = int(usage.get("output_tokens", 0) or 0)
+            total["prompt_tokens"] += pt
+            total["completion_tokens"] += ct
+            total["total_tokens"] += int(usage.get("total_tokens", pt + ct) or 0)
+    return total if found else {}
+
+
 def _get_or_create_experiment(client: Client, name: str) -> int:
-    """Return experiment id, creating it if it doesn't exist yet."""
+    """Return experiment id, creating it if it doesn't exist yet.
+
+    Only a 404 means "missing" (a transport/auth error must surface as-is),
+    and a concurrent creator winning the race is resolved by re-reading.
+    """
     try:
         exp = client.get_experiment_by_name(name)
         return int(exp["experiment_id"])
-    except LiteMLflowError:
+    except LiteMLflowError as exc:
+        if exc.status != 404:
+            raise
+    try:
         return client.create_experiment(name)
+    except LiteMLflowError as exc:
+        if exc.code != "RESOURCE_ALREADY_EXISTS":
+            raise
+        return int(client.get_experiment_by_name(name)["experiment_id"])
 
 
 def LiteMLflowCallbackHandler(  # noqa: N802 — intentionally uppercase to look like a class
@@ -174,6 +234,10 @@ class _LiteMLflowCallbackHandlerImpl:
         # currently open.  When it drops to 0, we flush all buffered spans.
         self._root_depth: int = 0
 
+        # LangChain dispatches sync callbacks from executor threads for
+        # batch()/async runs; guard the shared span bookkeeping.
+        self._lock = threading.RLock()
+
     # ---------------------------------------------------------------- internal
 
     def _open_span(
@@ -187,15 +251,24 @@ class _LiteMLflowCallbackHandlerImpl:
         """Register an open span and return its pre-generated span_id."""
         key = str(lc_run_id)
         span_id = secrets.token_hex(8)
-        self._open[key] = {
-            "span_id": span_id,
-            "name": name,
-            "attrs": attrs or {},
-            "parent_lc_id": str(lc_parent_run_id) if lc_parent_run_id else None,
-            "start_ns": time.time_ns(),
-        }
-        if lc_parent_run_id is None:
-            self._root_depth += 1
+        with self._lock:
+            # A span whose LangChain parent is not tracked by this handler
+            # (e.g. the handler was attached via .with_config() on an inner
+            # runnable) is a root for our purposes. Otherwise its children
+            # would be flushed — referencing its span id — before it is
+            # posted, violating the parent_id foreign key server-side.
+            parent_key = str(lc_parent_run_id) if lc_parent_run_id else None
+            if parent_key is not None and parent_key not in self._open:
+                parent_key = None
+            self._open[key] = {
+                "span_id": span_id,
+                "name": name,
+                "attrs": attrs or {},
+                "parent_lc_id": parent_key,
+                "start_ns": time.time_ns(),
+            }
+            if parent_key is None:
+                self._root_depth += 1
         return span_id
 
     def _close_span(
@@ -207,6 +280,30 @@ class _LiteMLflowCallbackHandlerImpl:
         status_message: str = "",
     ) -> str | None:
         """Move a span from open → buffer; flush buffer if no roots remain open."""
+        to_post: list[dict[str, Any]] = []
+        with self._lock:
+            span_id = self._close_span_locked(
+                lc_run_id,
+                extra_attrs=extra_attrs,
+                status_code=status_code,
+                status_message=status_message,
+            )
+            # Flush when no root spans remain open.
+            if span_id is not None and self._root_depth == 0 and self._buffer:
+                to_post = self._buffer
+                self._buffer = []
+        if to_post:
+            self._post(to_post)
+        return span_id
+
+    def _close_span_locked(
+        self,
+        lc_run_id: UUID,
+        *,
+        extra_attrs: dict[str, Any] | None,
+        status_code: str,
+        status_message: str,
+    ) -> str | None:
         key = str(lc_run_id)
         pending = self._open.pop(key, None)
         if pending is None:
@@ -260,23 +357,22 @@ class _LiteMLflowCallbackHandlerImpl:
         if was_root:
             self._root_depth = max(0, self._root_depth - 1)
 
-        # Flush when no root spans remain open.
-        if self._root_depth == 0 and self._buffer:
-            self._flush()
-
         return pending["span_id"]
 
     def _flush(self) -> None:
         """POST all buffered spans in topological order (parents before children)."""
-        if not self._buffer:
-            return
+        with self._lock:
+            buffered = self._buffer
+            self._buffer = []
+        if buffered:
+            self._post(buffered)
 
+    def _post(self, buffered: list[dict[str, Any]]) -> None:
         # Sort spans so parents come before children.
         # A root span (parent_id=None) always comes first; otherwise preserve
         # the close order which is innermost-first (reverse topological), so
         # we reverse.
-        ordered = list(reversed(self._buffer))
-        self._buffer = []
+        ordered = list(reversed(buffered))
 
         # Strip the internal _lc_id field before posting.
         clean_spans = [{k: v for k, v in s.items() if k != "_lc_id"} for s in ordered]
@@ -286,6 +382,7 @@ class _LiteMLflowCallbackHandlerImpl:
                 "POST",
                 "/api/v1/traces",
                 json={"trace_id": self._trace_id, "spans": clean_spans},
+                idempotent=True,  # spans are upserted by id; safe to retry
             )
         except Exception:
             pass  # Tracing is best-effort; never crash the chain.
@@ -303,9 +400,7 @@ class _LiteMLflowCallbackHandlerImpl:
         metadata: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
-        chain_type = serialized.get("name") or (
-            serialized.get("id", ["unknown"])[-1]
-        )
+        chain_type = _component_name(serialized, kwargs, "unknown")
         attrs: dict[str, Any] = {
             "name": str(chain_type),
             "run_id": str(run_id),
@@ -342,7 +437,7 @@ class _LiteMLflowCallbackHandlerImpl:
         parent_run_id: UUID | None = None,
         **kwargs: Any,
     ) -> None:
-        tb = traceback.format_exc()
+        tb = _format_error(error)
         self._close_span(
             run_id,
             extra_attrs={
@@ -370,8 +465,7 @@ class _LiteMLflowCallbackHandlerImpl:
         model_name = (
             (invocation_params or {}).get("model_name")
             or (invocation_params or {}).get("model")
-            or serialized.get("name")
-            or "unknown"
+            or _component_name(serialized, kwargs, "unknown")
         )
         attrs: dict[str, Any] = {
             "model": str(model_name),
@@ -397,15 +491,16 @@ class _LiteMLflowCallbackHandlerImpl:
             llm_output = getattr(response, "llm_output", None) or {}
             token_usage = (
                 llm_output.get("token_usage") if isinstance(llm_output, dict) else {}
-            ) or {}
+            ) or _usage_from_generations(response)
             if token_usage:
-                prompt_tokens = int(token_usage.get("prompt_tokens", 0))
-                completion_tokens = int(token_usage.get("completion_tokens", 0))
+                prompt_tokens = int(token_usage.get("prompt_tokens") or 0)
+                completion_tokens = int(token_usage.get("completion_tokens") or 0)
                 total_tokens = int(
-                    token_usage.get("total_tokens", prompt_tokens + completion_tokens)
+                    token_usage.get("total_tokens") or prompt_tokens + completion_tokens
                 )
 
-                pending = self._open.get(str(run_id), {})
+                with self._lock:
+                    pending = self._open.get(str(run_id), {})
                 model_name: str = pending.get("attrs", {}).get("model", "unknown")
                 cost_usd = cost(model_name, prompt_tokens, completion_tokens)
 
@@ -438,7 +533,7 @@ class _LiteMLflowCallbackHandlerImpl:
         parent_run_id: UUID | None = None,
         **kwargs: Any,
     ) -> None:
-        tb = traceback.format_exc()
+        tb = _format_error(error)
         self._close_span(
             run_id,
             extra_attrs={"error": str(error), "traceback": _truncate(tb, 2000)},
@@ -463,8 +558,7 @@ class _LiteMLflowCallbackHandlerImpl:
         model_name = (
             (invocation_params or {}).get("model_name")
             or (invocation_params or {}).get("model")
-            or serialized.get("name")
-            or "unknown"
+            or _component_name(serialized, kwargs, "unknown")
         )
         flat_msgs = [m for sublist in messages for m in sublist]
         attrs: dict[str, Any] = {
@@ -490,7 +584,7 @@ class _LiteMLflowCallbackHandlerImpl:
         metadata: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
-        tool_name = serialized.get("name") or "unknown_tool"
+        tool_name = _component_name(serialized, kwargs, "unknown_tool")
         attrs: dict[str, Any] = {
             "tool": str(tool_name),
             "run_id": str(run_id),
@@ -520,7 +614,7 @@ class _LiteMLflowCallbackHandlerImpl:
         parent_run_id: UUID | None = None,
         **kwargs: Any,
     ) -> None:
-        tb = traceback.format_exc()
+        tb = _format_error(error)
         self._close_span(
             run_id,
             extra_attrs={"error": str(error), "traceback": _truncate(tb, 2000)},
@@ -541,7 +635,7 @@ class _LiteMLflowCallbackHandlerImpl:
         metadata: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
-        retriever_name = serialized.get("name") or "retriever"
+        retriever_name = _component_name(serialized, kwargs, "retriever")
         attrs: dict[str, Any] = {
             "retriever": str(retriever_name),
             "run_id": str(run_id),
@@ -573,4 +667,19 @@ class _LiteMLflowCallbackHandlerImpl:
                 "documents.first_ids": str(first_three_ids),
             },
             status_code="OK",
+        )
+
+    def on_retriever_error(
+        self,
+        error: BaseException,
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        **kwargs: Any,
+    ) -> None:
+        self._close_span(
+            run_id,
+            extra_attrs={"error": str(error), "traceback": _truncate(_format_error(error), 2000)},
+            status_code="ERROR",
+            status_message=str(error),
         )

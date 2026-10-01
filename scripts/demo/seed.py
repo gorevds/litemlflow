@@ -64,13 +64,14 @@ def seed(url: str) -> None:
                                         "lmf.project": "RAG"})
 
     rag_runs: list[str] = []
-    for i, (model, k, prompt_v) in enumerate([
+    rag_configs = [
         ("gpt-4o-mini", 3, 1),
         ("gpt-4o-mini", 5, 2),
         ("gpt-4o-mini", 8, 2),
         ("claude-3-5-haiku-20241022", 5, 2),
         ("claude-3-5-sonnet-20241022", 5, 3),
-    ]):
+    ]
+    for i, (model, k, prompt_v) in enumerate(rag_configs):
         with c.start_run(rag_eid, name=f"trial-{i+1}-{model.split('-')[0]}-k{k}") as run:
             run.log_param("model", model)
             run.log_param("k", str(k))
@@ -110,7 +111,7 @@ def seed(url: str) -> None:
                               "completion_tokens": 220 + i * 30})
 
             rag_runs.append(run.id)
-        print(f"  [rag] run {i+1}/{len(rag_runs) if rag_runs else 5}: {run.id[:8]} model={model} k={k}")
+        print(f"  [rag] run {i+1}/{len(rag_configs)}: {run.id[:8]} model={model} k={k}")
 
     # Experiment 2: intent classifier
     cls_eid = c.create_experiment(f"demo-intent-classifier-{suffix}",

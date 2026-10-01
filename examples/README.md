@@ -9,7 +9,7 @@ End-to-end walkthroughs of the tracker.
 ## Running the quickstart
 
 ```bash
-pip install litemlflow jupyter
+pip install "litemlflow[mlflow-compat]" jupyter   # the notebook drives the server through the mlflow client too
 litemlflow serve --addr :5050 --data ~/lmf &
 jupyter notebook examples/quickstart.ipynb
 ```

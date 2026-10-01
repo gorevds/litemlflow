@@ -38,6 +38,7 @@ immediately.
 from __future__ import annotations
 
 import secrets
+import threading
 import time
 import traceback
 from typing import Any
@@ -59,13 +60,63 @@ def _truncate(text: str, max_len: int = 1000) -> str:
     return text[:max_len] + f"... [truncated {len(text) - max_len} chars]"
 
 
+# Events llama-index-core emits that intentionally map to no span (their work
+# is already covered by a recorded span); don't warn about them.
+_IGNORED_EVENTS = frozenset(
+    {
+        "GetResponseStartEvent",
+        "GetResponseEndEvent",
+        "LLMPredictStartEvent",
+        "LLMPredictEndEvent",
+        "LLMStructuredPredictStartEvent",
+        "LLMStructuredPredictEndEvent",
+        "StreamChatStartEvent",
+        "StreamChatEndEvent",
+        "StreamChatDeltaReceivedEvent",
+        "StreamChatErrorEvent",
+    }
+)
+
+
+def _event_key(event: Any) -> str:
+    """Key that matches a ``*StartEvent`` with its ``*EndEvent``.
+
+    In llama-index-core every event gets a fresh ``id_`` (uuid4), so start and
+    end events never share it. What they share is ``span_id`` — the id of the
+    dispatcher span (the ``@dispatcher.span``-decorated call) that emitted
+    both. The event family (class name without Start/End/Event) is folded in
+    so distinct pairs emitted inside one dispatcher span cannot collide.
+    Falls back to ``id_`` for events without a span id.
+    """
+    span_id = getattr(event, "span_id", None)
+    if span_id:
+        family = type(event).__name__
+        for suffix in ("StartEvent", "EndEvent"):
+            if family.endswith(suffix):
+                family = family[: -len(suffix)]
+                break
+        return f"{family}:{span_id}"
+    return str(getattr(event, "id_", id(event)))
+
+
 def _get_or_create_experiment(client: Client, name: str) -> int:
-    """Return experiment id, creating it if it doesn't exist yet."""
+    """Return experiment id, creating it if it doesn't exist yet.
+
+    Only a 404 means "missing" (a transport/auth error must surface as-is),
+    and a concurrent creator winning the race is resolved by re-reading.
+    """
     try:
         exp = client.get_experiment_by_name(name)
         return int(exp["experiment_id"])
-    except LiteMLflowError:
+    except LiteMLflowError as exc:
+        if exc.status != 404:
+            raise
+    try:
         return client.create_experiment(name)
+    except LiteMLflowError as exc:
+        if exc.code != "RESOURCE_ALREADY_EXISTS":
+            raise
+        return int(client.get_experiment_by_name(name)["experiment_id"])
 
 
 def LiteMLflowEventHandler(  # noqa: N802 — intentionally uppercase to look like a class
@@ -181,6 +232,10 @@ class _LiteMLflowEventHandlerImpl:
         # When it drops to 0, we flush all buffered spans.
         self._root_depth: int = 0
 
+        # The dispatcher may call handle() from several threads (parallel
+        # retrieval, async workers); guard the shared span bookkeeping.
+        self._lock = threading.RLock()
+
     # --------------------------------------------------------------- internal
 
     def _open_span(
@@ -190,22 +245,29 @@ class _LiteMLflowEventHandlerImpl:
         *,
         attrs: dict[str, Any] | None = None,
         is_root: bool = False,
+        dispatch_span_id: str | None = None,
     ) -> str:
         """Register an open span and return its pre-generated span_id."""
         span_id = secrets.token_hex(8)
-        # Parent is the top of the stack (if any).
-        parent_event_id: str | None = self._stack[-1] if self._stack else None
-        self._open[event_id] = {
-            "span_id": span_id,
-            "name": name,
-            "attrs": attrs or {},
-            "parent_event_id": parent_event_id,
-            "start_ns": time.time_ns(),
-            "is_root": is_root,
-        }
-        self._stack.append(event_id)
-        if is_root:
-            self._root_depth += 1
+        with self._lock:
+            # Parent is the top of the stack (if any).
+            parent_event_id: str | None = self._stack[-1] if self._stack else None
+            # A span opened with nothing enclosing it is a root even if it is
+            # not a query (e.g. a bare llm.complete() call); otherwise its
+            # children would be flushed before it, breaking the parent FK.
+            is_root = is_root or parent_event_id is None
+            self._open[event_id] = {
+                "span_id": span_id,
+                "name": name,
+                "attrs": attrs or {},
+                "parent_event_id": parent_event_id,
+                "start_ns": time.time_ns(),
+                "is_root": is_root,
+                "dispatch_span_id": dispatch_span_id,
+            }
+            self._stack.append(event_id)
+            if is_root:
+                self._root_depth += 1
         return span_id
 
     def _close_span(
@@ -217,6 +279,29 @@ class _LiteMLflowEventHandlerImpl:
         status_message: str = "",
     ) -> str | None:
         """Move a span from open → buffer; flush buffer if no roots remain open."""
+        to_post: list[dict[str, Any]] = []
+        with self._lock:
+            span_id = self._close_span_locked(
+                event_id,
+                extra_attrs=extra_attrs,
+                status_code=status_code,
+                status_message=status_message,
+            )
+            if span_id is not None and self._root_depth == 0 and self._buffer:
+                to_post = self._buffer
+                self._buffer = []
+        if to_post:
+            self._post(to_post)
+        return span_id
+
+    def _close_span_locked(
+        self,
+        event_id: str,
+        *,
+        extra_attrs: dict[str, Any] | None,
+        status_code: str,
+        status_message: str,
+    ) -> str | None:
         pending = self._open.pop(event_id, None)
         if pending is None:
             return None
@@ -274,21 +359,20 @@ class _LiteMLflowEventHandlerImpl:
         if is_root:
             self._root_depth = max(0, self._root_depth - 1)
 
-        # Flush when no root spans remain open.
-        if self._root_depth == 0 and self._buffer:
-            self._flush()
-
         return pending["span_id"]
 
     def _flush(self) -> None:
         """POST all buffered spans in topological order (parents before children)."""
-        if not self._buffer:
-            return
+        with self._lock:
+            buffered = self._buffer
+            self._buffer = []
+        if buffered:
+            self._post(buffered)
 
+    def _post(self, buffered: list[dict[str, Any]]) -> None:
         # Spans are buffered in close order (innermost first), so reverse gives
         # us parents before children (topological order).
-        ordered = list(reversed(self._buffer))
-        self._buffer = []
+        ordered = list(reversed(buffered))
 
         # Strip the internal _event_id field before posting.
         clean_spans = [{k: v for k, v in s.items() if k != "_event_id"} for s in ordered]
@@ -298,6 +382,7 @@ class _LiteMLflowEventHandlerImpl:
                 "POST",
                 "/api/v1/traces",
                 json={"trace_id": self._trace_id, "spans": clean_spans},
+                idempotent=True,  # spans are upserted by id; safe to retry
             )
         except Exception:
             pass  # Tracing is best-effort; never crash the pipeline.
@@ -307,12 +392,14 @@ class _LiteMLflowEventHandlerImpl:
     # _unknown_event_warned is a per-instance set so we log at most one
     # warning per unrecognized event class name. Keeps tracing observable when
     # llama-index-core renames events in a new release without filling logs.
-    def handle(self, event: Any) -> None:  # type: ignore[override]
+    def handle(self, event: Any, **kwargs: Any) -> None:  # type: ignore[override]
         """Dispatch a LlamaIndex event to the appropriate handler method."""
         cls_name = type(event).__name__
         handler_name = f"_on_{cls_name}"
         handler = getattr(self, handler_name, None)
         if handler is None:
+            if cls_name in _IGNORED_EVENTS or cls_name.endswith("InProgressEvent"):
+                return
             warned = getattr(self, "_unknown_event_warned", None)
             if warned is None:
                 warned = set()
@@ -335,15 +422,21 @@ class _LiteMLflowEventHandlerImpl:
     # ------------------------------------------------------------------ query
 
     def _on_QueryStartEvent(self, event: Any) -> None:
-        event_id = str(getattr(event, "id_", id(event)))
+        event_id = _event_key(event)
         query = getattr(event, "query", None)
         attrs: dict[str, Any] = {"event.type": "query"}
         if query is not None:
             attrs["query"] = _truncate(str(query))
-        self._open_span(event_id, f"query:{event_id[:8]}", attrs=attrs, is_root=True)
+        self._open_span(
+            event_id,
+            f"query:{str(getattr(event, 'id_', event_id))[:8]}",
+            attrs=attrs,
+            is_root=True,
+            dispatch_span_id=getattr(event, "span_id", None),
+        )
 
     def _on_QueryEndEvent(self, event: Any) -> None:
-        event_id = str(getattr(event, "id_", id(event)))
+        event_id = _event_key(event)
         response = getattr(event, "response", None)
         extra: dict[str, Any] = {}
         if response is not None:
@@ -353,12 +446,14 @@ class _LiteMLflowEventHandlerImpl:
     # --------------------------------------------------------------- retrieval
 
     def _on_RetrievalStartEvent(self, event: Any) -> None:
-        event_id = str(getattr(event, "id_", id(event)))
+        event_id = _event_key(event)
         attrs: dict[str, Any] = {"event.type": "retrieval"}
-        self._open_span(event_id, "retrieval", attrs=attrs)
+        self._open_span(
+            event_id, "retrieval", attrs=attrs, dispatch_span_id=getattr(event, "span_id", None)
+        )
 
     def _on_RetrievalEndEvent(self, event: Any) -> None:
-        event_id = str(getattr(event, "id_", id(event)))
+        event_id = _event_key(event)
         nodes = getattr(event, "nodes", None)
         extra: dict[str, Any] = {}
         if nodes is not None:
@@ -368,47 +463,56 @@ class _LiteMLflowEventHandlerImpl:
     # --------------------------------------------------------------- synthesis
 
     def _on_SynthesisStartEvent(self, event: Any) -> None:
-        event_id = str(getattr(event, "id_", id(event)))
+        event_id = _event_key(event)
         attrs: dict[str, Any] = {"event.type": "synthesis"}
-        self._open_span(event_id, "synthesis", attrs=attrs)
+        self._open_span(
+            event_id, "synthesis", attrs=attrs, dispatch_span_id=getattr(event, "span_id", None)
+        )
 
     def _on_SynthesisEndEvent(self, event: Any) -> None:
-        event_id = str(getattr(event, "id_", id(event)))
+        event_id = _event_key(event)
         response = getattr(event, "response", None)
         extra: dict[str, Any] = {}
         if response is not None:
             extra["response"] = _truncate(str(response))
         self._close_span(event_id, extra_attrs=extra, status_code="OK")
 
+    # llama-index-core names these SynthesizeStartEvent/SynthesizeEndEvent.
+    _on_SynthesizeStartEvent = _on_SynthesisStartEvent
+    _on_SynthesizeEndEvent = _on_SynthesisEndEvent
+
     # --------------------------------------------------------- LLM completion
 
     def _on_LLMCompletionStartEvent(self, event: Any) -> None:
-        event_id = str(getattr(event, "id_", id(event)))
+        event_id = _event_key(event)
         model = _extract_model(event)
         attrs: dict[str, Any] = {"event.type": "llm_completion", "model": model}
         prompt = getattr(event, "prompt", None)
         if prompt is not None:
             attrs["prompt"] = _truncate(str(prompt))
-        self._open_span(event_id, f"llm:{model}", attrs=attrs)
+        self._open_span(
+            event_id, f"llm:{model}", attrs=attrs, dispatch_span_id=getattr(event, "span_id", None)
+        )
 
     def _on_LLMCompletionEndEvent(self, event: Any) -> None:
-        event_id = str(getattr(event, "id_", id(event)))
+        event_id = _event_key(event)
         extra: dict[str, Any] = {}
 
         # Extract token usage — LlamaIndex stores this in event.response or
         # event.token_usage depending on the version.
         token_usage = _extract_token_usage(event)
         if token_usage:
-            prompt_tokens = int(token_usage.get("prompt_tokens", token_usage.get("input_tokens", 0)))
+            prompt_tokens = int(token_usage.get("prompt_tokens") or token_usage.get("input_tokens") or 0)
             completion_tokens = int(
-                token_usage.get("completion_tokens", token_usage.get("output_tokens", 0))
+                token_usage.get("completion_tokens") or token_usage.get("output_tokens") or 0
             )
             total_tokens = int(
-                token_usage.get("total_tokens", prompt_tokens + completion_tokens)
+                token_usage.get("total_tokens") or prompt_tokens + completion_tokens
             )
 
             # Look up model from the open span's attrs.
-            pending = self._open.get(event_id, {})
+            with self._lock:
+                pending = self._open.get(event_id, {})
             model: str = pending.get("attrs", {}).get("model", "unknown")
             cost_usd = cost(model, prompt_tokens, completion_tokens)
 
@@ -438,29 +542,32 @@ class _LiteMLflowEventHandlerImpl:
     # ------------------------------------------------------------------- chat
 
     def _on_LLMChatStartEvent(self, event: Any) -> None:
-        event_id = str(getattr(event, "id_", id(event)))
+        event_id = _event_key(event)
         model = _extract_model(event)
         attrs: dict[str, Any] = {"event.type": "llm_chat", "model": model}
         messages = getattr(event, "messages", None)
         if messages is not None:
             attrs["messages"] = _truncate(str(messages))
-        self._open_span(event_id, f"chat:{model}", attrs=attrs)
+        self._open_span(
+            event_id, f"chat:{model}", attrs=attrs, dispatch_span_id=getattr(event, "span_id", None)
+        )
 
     def _on_LLMChatEndEvent(self, event: Any) -> None:
-        event_id = str(getattr(event, "id_", id(event)))
+        event_id = _event_key(event)
         extra: dict[str, Any] = {}
 
         token_usage = _extract_token_usage(event)
         if token_usage:
-            prompt_tokens = int(token_usage.get("prompt_tokens", token_usage.get("input_tokens", 0)))
+            prompt_tokens = int(token_usage.get("prompt_tokens") or token_usage.get("input_tokens") or 0)
             completion_tokens = int(
-                token_usage.get("completion_tokens", token_usage.get("output_tokens", 0))
+                token_usage.get("completion_tokens") or token_usage.get("output_tokens") or 0
             )
             total_tokens = int(
-                token_usage.get("total_tokens", prompt_tokens + completion_tokens)
+                token_usage.get("total_tokens") or prompt_tokens + completion_tokens
             )
 
-            pending = self._open.get(event_id, {})
+            with self._lock:
+                pending = self._open.get(event_id, {})
             model: str = pending.get("attrs", {}).get("model", "unknown")
             cost_usd = cost(model, prompt_tokens, completion_tokens)
 
@@ -490,13 +597,15 @@ class _LiteMLflowEventHandlerImpl:
     # ---------------------------------------------------------------- embedding
 
     def _on_EmbeddingStartEvent(self, event: Any) -> None:
-        event_id = str(getattr(event, "id_", id(event)))
+        event_id = _event_key(event)
         model = _extract_model(event)
         attrs: dict[str, Any] = {"event.type": "embedding", "model": model}
-        self._open_span(event_id, f"embed:{model}", attrs=attrs)
+        self._open_span(
+            event_id, f"embed:{model}", attrs=attrs, dispatch_span_id=getattr(event, "span_id", None)
+        )
 
     def _on_EmbeddingEndEvent(self, event: Any) -> None:
-        event_id = str(getattr(event, "id_", id(event)))
+        event_id = _event_key(event)
         chunks = getattr(event, "chunks", None)
         extra: dict[str, Any] = {}
         if chunks is not None:
@@ -508,11 +617,26 @@ class _LiteMLflowEventHandlerImpl:
     def _on_ExceptionEvent(self, event: Any) -> None:
         """Handle a generic exception event — close any open span as ERROR."""
         exception = getattr(event, "exception", None)
-        event_id = str(getattr(event, "id_", id(event)))
-        if event_id in self._open:
+        # ExceptionEvent has its own id_; it shares only the dispatcher
+        # span_id with the start event of the span that failed.
+        dispatch_span_id = getattr(event, "span_id", None)
+        with self._lock:
+            keys = [
+                k for k, v in self._open.items()
+                if dispatch_span_id and v.get("dispatch_span_id") == dispatch_span_id
+            ]
+            legacy_key = str(getattr(event, "id_", id(event)))
+            if not keys and legacy_key in self._open:
+                keys = [legacy_key]
+        if isinstance(exception, BaseException):
+            tb = "".join(
+                traceback.format_exception(type(exception), exception, exception.__traceback__)
+            )
+        else:
             tb = traceback.format_exc()
+        for key in keys:
             self._close_span(
-                event_id,
+                key,
                 extra_attrs={
                     "error": str(exception) if exception else "unknown",
                     "traceback": _truncate(tb, 2000),
@@ -542,31 +666,58 @@ def _extract_model(event: Any) -> str:
     return "unknown"
 
 
+def _usage_to_dict(usage: Any) -> dict[str, Any] | None:
+    """Normalise a usage dict/object (OpenAI- or Anthropic-style) to a dict."""
+    if usage is None:
+        return None
+    if isinstance(usage, dict):
+        return usage or None
+    pt = getattr(usage, "prompt_tokens", None)
+    if pt is None:
+        pt = getattr(usage, "input_tokens", None)
+    ct = getattr(usage, "completion_tokens", None)
+    if ct is None:
+        ct = getattr(usage, "output_tokens", None)
+    if pt is None and ct is None:
+        return None
+    pt, ct = int(pt or 0), int(ct or 0)
+    total = getattr(usage, "total_tokens", None)
+    return {
+        "prompt_tokens": pt,
+        "completion_tokens": ct,
+        "total_tokens": int(total) if total else pt + ct,
+    }
+
+
 def _extract_token_usage(event: Any) -> dict[str, Any] | None:
     """Extract token usage dict from a LlamaIndex end event."""
     # Direct attribute (some versions).
-    usage = getattr(event, "token_usage", None)
-    if usage is not None:
-        if isinstance(usage, dict):
-            return usage
-        # Object with prompt_tokens / completion_tokens attributes.
-        return {
-            "prompt_tokens": getattr(usage, "prompt_tokens", getattr(usage, "input_tokens", 0)),
-            "completion_tokens": getattr(usage, "completion_tokens", getattr(usage, "output_tokens", 0)),
-            "total_tokens": getattr(usage, "total_tokens", 0),
-        }
+    usage = _usage_to_dict(getattr(event, "token_usage", None))
+    if usage:
+        return usage
 
     # Nested inside response object.
     response = getattr(event, "response", None)
     if response is not None:
         raw = getattr(response, "raw", None)
-        if isinstance(raw, dict):
-            usage_dict = raw.get("usage", {})
-            if usage_dict and isinstance(usage_dict, dict):
-                return usage_dict
-        # ChatResponse / CompletionResponse may have additional_kwargs.
+        # raw is a dict for some providers and the provider SDK's response
+        # object (e.g. openai ChatCompletion with a .usage attribute) for others.
+        raw_usage = raw.get("usage") if isinstance(raw, dict) else getattr(raw, "usage", None)
+        usage = _usage_to_dict(raw_usage)
+        if usage:
+            return usage
+        # ChatResponse / CompletionResponse may have additional_kwargs, either
+        # nested under "usage" or flat (llama-index-llms-openai sets
+        # prompt_tokens/completion_tokens/total_tokens directly).
         additional = getattr(response, "additional_kwargs", {})
-        if isinstance(additional, dict) and "usage" in additional:
-            return additional["usage"]
+        if isinstance(additional, dict):
+            if "usage" in additional:
+                return _usage_to_dict(additional["usage"])
+            if "prompt_tokens" in additional or "completion_tokens" in additional:
+                return {
+                    k: additional[k]
+                    for k in ("prompt_tokens", "completion_tokens", "total_tokens")
+                    if k in additional
+                }
 
     return None

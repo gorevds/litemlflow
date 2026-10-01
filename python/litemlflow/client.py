@@ -17,8 +17,19 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Iterator
+from urllib.parse import quote
 
 import requests
+from urllib3.exceptions import ConnectTimeoutError, NewConnectionError
+
+
+def _seg(value: Any) -> str:
+    """Percent-encode a value for use as a single URL path segment.
+
+    Without this a name containing "?" or "#" silently truncates the path
+    (the remainder becomes a query string / fragment) and "%" is misdecoded.
+    """
+    return quote(str(value), safe="")
 
 
 class LiteMLflowError(Exception):
@@ -80,6 +91,11 @@ class Client:
             ``LITEMLFLOW_WORKSPACE`` env var, else the server's "default".
         max_retries: number of retries for transient failures (connection
             errors and 429/502/503/504) with exponential backoff (default 3).
+            Non-idempotent calls (create_run, create_experiment, create_prompt,
+            ...) are only retried when the server provably did not process the
+            request: the connection was never established, or it answered
+            429/503. A timeout or dropped connection after the request was sent
+            is surfaced instead of risking a duplicate run/version.
     """
 
     def __init__(
@@ -106,8 +122,48 @@ class Client:
     # HTTP statuses worth retrying: transient overload / gateway errors. 5xx
     # like 500/501 are treated as deterministic and not retried.
     _RETRYABLE_STATUS = frozenset({429, 502, 503, 504})
+    # Statuses where the server itself rejected the request before doing any
+    # work, so even a non-idempotent call is safe to resend. 502/504 come from
+    # a proxy and the upstream may well have committed the write.
+    _RETRYABLE_STATUS_UNSAFE = frozenset({429, 503})
+    # Transport errors that are configuration mistakes, not transient faults.
+    _NON_TRANSIENT_ERRORS: tuple[type[BaseException], ...] = (
+        requests.exceptions.SSLError,
+        requests.exceptions.InvalidURL,
+        requests.exceptions.InvalidSchema,
+        requests.exceptions.MissingSchema,
+        requests.exceptions.InvalidHeader,
+    )
 
-    def _request(self, method: str, path: str, json: Any | None = None, params: dict | None = None) -> Any:
+    @staticmethod
+    def _never_sent(exc: requests.RequestException) -> bool:
+        """True if the request provably never reached the server."""
+        if isinstance(exc, requests.exceptions.ConnectTimeout):
+            return True
+        if isinstance(exc, requests.exceptions.ConnectionError):
+            reason = exc.args[0] if exc.args else None
+            reason = getattr(reason, "reason", reason)  # unwrap urllib3 MaxRetryError
+            return isinstance(reason, (NewConnectionError, ConnectTimeoutError))
+        return False
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        json: Any | None = None,
+        params: dict | None = None,
+        *,
+        idempotent: bool | None = None,
+    ) -> Any:
+        """Send a request, retrying transient failures.
+
+        ``idempotent`` defaults to True for GET and False otherwise; pass True
+        for POSTs that are safe to replay (searches, upserts, client-keyed
+        writes such as metrics and spans).
+        """
+        if idempotent is None:
+            idempotent = method.upper() in ("GET", "HEAD", "OPTIONS", "PUT", "DELETE")
+        retry_status = self._RETRYABLE_STATUS if idempotent else self._RETRYABLE_STATUS_UNSAFE
         full = self.url + path
         attempt = 0
         while True:
@@ -116,12 +172,15 @@ class Client:
             except requests.RequestException as exc:
                 # Transport error (connection refused, reset, timeout): retry
                 # with backoff, then surface as a TRANSPORT_ERROR.
-                if attempt < self.max_retries:
+                retryable = not isinstance(exc, self._NON_TRANSIENT_ERRORS) and (
+                    idempotent or self._never_sent(exc)
+                )
+                if retryable and attempt < self.max_retries:
                     time.sleep(self._backoff(attempt))
                     attempt += 1
                     continue
                 raise LiteMLflowError(0, "TRANSPORT_ERROR", str(exc)) from exc
-            if resp.status_code in self._RETRYABLE_STATUS and attempt < self.max_retries:
+            if resp.status_code in retry_status and attempt < self.max_retries:
                 time.sleep(self._retry_delay(resp, attempt))
                 attempt += 1
                 continue
@@ -137,9 +196,14 @@ class Client:
         ra = resp.headers.get("Retry-After")
         if ra:
             try:
-                return min(60.0, float(ra))
+                delay = float(ra)
             except ValueError:
                 pass
+            else:
+                # Negative values would make time.sleep raise; NaN fails the
+                # comparison and falls through to backoff.
+                if 0.0 <= delay:
+                    return min(60.0, delay)
         return self._backoff(attempt)
 
     def _handle_response(self, resp: requests.Response) -> Any:
@@ -182,7 +246,7 @@ class Client:
         payload: dict[str, Any] = {"max_results": max_results}
         if filter:
             payload["filter"] = filter
-        body = self._request("POST", "/api/2.0/mlflow/experiments/search", json=payload)
+        body = self._request("POST", "/api/2.0/mlflow/experiments/search", json=payload, idempotent=True)
         return body.get("experiments", []) or []
 
     def delete_experiment(self, experiment_id: int) -> None:
@@ -208,8 +272,14 @@ class Client:
         run = self.create_run(experiment_id, name=name, tags=tags)
         try:
             yield run
-        except Exception:
-            run.finish(status="FAILED")
+        except BaseException as exc:
+            # KeyboardInterrupt/SystemExit must also close the run, else it
+            # is left RUNNING forever. MLflow marks interrupted runs KILLED.
+            status = "FAILED" if isinstance(exc, Exception) else "KILLED"
+            try:
+                run.finish(status=status)
+            except LiteMLflowError:
+                pass  # don't mask the user's exception with a reporting failure
             raise
         else:
             run.finish(status="FINISHED")
@@ -226,7 +296,7 @@ class Client:
             payload["end_time"] = end_time_ms
         if name:
             payload["run_name"] = name
-        self._request("POST", "/api/2.0/mlflow/runs/update", json=payload)
+        self._request("POST", "/api/2.0/mlflow/runs/update", json=payload, idempotent=True)
 
     def search_runs(
         self,
@@ -244,7 +314,7 @@ class Client:
             payload["filter"] = filter
         if order_by:
             payload["order_by"] = order_by
-        body = self._request("POST", "/api/2.0/mlflow/runs/search", json=payload)
+        body = self._request("POST", "/api/2.0/mlflow/runs/search", json=payload, idempotent=True)
         return body.get("runs", []) or []
 
     # -------------------------------------------------------- metrics & params
@@ -256,6 +326,7 @@ class Client:
             "POST",
             "/api/2.0/mlflow/runs/log-metric",
             json={"run_id": run_id, "key": key, "value": value, "timestamp": timestamp_ms, "step": step},
+            idempotent=True,  # metrics are keyed by (run, key, timestamp, step)
         )
 
     def log_param(self, run_id: str, key: str, value: str) -> None:
@@ -263,6 +334,7 @@ class Client:
             "POST",
             "/api/2.0/mlflow/runs/log-parameter",
             json={"run_id": run_id, "key": key, "value": value},
+            idempotent=True,
         )
 
     def log_batch(
@@ -277,10 +349,11 @@ class Client:
             "POST",
             "/api/2.0/mlflow/runs/log-batch",
             json={"run_id": run_id, "metrics": metrics or [], "params": params or [], "tags": tags or []},
+            idempotent=True,
         )
 
     def set_tag(self, run_id: str, key: str, value: str) -> None:
-        self._request("POST", "/api/2.0/mlflow/runs/set-tag", json={"run_id": run_id, "key": key, "value": value})
+        self._request("POST", "/api/2.0/mlflow/runs/set-tag", json={"run_id": run_id, "key": key, "value": value}, idempotent=True)
 
     def get_metric_history(self, run_id: str, metric_key: str) -> list[dict[str, Any]]:
         body = self._request(
@@ -336,11 +409,12 @@ class Client:
                     }
                 ],
             },
+            idempotent=True,  # spans are upserted by their client-generated id
         )
         return span_id
 
     def get_run_traces(self, run_id: str) -> list[dict[str, Any]]:
-        body = self._request("GET", f"/api/v1/runs/{run_id}/traces")
+        body = self._request("GET", f"/api/v1/runs/{_seg(run_id)}/traces")
         return body.get("spans", []) or []
 
     # --------------------------------------------------------------- prompts
@@ -353,20 +427,20 @@ class Client:
         return int(body["version"])
 
     def get_prompt(self, name: str) -> dict[str, Any]:
-        return self._request("GET", f"/api/v1/prompts/{name}")
+        return self._request("GET", f"/api/v1/prompts/{_seg(name)}")
 
     def get_prompt_version(self, name: str, version: int) -> dict[str, Any]:
-        return self._request("GET", f"/api/v1/prompts/{name}/versions/{version}")
+        return self._request("GET", f"/api/v1/prompts/{_seg(name)}/versions/{_seg(version)}")
 
     def list_prompt_versions(self, name: str) -> list[dict[str, Any]]:
-        body = self._request("GET", f"/api/v1/prompts/{name}/versions")
+        body = self._request("GET", f"/api/v1/prompts/{_seg(name)}/versions")
         return body.get("versions", []) or []
 
     def set_prompt_alias(self, name: str, alias: str, version: int) -> None:
-        self._request("POST", f"/api/v1/prompts/{name}/aliases", json={"alias": alias, "version": version})
+        self._request("POST", f"/api/v1/prompts/{_seg(name)}/aliases", json={"alias": alias, "version": version}, idempotent=True)
 
     def get_prompt_by_alias(self, name: str, alias: str) -> dict[str, Any]:
-        return self._request("GET", f"/api/v1/prompts/{name}/aliases/{alias}")
+        return self._request("GET", f"/api/v1/prompts/{_seg(name)}/aliases/{_seg(alias)}")
 
     # ------------------------------------------------------------------ evals
 
@@ -389,7 +463,7 @@ class Client:
         return self._request("POST", "/api/v1/evals", json=payload)
 
     def get_eval(self, run_id: str) -> dict[str, Any]:
-        return self._request("GET", f"/api/v1/evals/{run_id}")
+        return self._request("GET", f"/api/v1/evals/{_seg(run_id)}")
 
     # --------------------------------------------------------------- meta
 

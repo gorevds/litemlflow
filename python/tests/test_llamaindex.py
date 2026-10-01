@@ -384,3 +384,102 @@ class TestEndToEndTrace:
         assert "cost.usd" in metrics
         expected_cost = pricing_cost("gpt-4o-mini", 100, 50)
         assert abs(metrics["cost.usd"] - expected_cost) < 1e-10
+
+
+# ---------------------------------------------------------------------------
+# 4. Regressions against real llama-index-core event semantics
+# ---------------------------------------------------------------------------
+
+def _real_event(cls_name: str, event_id: str, span_id: str, **kwargs: Any) -> Any:
+    """Like llama-index-core: every event has a fresh id_, start/end share span_id."""
+    return _make_event(cls_name, event_id, span_id=span_id, **kwargs)
+
+
+class TestRealEventSemantics:
+    def _make_impl(self) -> Any:
+        from litemlflow.llamaindex.handler import _LiteMLflowEventHandlerImpl
+
+        inst = object.__new__(_LiteMLflowEventHandlerImpl)
+        _LiteMLflowEventHandlerImpl.__init__(inst, _mock_client(), run_id="r")
+        return inst
+
+    def test_start_end_matched_by_span_id_not_id(self) -> None:
+        h = self._make_impl()
+        q, r = "Engine.query-1", "Retriever.retrieve-2"
+        h.handle(_real_event("QueryStartEvent", "id-a", q, query="hi"))
+        h.handle(_real_event("RetrievalStartEvent", "id-b", r))
+        h.handle(_real_event("RetrievalEndEvent", "id-c", r, nodes=[1, 2]))
+        h.handle(_real_event("SynthesizeStartEvent", "id-d", "Synth-3"))
+        h.handle(_real_event("SynthesizeEndEvent", "id-e", "Synth-3", response="x"))
+        h.handle(_real_event("QueryEndEvent", "id-f", q, response="ok"))
+        assert h._open == {} and h._stack == []
+        spans = _get_flushed_spans(h._client)
+        by_name = {s["name"].split(":")[0]: s for s in spans}
+        assert set(by_name) == {"query", "retrieval", "synthesis"}
+        assert by_name["retrieval"]["parent_id"] == by_name["query"]["id"]
+        assert by_name["synthesis"]["parent_id"] == by_name["query"]["id"]
+
+    def test_exception_event_closes_span_by_span_id(self) -> None:
+        h = self._make_impl()
+        h.handle(_real_event("RetrievalStartEvent", "id-a", "Retriever.retrieve-9"))
+        h.handle(
+            _real_event(
+                "ExceptionEvent", "id-b", "Retriever.retrieve-9", exception=ValueError("boom")
+            )
+        )
+        spans = _get_flushed_spans(h._client)
+        assert spans[0]["status_code"] == "ERROR"
+        assert h._open == {}
+
+    def test_handle_accepts_dispatcher_kwargs(self) -> None:
+        h = self._make_impl()
+        h.handle(_real_event("QueryStartEvent", "id-a", "s"), extra="ignored")
+        assert len(h._open) == 1
+
+    def test_nested_non_query_spans_flush_parent_first(self) -> None:
+        # A bare retriever.retrieve() (no query root) with a nested embedding.
+        h = self._make_impl()
+        h.handle(_real_event("RetrievalStartEvent", "a", "R-1"))
+        h.handle(_real_event("EmbeddingStartEvent", "b", "E-1", model="m"))
+        h.handle(_real_event("EmbeddingEndEvent", "c", "E-1", chunks=[1]))
+        assert h._client._request.call_count == 0, "child flushed before its parent"
+        h.handle(_real_event("RetrievalEndEvent", "d", "R-1", nodes=[]))
+        spans = _get_flushed_spans(h._client)
+        assert [s["name"] for s in spans] == ["retrieval", "embed:m"]
+        assert spans[1]["parent_id"] == spans[0]["id"]
+
+    def test_openai_style_flat_additional_kwargs_usage(self) -> None:
+        from types import SimpleNamespace as NS
+
+        h = self._make_impl()
+        h.handle(_real_event("LLMChatStartEvent", "a", "L-1", model="gpt-4o-mini"))
+        resp = NS(
+            raw=NS(usage=NS(prompt_tokens=7, completion_tokens=3, total_tokens=10)),
+            additional_kwargs={},
+        )
+        h.handle(_real_event("LLMChatEndEvent", "b", "L-1", response=resp))
+        logged = {c.args[1]: c.args[2] for c in h._client.log_metric.call_args_list}
+        assert logged["tokens.prompt"] == 7.0 and logged["tokens.total"] == 10.0
+
+
+@_skip_if_no_llamaindex
+def test_real_query_engine_pipeline_flushes_spans() -> None:
+    from llama_index.core import Document, Settings, VectorStoreIndex
+    from llama_index.core.embeddings import MockEmbedding
+    from llama_index.core.instrumentation import get_dispatcher
+    from llama_index.core.llms import MockLLM
+
+    Settings.llm = MockLLM(max_tokens=5)
+    Settings.embed_model = MockEmbedding(embed_dim=8)
+    index = VectorStoreIndex.from_documents([Document(text="hello world")])
+    client = _mock_client()
+    handler = LiteMLflowEventHandler(client, run_id="r")
+    dispatcher = get_dispatcher()
+    dispatcher.add_event_handler(handler)
+    try:
+        index.as_query_engine().query("hi")
+    finally:
+        dispatcher.event_handlers.remove(handler)
+    assert handler._open == {}
+    names = {s["name"].split(":")[0] for s in _get_all_flushed_spans(client)}
+    assert {"query", "retrieval", "synthesis", "llm"} <= names
