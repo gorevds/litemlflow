@@ -10,10 +10,14 @@
 #   /tmp/lmf.gorev.space.nginx — the nginx server block
 #
 # After this script:
-#   • user `lmf` exists, owns /opt/lmf and /var/lib/lmf
+#   • user `lmf` exists and owns /var/lib/lmf; /opt/lmf and the binary are
+#     root-owned (the service must not be able to replace its own binary)
 #   • binary installed at /opt/lmf/litemlflow
 #   • systemd unit lmf.service enabled and started
-#   • nginx site available; reload not yet performed (cert needed)
+#   • nginx site enabled + validated if the TLS cert exists (reload left to
+#     the operator); otherwise left disabled with instructions
+#
+# Subsequent upgrades: scripts/deploy/deploy.sh.
 
 set -euo pipefail
 
@@ -34,11 +38,11 @@ else
 fi
 
 # 2. Directories.
-install -d -o lmf -g lmf -m 0755 /opt/lmf
+install -d -o root -g root -m 0755 /opt/lmf
 install -d -o lmf -g lmf -m 0750 /var/lib/lmf
 
 # 3. Binary install (atomic via rename).
-install -o lmf -g lmf -m 0755 "$BINARY" /opt/lmf/litemlflow.new
+install -o root -g root -m 0755 "$BINARY" /opt/lmf/litemlflow.new
 mv -f /opt/lmf/litemlflow.new /opt/lmf/litemlflow
 echo "[ok] installed /opt/lmf/litemlflow ($( /opt/lmf/litemlflow version ))"
 
@@ -54,15 +58,26 @@ systemctl is-active --quiet lmf && echo "[ok] lmf.service active" || {
     exit 1
 }
 
-# 5. nginx site (don't reload yet — needs cert from certbot).
+# 5. nginx site. The server block references the Let's Encrypt cert
+#    explicitly, and `nginx -t` fails on a missing cert, so only enable the
+#    site once the cert exists — a broken site file would block every other
+#    vhost on the next reload.
 install -m 0644 "$NGINX_SITE" /etc/nginx/sites-available/lmf.gorev.space
-ln -sf /etc/nginx/sites-available/lmf.gorev.space /etc/nginx/sites-enabled/lmf.gorev.space
-mkdir -p /var/www/certbot
-nginx -t
-echo "[ok] nginx site staged; run certbot next"
+if [ -f /etc/letsencrypt/live/lmf.gorev.space/fullchain.pem ]; then
+    ln -sf /etc/nginx/sites-available/lmf.gorev.space /etc/nginx/sites-enabled/lmf.gorev.space
+    nginx -t
+    echo "[ok] nginx site enabled; run: systemctl reload nginx"
+else
+    echo "[todo] no cert yet: certbot certonly --nginx -d lmf.gorev.space"
+    echo "       then re-run this script (or ln -s the site and reload nginx)"
+fi
 
-# 6. Health check via loopback.
-sleep 1
-curl -fsS http://127.0.0.1:5050/healthz | grep -q '"ok":true' && echo "[ok] /healthz responsive on 127.0.0.1:5050" || {
-    echo "[fail] healthz not responding"; exit 1;
+# 6. Health check via loopback (retry: startup runs migrations).
+ok=
+for _ in $(seq 1 20); do
+    if curl -fsS --max-time 2 http://127.0.0.1:5050/healthz | grep -q '"ok":true'; then ok=1; break; fi
+    sleep 0.5
+done
+[ -n "$ok" ] && echo "[ok] /healthz responsive on 127.0.0.1:5050" || {
+    echo "[fail] healthz not responding"; journalctl -u lmf --no-pager -n 30; exit 1;
 }

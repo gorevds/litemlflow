@@ -21,3 +21,10 @@ README.md
 docs/
 python/tests/
 tests/
+# Not needed by the Go build; excluding them keeps unrelated edits from
+# invalidating the `COPY . .` layer cache.
+python/
+site/
+marketing/
+examples/
+/*.md

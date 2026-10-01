@@ -33,8 +33,8 @@ test-go: ## Run Go unit tests
 test-py: py-install ## Run Python SDK tests
 	cd python && $(PYTHON) -m pytest -v tests/
 
-test-integration: build ## Run end-to-end integration tests
-	$(PYTHON) tests/integration/run.py
+test-integration: build ## Run end-to-end MLflow → import-mlflow → LiteMLflow test (needs: pip install mlflow requests)
+	$(PYTHON) tests/integration/import_mlflow.py
 
 compat-test: build py-install ## Run real MLflow client against LiteMLflow server
 	$(PYTHON) tests/integration/mlflow_compat.py

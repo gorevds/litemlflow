@@ -4,7 +4,7 @@ A Kubernetes operator that manages `LiteMLflow` custom resources. It reconciles
 each CR into a StatefulSet, two Services (headless + ClusterIP), and a
 PersistentVolumeClaim.
 
-The operator lives in a **separate Go module** (`github.com/gorevds/litemlflow-operator`)
+The operator lives in a **separate Go module** (`github.com/gorevds/litemlflow/operator`)
 so that `controller-runtime` and its transitive dependencies are never added to
 the main LiteMLflow server module.
 
@@ -50,18 +50,8 @@ cd operator && go build -o ../bin/litemlflow-operator ./
 ### 2. Containerise
 
 ```bash
-docker build -t ghcr.io/your-org/litemlflow-operator:v0.1.0 \
-  -f - . <<'EOF'
-FROM golang:1.22-alpine AS build
-WORKDIR /src
-COPY operator/ operator/
-WORKDIR /src/operator
-RUN go build -o /litemlflow-operator ./
-
-FROM gcr.io/distroless/static:nonroot
-COPY --from=build /litemlflow-operator /
-ENTRYPOINT ["/litemlflow-operator"]
-EOF
+# Run from the repo root; operator/Dockerfile is a distroless nonroot build.
+docker build -f operator/Dockerfile -t ghcr.io/your-org/litemlflow-operator:v0.1.0 .
 
 docker push ghcr.io/your-org/litemlflow-operator:v0.1.0
 ```

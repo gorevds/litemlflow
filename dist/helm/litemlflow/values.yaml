@@ -1,11 +1,13 @@
 # Default values for litemlflow.
 # This is a YAML-formatted file.
 
+# Must be 1: LiteMLflow stores state in a single SQLite file (single writer).
 replicaCount: 1
 
 image:
-  repository: gorevds/litemlflow
-  tag: "v0.4.0-rc1"
+  repository: ghcr.io/gorevds/litemlflow
+  # Defaults to the chart appVersion when empty.
+  tag: ""
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
@@ -29,8 +31,9 @@ config:
 auth:
   # Username for basic auth (authMode=basic).
   user: ""
-  # SHA-256 hex of the password. Generate with:
-  #   printf 'yourpassword' | sha256sum | awk '{print $1}'
+  # bcrypt hash of the password. Generate with:
+  #   printf '%s' 'yourpassword' | litemlflow hash-password
+  # (legacy SHA-256 hex hashes are still accepted but deprecated)
   # Stored in a Kubernetes Secret; not echoed in pod env directly.
   passHash: ""
 
@@ -121,6 +124,9 @@ podSecurityContext:
   fsGroup: 65532
   runAsNonRoot: true
   runAsUser: 65532
+  runAsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
 
 securityContext:
   allowPrivilegeEscalation: false

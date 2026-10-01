@@ -1,3 +1,6 @@
+{{- if ne (int .Values.replicaCount) 1 }}
+{{- fail "replicaCount must be 1: LiteMLflow uses a single-writer SQLite store" }}
+{{- end }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:

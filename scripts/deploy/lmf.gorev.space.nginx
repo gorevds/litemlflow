@@ -3,8 +3,16 @@
 # Reverse proxy for LiteMLflow at https://lmf.gorev.space.
 # Paired with: systemctl enable --now lmf
 #
-# certbot will edit this file in-place to add SSL listen + cert paths.
-# After certbot runs, the HTTP block here keeps a 301 → HTTPS.
+# The certificate must exist before this site is enabled (nginx -t rejects a
+# `listen ... ssl` block without one). Obtain it first with
+#   certbot certonly --nginx -d lmf.gorev.space
+# provision.sh does this check. The HTTP block keeps a 301 → HTTPS.
+
+# Brute-force guard for the password login. Behind this proxy every request
+# reaches LiteMLflow from 127.0.0.1, so the app's own per-IP login limiter
+# sees a single client; per-client limiting has to happen here.
+# (Site files are included in the http{} context, where this directive lives.)
+limit_req_zone $binary_remote_addr zone=lmf_login:10m rate=10r/m;
 
 server {
     listen 80;
@@ -22,11 +30,21 @@ server {
 }
 
 server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
+    # :443 is owned by the stream{} SNI demultiplexer
+    # (/etc/nginx/stream.d/mtg.conf), which forwards non-mtg TLS here with
+    # the real client address in a PROXY protocol header. Listening on :443
+    # directly would collide with it and stop nginx from starting.
+    listen 127.0.0.1:8443 ssl http2 proxy_protocol;
     server_name lmf.gorev.space;
 
-    # certbot --nginx will inject ssl_certificate / ssl_certificate_key here.
+    # Recover the real client IP from PROXY protocol so $remote_addr (and the
+    # X-Real-IP / X-Forwarded-For / rate-limit keys derived from it) are not
+    # all 127.0.0.1.
+    set_real_ip_from 127.0.0.1;
+    real_ip_header   proxy_protocol;
+
+    ssl_certificate     /etc/letsencrypt/live/lmf.gorev.space/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/lmf.gorev.space/privkey.pem;
 
     # Sensible TLS defaults; certbot will also touch these.
     ssl_protocols TLSv1.2 TLSv1.3;
@@ -57,6 +75,12 @@ server {
     proxy_request_buffering off;
 
     location / {
+        proxy_pass http://127.0.0.1:5050;
+    }
+
+    location = /api/v1/auth/login {
+        limit_req zone=lmf_login burst=5 nodelay;
+        limit_req_status 429;
         proxy_pass http://127.0.0.1:5050;
     }
 

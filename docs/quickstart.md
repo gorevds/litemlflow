@@ -1,18 +1,23 @@
 # Quickstart
 
-## Install via package manager
+## Install a release
 
 ```bash
-brew install litemlflow/tap/litemlflow            # macOS / Linux brew
-sudo apt install litemlflow                       # Debian/Ubuntu (after adding apt repo)
-sudo dnf install litemlflow                       # Fedora/RHEL (after adding rpm repo)
-sudo snap install litemlflow                      # Snap
-helm install lmf oci://ghcr.io/litemlflow/charts/litemlflow --version 0.1.0   # Kubernetes
+# Raw binary (linux|darwin, amd64|arm64)
+curl -fsSL -o /usr/local/bin/litemlflow \
+  https://github.com/gorevds/litemlflow/releases/latest/download/litemlflow-linux-amd64
+chmod +x /usr/local/bin/litemlflow
+
+docker run -p 5000:5000 -v $(pwd)/data:/data ghcr.io/gorevds/litemlflow:latest   # Docker
+helm install lmf oci://ghcr.io/gorevds/charts/litemlflow --version 0.2.0         # Kubernetes
 ```
+
+Homebrew, Debian, RPM and Snap packages were sunset in v1.2 (see
+`dist/_sunset/README.md`).
 
 ## Install from source
 
-Build from source (requires Go 1.22+):
+Build from source (requires Go 1.26+):
 
 ```bash
 git clone https://github.com/gorevds/litemlflow
@@ -82,11 +87,12 @@ The data directory is the source of truth; copy it anywhere.
 
 ## Auth
 
-Localhost-only is the default. To expose to a small team:
+The default listen address is `:5000` (all interfaces) with no auth, so on a
+shared host pass `--addr 127.0.0.1:5000`. To expose to a small team:
 
 ```bash
-# Hash a password:
-HASH=$(printf 'hunter2' | sha256sum | awk '{print $1}')
+# Hash a password (bcrypt; read from stdin so it stays out of argv):
+HASH=$(printf '%s' 'hunter2' | ./bin/litemlflow hash-password)
 
 ./bin/litemlflow up \
   --data ./data \
@@ -96,7 +102,7 @@ HASH=$(printf 'hunter2' | sha256sum | awk '{print $1}')
   --basic-pass-hash "$HASH"
 ```
 
-Then put it behind a TLS-terminating proxy (Caddy, Traefik, Nginx) or use `--auth oidc` (lands in v0.2).
+Then put it behind a TLS-terminating proxy (Caddy, Traefik, Nginx) or use `--auth oidc`.
 
 ## What works today (v0.1)
 

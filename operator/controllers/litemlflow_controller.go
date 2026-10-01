@@ -4,10 +4,12 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -17,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	litemlflowv1alpha1 "github.com/gorevds/litemlflow/operator/api/v1alpha1"
 )
@@ -32,6 +35,10 @@ const (
 	conditionMissingSecret = "MissingSecret"
 	// conditionReady is the condition type set when the StatefulSet has ready replicas.
 	conditionReady = "Ready"
+	// missingSecretRequeue is how often a CR with a MissingSecret condition is
+	// re-checked. Secrets are not watched (the operator only has `get` on
+	// them), so without a timed requeue the condition would never clear.
+	missingSecretRequeue = 30 * time.Second
 )
 
 // LiteMLflowReconciler reconciles LiteMLflow objects.
@@ -40,13 +47,12 @@ type LiteMLflowReconciler struct {
 	Scheme *runtime.Scheme
 }
 
-// +kubebuilder:rbac:groups=litemlflow.dev,resources=litemlflows,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=litemlflow.dev,resources=litemlflows,verbs=get;list;watch
 // +kubebuilder:rbac:groups=litemlflow.dev,resources=litemlflows/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=litemlflow.dev,resources=litemlflows/finalizers,verbs=update
-// +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get
 
 // Reconcile performs the reconciliation loop for a LiteMLflow resource.
 func (r *LiteMLflowReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -70,6 +76,17 @@ func (r *LiteMLflowReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err := r.validateBasicAuthSecrets(ctx, lmf); err != nil {
 		logger.Error(err, "basic-auth secret validation failed")
 		return ctrl.Result{}, fmt.Errorf("validate basic-auth secrets: %w", err)
+	}
+
+	// Reject an unparseable storage size up front: DesiredStatefulSet would
+	// otherwise panic in resource.MustParse and crash the whole operator
+	// (controller-runtime does not recover reconcile panics by default). The
+	// error is terminal — retrying cannot help until the spec is edited, and a
+	// spec edit triggers a fresh reconcile.
+	if size := lmf.Spec.Storage.Size; size != "" {
+		if _, err := resource.ParseQuantity(size); err != nil {
+			return ctrl.Result{}, reconcile.TerminalError(fmt.Errorf("invalid spec.storage.size %q: %w", size, err))
+		}
 	}
 
 	// Phase 2: reconcile the headless Service (required by StatefulSet).
@@ -98,6 +115,9 @@ func (r *LiteMLflowReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		"ready", lmf.Status.Ready,
 		"readyReplicas", ss.Status.ReadyReplicas,
 	)
+	if meta.FindStatusCondition(lmf.Status.Conditions, conditionMissingSecret) != nil {
+		return ctrl.Result{RequeueAfter: missingSecretRequeue}, nil
+	}
 	return ctrl.Result{}, nil
 }
 
@@ -334,6 +354,9 @@ func DesiredStatefulSet(lmf *litemlflowv1alpha1.LiteMLflow) *appsv1.StatefulSet 
 						RunAsUser:    ptrInt64(65532),
 						RunAsGroup:   ptrInt64(65532),
 						FSGroup:      ptrInt64(65532),
+						SeccompProfile: &corev1.SeccompProfile{
+							Type: corev1.SeccompProfileTypeRuntimeDefault,
+						},
 					},
 					Containers: []corev1.Container{
 						{
@@ -344,6 +367,16 @@ func DesiredStatefulSet(lmf *litemlflowv1alpha1.LiteMLflow) *appsv1.StatefulSet 
 								{Name: "http", ContainerPort: containerPort, Protocol: corev1.ProtocolTCP},
 							},
 							Env: envVars,
+							// Restricted Pod Security Standard. The root FS can be
+							// read-only: the server writes only to /data (PVC) and
+							// /tmp (emptyDir below).
+							SecurityContext: &corev1.SecurityContext{
+								AllowPrivilegeEscalation: ptrBool(false),
+								ReadOnlyRootFilesystem:   ptrBool(true),
+								Capabilities: &corev1.Capabilities{
+									Drop: []corev1.Capability{"ALL"},
+								},
+							},
 							LivenessProbe: &corev1.Probe{
 								ProbeHandler: corev1.ProbeHandler{
 									HTTPGet: &corev1.HTTPGetAction{

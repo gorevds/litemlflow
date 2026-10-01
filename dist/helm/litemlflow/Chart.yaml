@@ -2,8 +2,8 @@ apiVersion: v2
 name: litemlflow
 description: Single-binary MLflow-compatible experiment tracker with first-class LLM tracing
 type: application
-version: 0.1.0
-appVersion: "0.4.0-rc1"
+version: 0.2.0
+appVersion: "v2.1.0"
 home: https://litemlflow.dev
 sources:
   - https://github.com/gorevds/litemlflow

@@ -2,7 +2,7 @@
 #
 # Same pattern as the main image — distroless static, pure-Go build.
 
-FROM golang:1.26.3-alpine AS build
+FROM golang:1.26.4-alpine AS build
 WORKDIR /src
 RUN apk add --no-cache git ca-certificates
 

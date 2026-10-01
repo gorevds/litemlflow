@@ -97,14 +97,14 @@ binary must be named `litemlflow` (without version suffix) in that directory.
 **Steps:**
 
 1. Update `appVersion` in `dist/helm/litemlflow/Chart.yaml` to match the
-   release (e.g. `0.4.0-rc1`). Bump `version` for chart-only changes.
-2. Update `image.tag` default in `values.yaml` if needed.
-3. Lint: `make dist-helm-lint`
-4. Dry-run render: `make dist-helm-template`
-5. Package: `helm package dist/helm/litemlflow/ --destination dist/`
-6. Push to OCI registry:
+   release image tag (e.g. `v2.1.0`; `image.tag` defaults to it). Bump
+   `version` for any chart change.
+2. Lint: `make dist-helm-lint`
+3. Dry-run render: `make dist-helm-template`
+4. Package: `helm package dist/helm/litemlflow/ --destination dist/`
+5. Push to OCI registry:
    ```
-   helm push litemlflow-0.1.0.tgz oci://ghcr.io/litemlflow/charts
+   helm push dist/litemlflow-0.2.0.tgz oci://ghcr.io/gorevds/charts
    ```
 
 ## Makefile targets

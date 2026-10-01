@@ -7,7 +7,7 @@ MLflow-API-compatible experiment tracker with first-class LLM tracing.
 
 ```bash
 # From OCI registry (once published):
-helm install lmf oci://ghcr.io/litemlflow/charts/litemlflow --version 0.1.0
+helm install lmf oci://ghcr.io/gorevds/charts/litemlflow --version 0.2.0
 
 # From a local clone of this repo:
 helm install lmf dist/helm/litemlflow/
@@ -24,7 +24,7 @@ helm install lmf dist/helm/litemlflow/ \
 ## With basic auth and persistent storage
 
 ```bash
-HASH=$(printf 'hunter2' | sha256sum | awk '{print $1}')
+HASH=$(printf '%s' 'hunter2' | litemlflow hash-password)   # bcrypt
 
 helm install lmf dist/helm/litemlflow/ \
   --set config.authMode=basic \
@@ -58,11 +58,11 @@ helm install lmf dist/helm/litemlflow/ \
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `image.repository` | `gorevds/litemlflow` | Container image repository |
-| `image.tag` | `v0.4.0-rc1` | Image tag (defaults to `appVersion`) |
+| `image.repository` | `ghcr.io/gorevds/litemlflow` | Container image repository |
+| `image.tag` | `""` | Image tag (defaults to `appVersion`) |
 | `config.authMode` | `none` | Auth mode: `none` or `basic` |
 | `auth.user` | `""` | Basic auth username |
-| `auth.passHash` | `""` | SHA-256 hex of the password |
+| `auth.passHash` | `""` | bcrypt hash of the password (`litemlflow hash-password`) |
 | `service.type` | `ClusterIP` | Kubernetes service type |
 | `service.port` | `5000` | Service port |
 | `ingress.enabled` | `false` | Enable Ingress resource |

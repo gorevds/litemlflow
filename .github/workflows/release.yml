@@ -6,22 +6,26 @@ on:
       - 'v*'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: "1.26.4"
           cache: true
       - name: build matrix
         run: |
           mkdir -p dist
+          # Asset names carry no version so the stable
+          # releases/latest/download/litemlflow-<os>-<arch> URL (README) works.
           for OS in linux darwin; do
             for ARCH in amd64 arm64; do
               echo "Building $OS/$ARCH ..."
@@ -32,7 +36,7 @@ jobs:
                     -X github.com/gorevds/litemlflow/pkg/version.Version=${GITHUB_REF_NAME} \
                     -X github.com/gorevds/litemlflow/pkg/version.Commit=$(git rev-parse --short HEAD) \
                     -X github.com/gorevds/litemlflow/pkg/version.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-                  -o dist/litemlflow-${GITHUB_REF_NAME}-$OS-$ARCH \
+                  -o dist/litemlflow-$OS-$ARCH \
                   ./cmd/litemlflow
             done
           done
@@ -41,7 +45,43 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
+          # -rcN tags are prereleases so they never become releases/latest.
+          pre=; case "${GITHUB_REF_NAME}" in *-*) pre=--prerelease ;; esac
+          gh release create "${GITHUB_REF_NAME}" $pre \
             --title "${GITHUB_REF_NAME}" \
             --notes "Auto-generated release. See CHANGELOG.md for details." \
             dist/*
+
+  # Publish the container image the README, Helm chart and operator pull
+  # (ghcr.io/gorevds/litemlflow:<tag>).
+  image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: image metadata
+        id: meta
+        run: |
+          echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          # Only stable tags (no -rcN) move :latest.
+          tags="ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_REF_NAME}"
+          case "${GITHUB_REF_NAME}" in *-*) ;; *) tags="$tags,ghcr.io/${GITHUB_REPOSITORY,,}:latest" ;; esac
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ steps.meta.outputs.commit }}
+            DATE=${{ steps.meta.outputs.date }}

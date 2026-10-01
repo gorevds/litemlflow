@@ -6,36 +6,35 @@ metadata:
   labels:
     app.kubernetes.io/name: litemlflow-operator
 rules:
-  # LiteMLflow CRD
+  # LiteMLflow CRD — the operator only reads CRs and writes their status.
   - apiGroups: [litemlflow.dev]
     resources: [litemlflows]
-    verbs: [get, list, watch, create, update, patch, delete]
+    verbs: [get, list, watch]
   - apiGroups: [litemlflow.dev]
     resources: [litemlflows/status]
     verbs: [get, update, patch]
+  # Needed to set blockOwnerDeletion on owner references.
   - apiGroups: [litemlflow.dev]
     resources: [litemlflows/finalizers]
     verbs: [update]
 
-  # StatefulSets
+  # StatefulSets / Services — owned objects; deletion is done by the garbage
+  # collector via owner references, so no delete verb.
   - apiGroups: [apps]
     resources: [statefulsets]
-    verbs: [get, list, watch, create, update, patch, delete]
-
-  # Services
+    verbs: [get, list, watch, create, update]
   - apiGroups: [""]
     resources: [services]
-    verbs: [get, list, watch, create, update, patch, delete]
+    verbs: [get, list, watch, create, update]
 
-  # PVCs (for status reads; VolumeClaimTemplates are created by the StatefulSet controller)
-  - apiGroups: [""]
-    resources: [persistentvolumeclaims]
-    verbs: [get, list, watch, create, update, patch, delete]
+  # No PVC access: volumeClaimTemplates are materialised by the StatefulSet
+  # controller, never by this operator.
 
-  # Secrets (read-only — for validation)
+  # Secrets: existence check only. main.go disables the informer cache for
+  # Secrets so a plain `get` suffices (no cluster-wide list/watch).
   - apiGroups: [""]
     resources: [secrets]
-    verbs: [get, list, watch]
+    verbs: [get]
 
   # Events (for recording reconcile events)
   - apiGroups: [""]

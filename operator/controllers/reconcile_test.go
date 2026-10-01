@@ -7,6 +7,7 @@ package controllers
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -18,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	litemlflowv1alpha1 "github.com/gorevds/litemlflow/operator/api/v1alpha1"
 )
@@ -85,8 +87,14 @@ func TestReconcileContinuesOnMissingSecret(t *testing.T) {
 		Build()
 
 	r := &LiteMLflowReconciler{Client: c, Scheme: scheme}
-	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns", Name: "lmf"}}); err != nil {
+	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns", Name: "lmf"}})
+	if err != nil {
 		t.Fatalf("missing Secret should not fail reconcile, got: %v", err)
+	}
+	// Secrets are not watched, so the reconcile must schedule a re-check or
+	// the MissingSecret condition never clears once the Secret is created.
+	if res.RequeueAfter <= 0 {
+		t.Errorf("RequeueAfter = %v, want > 0 while a Secret is missing", res.RequeueAfter)
 	}
 
 	got := &litemlflowv1alpha1.LiteMLflow{}
@@ -118,5 +126,48 @@ func TestDesiredStatefulSetSetsNonrootSecurityContext(t *testing.T) {
 	}
 	if sc.RunAsUser == nil || *sc.RunAsUser != 65532 {
 		t.Errorf("RunAsUser = %v, want 65532", sc.RunAsUser)
+	}
+}
+
+// An unparseable storage size used to panic in resource.MustParse inside
+// DesiredStatefulSet, crashing the operator for every CR. It must instead be a
+// terminal reconcile error.
+func TestReconcileInvalidStorageSizeIsTerminalError(t *testing.T) {
+	scheme := testScheme(t)
+	lmf := minimalLMF("lmf", "ns", "v1.0.0")
+	lmf.Spec.Storage.Size = "ten gigs"
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(lmf).
+		WithStatusSubresource(&litemlflowv1alpha1.LiteMLflow{}).
+		Build()
+
+	r := &LiteMLflowReconciler{Client: c, Scheme: scheme}
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns", Name: "lmf"}})
+	if err == nil {
+		t.Fatal("expected an error for an invalid storage size")
+	}
+	if !errors.Is(err, reconcile.TerminalError(nil)) {
+		t.Errorf("expected a terminal error, got: %v", err)
+	}
+}
+
+func TestDesiredStatefulSetContainerIsRestricted(t *testing.T) {
+	ss := DesiredStatefulSet(minimalLMF("sec", "ns", "v1.0.0"))
+	csc := ss.Spec.Template.Spec.Containers[0].SecurityContext
+	if csc == nil {
+		t.Fatal("container SecurityContext is nil")
+	}
+	if csc.AllowPrivilegeEscalation == nil || *csc.AllowPrivilegeEscalation {
+		t.Error("AllowPrivilegeEscalation should be false")
+	}
+	if csc.ReadOnlyRootFilesystem == nil || !*csc.ReadOnlyRootFilesystem {
+		t.Error("ReadOnlyRootFilesystem should be true")
+	}
+	if csc.Capabilities == nil || len(csc.Capabilities.Drop) != 1 || csc.Capabilities.Drop[0] != "ALL" {
+		t.Errorf("Capabilities.Drop = %v, want [ALL]", csc.Capabilities)
+	}
+	if sp := ss.Spec.Template.Spec.SecurityContext.SeccompProfile; sp == nil || sp.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Errorf("pod SeccompProfile = %v, want RuntimeDefault", sp)
 	}
 }

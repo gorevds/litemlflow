@@ -1,6 +1,6 @@
 # LiteMLflow
 
-[![CI](https://img.shields.io/github/actions/workflow/status/gorevds/litemlflow/ci.yml?branch=main&logo=github&label=CI)](https://github.com/gorevds/litemlflow/actions)
+[![CI](https://img.shields.io/github/actions/workflow/status/gorevds/litemlflow/ci.yml?branch=master&logo=github&label=CI)](https://github.com/gorevds/litemlflow/actions)
 [![Coverage](https://img.shields.io/badge/coverage-TBD-lightgrey?logo=go)](https://github.com/gorevds/litemlflow/actions)
 [![Go Report Card](https://goreportcard.com/badge/github.com/gorevds/litemlflow)](https://goreportcard.com/report/github.com/gorevds/litemlflow)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
@@ -37,7 +37,7 @@ litemlflow up --data ~/lmf
 docker run -p 5000:5000 -v $(pwd)/data:/data ghcr.io/gorevds/litemlflow:latest up
 
 # Kubernetes (Helm)
-helm install lmf oci://ghcr.io/litemlflow/charts/litemlflow --version 0.1.0
+helm install lmf oci://ghcr.io/gorevds/charts/litemlflow --version 0.2.0
 
 # Build from source (Go 1.26+)
 git clone https://github.com/gorevds/litemlflow && cd litemlflow && make build
@@ -129,7 +129,7 @@ To import existing data from a running MLflow instance:
 
 ```bash
 litemlflow import-mlflow \
-  --src http://mlflow-server:5000 \
+  --from http://mlflow-server:5000 \
   --data ./data
 ```
 
@@ -158,7 +158,7 @@ tests/integration/   End-to-end tests (real MLflow client + bench harness)
 ## Build & test
 
 ```bash
-make build          # → bin/litemlflow (requires Go 1.22+)
+make build          # → bin/litemlflow (requires Go 1.26+)
 make test           # Go + Python tests
 make compat-test    # real MLflow Python client against local binary
 make lint           # static analysis
