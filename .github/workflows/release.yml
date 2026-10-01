@@ -23,7 +23,7 @@ jobs:
           cache: true
       - name: build matrix
         run: |
-          mkdir -p dist
+          mkdir -p release-out
           # Asset names carry no version so the stable
           # releases/latest/download/litemlflow-<os>-<arch> URL (README) works.
           for OS in linux darwin; do
@@ -36,11 +36,11 @@ jobs:
                     -X github.com/gorevds/litemlflow/pkg/version.Version=${GITHUB_REF_NAME} \
                     -X github.com/gorevds/litemlflow/pkg/version.Commit=$(git rev-parse --short HEAD) \
                     -X github.com/gorevds/litemlflow/pkg/version.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-                  -o dist/litemlflow-$OS-$ARCH \
+                  -o release-out/litemlflow-$OS-$ARCH \
                   ./cmd/litemlflow
             done
           done
-          (cd dist && sha256sum litemlflow-* > SHA256SUMS)
+          (cd release-out && sha256sum litemlflow-* > SHA256SUMS)
       - name: create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -50,7 +50,7 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" $pre \
             --title "${GITHUB_REF_NAME}" \
             --notes "Auto-generated release. See CHANGELOG.md for details." \
-            dist/*
+            release-out/*
 
   # Publish the container image the README, Helm chart and operator pull
   # (ghcr.io/gorevds/litemlflow:<tag>).
