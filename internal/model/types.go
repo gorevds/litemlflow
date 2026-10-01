@@ -340,6 +340,14 @@ type RegisteredModel struct {
 	Tags           []KV   `json:"tags,omitempty"`
 	// LatestVersions is populated on demand (GetLatestModelVersions).
 	LatestVersions []*ModelVersion `json:"latest_versions,omitempty"`
+	// Aliases lists every alias of any version of this model, ordered by alias.
+	Aliases []ModelAlias `json:"aliases,omitempty"`
+}
+
+// ModelAlias maps an alias (e.g. "champion") to a model version.
+type ModelAlias struct {
+	Alias   string `json:"alias"`
+	Version int64  `json:"version"`
 }
 
 // ModelVersion is one versioned snapshot of a registered model.
@@ -357,6 +365,8 @@ type ModelVersion struct {
 	CreationTime   int64  `json:"creation_time"`
 	LastUpdateTime int64  `json:"last_update_time"`
 	Tags           []KV   `json:"tags,omitempty"`
+	// Aliases are the alias names pointing at this version, ordered by alias.
+	Aliases []string `json:"aliases,omitempty"`
 }
 
 // ModelTag is a key/value tag scoped to a registered model or model version.

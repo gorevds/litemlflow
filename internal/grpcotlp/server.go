@@ -2,7 +2,7 @@
 //
 // Usage:
 //
-//	srv, err := grpcotlp.New(addr, store)
+//	srv, err := grpcotlp.New(addr, store, grpcotlp.WithAuthenticator(fn))
 //	// ...
 //	go srv.Serve()
 //	// on shutdown:
@@ -10,14 +10,59 @@
 package grpcotlp
 
 import (
+	"context"
 	"fmt"
 	"net"
 
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 
 	"github.com/gorevds/litemlflow/internal/store"
 )
+
+// MaxRecvMsgSize bounds a single inbound OTLP export. 16 MiB is far above
+// what an OTel SDK batch exporter sends (it splits batches at ~512 spans) yet
+// small enough that a single unauthenticated-looking request cannot force a
+// large allocation.
+const MaxRecvMsgSize = 16 << 20
+
+// maxSendMsgSize bounds responses; ExportTraceServiceResponse is tiny.
+const maxSendMsgSize = 1 << 20
+
+// Authenticator validates the raw value of the `authorization` request
+// metadata (e.g. "Bearer <token>" or "Basic <b64>") and returns the
+// authenticated user id. Any error rejects the call with
+// codes.Unauthenticated. An empty authorization value is rejected before
+// the Authenticator is invoked.
+type Authenticator func(ctx context.Context, authorization string) (user string, err error)
+
+// Authorizer decides whether user may write traces into workspace. A non-nil
+// error rejects the call with codes.PermissionDenied (or the error's own gRPC
+// status, when it carries one). user is "" when no Authenticator is set.
+type Authorizer func(ctx context.Context, workspace, user string) error
+
+// Option configures a Server.
+type Option func(*options)
+
+type options struct {
+	authn Authenticator
+	authz Authorizer
+}
+
+// WithAuthenticator requires every call to carry `authorization` metadata
+// accepted by fn. Without it the receiver is open (auth=none deployments).
+func WithAuthenticator(fn Authenticator) Option {
+	return func(o *options) { o.authn = fn }
+}
+
+// WithAuthorizer installs a per-workspace write check run after the
+// workspace has been resolved from `x-workspace` metadata.
+func WithAuthorizer(fn Authorizer) Option {
+	return func(o *options) { o.authz = fn }
+}
 
 // Server wraps a gRPC server that listens for OTLP trace exports.
 type Server struct {
@@ -27,20 +72,60 @@ type Server struct {
 	st   store.Store
 }
 
-// defaultGRPCOptions returns the hardened default gRPC server options for the
-// OTLP receiver. Without these, an unauthenticated client can ship arbitrarily
-// large payloads (gRPC's default max message size is 4 MiB on the recv side,
-// but we tighten it to 64 MiB and add explicit connection caps).
+type userCtxKey struct{}
+
+// userFromContext returns the user stored by the auth interceptor.
+func userFromContext(ctx context.Context) string {
+	u, _ := ctx.Value(userCtxKey{}).(string)
+	return u
+}
+
+// authInterceptor enforces the Authenticator on every unary call.
+func authInterceptor(authn Authenticator) grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		md, _ := metadata.FromIncomingContext(ctx)
+		var authz string
+		if v := md.Get("authorization"); len(v) > 0 {
+			authz = v[0]
+		}
+		if authz == "" {
+			return nil, status.Error(codes.Unauthenticated, "missing authorization metadata")
+		}
+		user, err := authn(ctx, authz)
+		if err != nil || user == "" {
+			return nil, status.Error(codes.Unauthenticated, "invalid credentials")
+		}
+		return handler(context.WithValue(ctx, userCtxKey{}, user), req)
+	}
+}
+
+// grpcOptions returns the hardened gRPC server options for the OTLP receiver.
+// gRPC's own default recv cap is 4 MiB; we raise it to MaxRecvMsgSize (16 MiB)
+// so large-but-legitimate batches are accepted while still bounding memory per
+// message, and cap concurrent streams per connection.
 //
 // Operators exposing the gRPC port to untrusted networks should still place a
-// rate-limiting reverse proxy in front; these caps are defense-in-depth for
-// trusted-network deployments.
-func defaultGRPCOptions() []grpc.ServerOption {
-	return []grpc.ServerOption{
-		grpc.MaxRecvMsgSize(64 * 1024 * 1024), // 64 MiB
-		grpc.MaxSendMsgSize(64 * 1024 * 1024),
+// rate-limiting reverse proxy in front; these caps are defense-in-depth.
+func grpcOptions(o options) []grpc.ServerOption {
+	opts := []grpc.ServerOption{
+		grpc.MaxRecvMsgSize(MaxRecvMsgSize),
+		grpc.MaxSendMsgSize(maxSendMsgSize),
 		grpc.MaxConcurrentStreams(1024),
 	}
+	if o.authn != nil {
+		opts = append(opts, grpc.ChainUnaryInterceptor(authInterceptor(o.authn)))
+	}
+	return opts
+}
+
+func newGRPC(st store.Store, opts []Option) *grpc.Server {
+	var o options
+	for _, fn := range opts {
+		fn(&o)
+	}
+	g := grpc.NewServer(grpcOptions(o)...)
+	coltracepb.RegisterTraceServiceServer(g, &traceServiceServer{store: st, authz: o.authz})
+	return g
 }
 
 // New creates a Server that will listen on addr when Serve is called.
@@ -48,25 +133,21 @@ func defaultGRPCOptions() []grpc.ServerOption {
 // No TLS is set up on the gRPC listener itself; operators who need TLS should
 // place a TLS-terminating sidecar or reverse proxy in front. See
 // docs/adr/0002-grpc-otlp-deps.md for rationale.
-func New(addr string, st store.Store) (*Server, error) {
+func New(addr string, st store.Store, opts ...Option) (*Server, error) {
 	if addr == "" {
 		return nil, fmt.Errorf("grpcotlp: addr is required")
 	}
-	g := grpc.NewServer(defaultGRPCOptions()...)
-	coltracepb.RegisterTraceServiceServer(g, &traceServiceServer{store: st})
-	return &Server{addr: addr, grpc: g, st: st}, nil
+	return &Server{addr: addr, grpc: newGRPC(st, opts), st: st}, nil
 }
 
 // NewWithListener creates a Server backed by an already-open net.Listener.
 // This is used in tests (bufconn) and for embedders that want to manage the
 // listener lifecycle themselves.
-func NewWithListener(lis net.Listener, st store.Store) (*Server, error) {
+func NewWithListener(lis net.Listener, st store.Store, opts ...Option) (*Server, error) {
 	if lis == nil {
 		return nil, fmt.Errorf("grpcotlp: listener is required")
 	}
-	g := grpc.NewServer(defaultGRPCOptions()...)
-	coltracepb.RegisterTraceServiceServer(g, &traceServiceServer{store: st})
-	return &Server{grpc: g, lis: lis, st: st}, nil
+	return &Server{grpc: newGRPC(st, opts), lis: lis, st: st}, nil
 }
 
 // Serve starts a new TCP listener on s.addr and accepts connections. It blocks

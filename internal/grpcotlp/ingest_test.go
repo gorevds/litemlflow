@@ -17,6 +17,7 @@ import (
 
 	"github.com/gorevds/litemlflow/internal/grpcotlp"
 	"github.com/gorevds/litemlflow/internal/model"
+	"github.com/gorevds/litemlflow/internal/store"
 	"github.com/gorevds/litemlflow/internal/store/storetest"
 )
 
@@ -35,6 +36,15 @@ func (f *fakeStore) InsertSpans(_ context.Context, spans []model.Span) error {
 	f.spans = append(f.spans, spans...)
 	f.mu.Unlock()
 	return nil
+}
+
+// GetRunInWorkspace accepts any run in the default workspace so the
+// run-linkage check passes for mapping tests.
+func (f *fakeStore) GetRunInWorkspace(_ context.Context, id, ws string) (*model.Run, error) {
+	if ws != "default" {
+		return nil, store.ErrNotFound
+	}
+	return &model.Run{ID: id}, nil
 }
 
 func (f *fakeStore) recorded() []model.Span {

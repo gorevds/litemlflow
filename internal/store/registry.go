@@ -63,6 +63,9 @@ func (s *SQLiteStore) GetRegisteredModel(ctx context.Context, workspaceID, name 
 		return nil, err
 	}
 	m.Tags = tags
+	if err := s.loadRegisteredModelAliases(ctx, workspaceID, []*model.RegisteredModel{m}); err != nil {
+		return nil, err
+	}
 	return m, nil
 }
 
@@ -271,6 +274,9 @@ func (s *SQLiteStore) SearchRegisteredModels(ctx context.Context, workspaceID, f
 	if err := s.loadRegisteredModelTags(ctx, workspaceID, out); err != nil {
 		return SearchResult[*model.RegisteredModel]{}, err
 	}
+	if err := s.loadRegisteredModelAliases(ctx, workspaceID, out); err != nil {
+		return SearchResult[*model.RegisteredModel]{}, err
+	}
 	return SearchResult[*model.RegisteredModel]{Items: out, NextPageToken: token}, nil
 }
 
@@ -304,6 +310,46 @@ func (s *SQLiteStore) loadRegisteredModelTags(ctx context.Context, workspaceID s
 			}
 			if m := byName[name]; m != nil {
 				m.Tags = append(m.Tags, kv)
+			}
+		}
+		_ = rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// loadRegisteredModelAliases fills Aliases for a page of models with one
+// query per tagBatchSize models (no per-model N+1).
+func (s *SQLiteStore) loadRegisteredModelAliases(ctx context.Context, workspaceID string, models []*model.RegisteredModel) error {
+	byName := make(map[string]*model.RegisteredModel, len(models))
+	for _, m := range models {
+		byName[m.Name] = m
+	}
+	for start := 0; start < len(models); start += tagBatchSize {
+		end := min(start+tagBatchSize, len(models))
+		args := make([]any, 0, end-start+1)
+		args = append(args, workspaceID)
+		for _, m := range models[start:end] {
+			args = append(args, m.Name)
+		}
+		marks := strings.TrimRight(strings.Repeat("?,", end-start), ",")
+		rows, err := s.db.QueryContext(ctx,
+			`SELECT name, alias, version FROM model_aliases WHERE workspace_id = ? AND name IN (`+marks+`) ORDER BY name, alias`,
+			args...)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var name string
+			var a model.ModelAlias
+			if err := rows.Scan(&name, &a.Alias, &a.Version); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			if m := byName[name]; m != nil {
+				m.Aliases = append(m.Aliases, a)
 			}
 		}
 		_ = rows.Close()
@@ -427,7 +473,14 @@ func (s *SQLiteStore) GetLatestModelVersions(ctx context.Context, workspaceID, n
 		mv.WorkspaceID = workspaceID
 		out = append(out, mv)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	_ = rows.Close()
+	if err := s.loadModelVersionMeta(ctx, workspaceID, out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // SetRegisteredModelTag upserts a tag on a registered model.
@@ -596,11 +649,9 @@ func (s *SQLiteStore) GetModelVersion(ctx context.Context, workspaceID, name str
 		return nil, err
 	}
 	mv.WorkspaceID = workspaceID
-	tags, err := s.getModelVersionTags(ctx, workspaceID, name, version)
-	if err != nil {
+	if err := s.loadModelVersionMeta(ctx, workspaceID, []*model.ModelVersion{mv}); err != nil {
 		return nil, err
 	}
-	mv.Tags = tags
 	return mv, nil
 }
 
@@ -711,12 +762,9 @@ func (s *SQLiteStore) SearchModelVersions(ctx context.Context, workspaceID, filt
 		last := out[len(out)-1]
 		token = fmt.Sprintf("%s:%d", last.Name, last.Version)
 	}
-	for _, mv := range out {
-		tags, err := s.getModelVersionTags(ctx, workspaceID, mv.Name, mv.Version)
-		if err != nil {
-			return SearchResult[*model.ModelVersion]{}, err
-		}
-		mv.Tags = tags
+	_ = rows.Close()
+	if err := s.loadModelVersionMeta(ctx, workspaceID, out); err != nil {
+		return SearchResult[*model.ModelVersion]{}, err
 	}
 	return SearchResult[*model.ModelVersion]{Items: out, NextPageToken: token}, nil
 }
@@ -834,23 +882,72 @@ func (s *SQLiteStore) DeleteModelVersionTag(ctx context.Context, workspaceID, na
 	return nil
 }
 
-func (s *SQLiteStore) getModelVersionTags(ctx context.Context, workspaceID, name string, version int64) ([]model.KV, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT key, value FROM model_version_tags WHERE workspace_id = ? AND name = ? AND version = ? ORDER BY key`,
-		workspaceID, name, version)
+// mvKey identifies a model version within a workspace.
+type mvKey struct {
+	name    string
+	version int64
+}
+
+// mvBatchSize bounds (name, version) pairs per query: two bind variables each
+// plus the workspace keeps us far below SQLite's variable limit.
+const mvBatchSize = 250
+
+// loadModelVersionMeta fills Tags and Aliases for a set of model versions
+// using two queries per mvBatchSize versions instead of one per version.
+func (s *SQLiteStore) loadModelVersionMeta(ctx context.Context, workspaceID string, mvs []*model.ModelVersion) error {
+	if len(mvs) == 0 {
+		return nil
+	}
+	byKey := make(map[mvKey]*model.ModelVersion, len(mvs))
+	for _, mv := range mvs {
+		byKey[mvKey{mv.Name, mv.Version}] = mv
+	}
+	for start := 0; start < len(mvs); start += mvBatchSize {
+		end := min(start+mvBatchSize, len(mvs))
+		args := make([]any, 0, 2*(end-start)+1)
+		args = append(args, workspaceID)
+		for _, mv := range mvs[start:end] {
+			args = append(args, mv.Name, mv.Version)
+		}
+		pairs := strings.TrimRight(strings.Repeat("(?,?),", end-start), ",")
+		in := `(name, version) IN (VALUES ` + pairs + `)`
+
+		if err := s.scanMVMeta(ctx,
+			`SELECT name, version, key, value FROM model_version_tags WHERE workspace_id = ? AND `+in+` ORDER BY name, version, key`,
+			args, func(mv *model.ModelVersion, a, b string) { mv.Tags = append(mv.Tags, model.KV{Key: a, Value: b}) },
+			byKey); err != nil {
+			return err
+		}
+		if err := s.scanMVMeta(ctx,
+			`SELECT name, version, alias, '' FROM model_aliases WHERE workspace_id = ? AND `+in+` ORDER BY name, version, alias`,
+			args, func(mv *model.ModelVersion, a, _ string) { mv.Aliases = append(mv.Aliases, a) },
+			byKey); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// scanMVMeta runs q (selecting name, version, a, b) and applies each row to
+// the matching model version.
+func (s *SQLiteStore) scanMVMeta(ctx context.Context, q string, args []any,
+	apply func(mv *model.ModelVersion, a, b string), byKey map[mvKey]*model.ModelVersion) error {
+	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer rows.Close()
-	var out []model.KV
 	for rows.Next() {
-		var kv model.KV
-		if err := rows.Scan(&kv.Key, &kv.Value); err != nil {
-			return nil, err
+		var k mvKey
+		var a, b string
+		if err := rows.Scan(&k.name, &k.version, &a, &b); err != nil {
+			return err
 		}
-		out = append(out, kv)
+		if mv := byKey[k]; mv != nil {
+			apply(mv, a, b)
+		}
 	}
-	return out, rows.Err()
+	return rows.Err()
 }
 
 // ---- scan helpers -----------------------------------------------------------

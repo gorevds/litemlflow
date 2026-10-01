@@ -34,6 +34,10 @@ func registeredModelToDTO(m *model.RegisteredModel) registeredModelDTO {
 	for _, v := range m.LatestVersions {
 		lv = append(lv, modelVersionToDTO(v))
 	}
+	var aliases []aliasDTO
+	for _, a := range m.Aliases {
+		aliases = append(aliases, aliasDTO{Alias: a.Alias, Version: strconv.FormatInt(a.Version, 10)})
+	}
 	return registeredModelDTO{
 		Name:           m.Name,
 		CreationTime:   m.CreationTime,
@@ -41,6 +45,7 @@ func registeredModelToDTO(m *model.RegisteredModel) registeredModelDTO {
 		Description:    m.Description,
 		LatestVersions: lv,
 		Tags:           tags,
+		Aliases:        aliases,
 	}
 }
 
@@ -61,6 +66,7 @@ type mvDTO struct {
 	StatusMessage  string     `json:"status_message,omitempty"`
 	Tags           []mvTagDTO `json:"tags,omitempty"`
 	RunLink        string     `json:"run_link,omitempty"`
+	Aliases        []string   `json:"aliases,omitempty"`
 }
 
 // mvTagDTO is the wire shape for model/version tags. Aliased to kvTagDTO
@@ -85,5 +91,6 @@ func modelVersionToDTO(mv *model.ModelVersion) mvDTO {
 		Status:         mv.Status,
 		StatusMessage:  mv.StatusMessage,
 		Tags:           tags,
+		Aliases:        mv.Aliases,
 	}
 }

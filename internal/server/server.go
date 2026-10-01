@@ -117,7 +117,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Server, 
 	// GRPC-OTLP: optionally start a gRPC OTLP receiver on a separate port.
 	var grpcSrv *grpcotlp.Server
 	if cfg.OTLPGRPCAddr != "" {
-		grpcSrv, err = grpcotlp.New(cfg.OTLPGRPCAddr, st)
+		grpcSrv, err = grpcotlp.New(cfg.OTLPGRPCAddr, st, grpcOTLPOptions(cfg, st)...)
 		if err != nil {
 			_ = st.Close()
 			return nil, fmt.Errorf("grpc otlp: %w", err)

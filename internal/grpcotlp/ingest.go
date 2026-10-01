@@ -13,6 +13,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"math"
 	"strconv"
 
@@ -20,6 +21,7 @@ import (
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
 	"github.com/gorevds/litemlflow/internal/model"
@@ -30,6 +32,18 @@ import (
 type traceServiceServer struct {
 	coltracepb.UnimplementedTraceServiceServer
 	store store.Store
+	authz Authorizer
+}
+
+// workspaceFromContext resolves the target workspace from `x-workspace`
+// metadata, defaulting to "default" — the gRPC analogue of the HTTP
+// X-Workspace header handled by the server's workspace middleware.
+func workspaceFromContext(ctx context.Context) string {
+	md, _ := metadata.FromIncomingContext(ctx)
+	if v := md.Get("x-workspace"); len(v) > 0 && v[0] != "" {
+		return v[0]
+	}
+	return "default"
 }
 
 // Export implements TraceServiceServer.Export.
@@ -53,6 +67,28 @@ func (t *traceServiceServer) Export(
 ) (*coltracepb.ExportTraceServiceResponse, error) {
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "nil request")
+	}
+
+	// Workspace scoping mirrors the HTTP OTLP endpoint: resolve the
+	// workspace (unknown ones are rejected, as workspaceMiddleware does) and
+	// apply the write check before doing any work. Run linkage is validated
+	// below, once the spans are decoded.
+	ws := workspaceFromContext(ctx)
+	if ws != "default" {
+		if _, err := t.store.GetWorkspace(ctx, ws); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return nil, status.Errorf(codes.InvalidArgument, "unknown workspace: %s", ws)
+			}
+			return nil, status.Error(codes.Internal, "workspace lookup failed")
+		}
+	}
+	if t.authz != nil {
+		if err := t.authz(ctx, ws, userFromContext(ctx)); err != nil {
+			if _, ok := status.FromError(err); ok {
+				return nil, err
+			}
+			return nil, status.Error(codes.PermissionDenied, err.Error())
+		}
 	}
 
 	var spans []model.Span
@@ -96,6 +132,22 @@ func (t *traceServiceServer) Export(
 					StatusMessage:  protoStatusMessage(sp.Status),
 				})
 			}
+		}
+	}
+
+	// Every linked run must live in the workspace so a caller cannot attach
+	// spans to — and inject content into — another tenant's run.
+	seen := map[string]bool{}
+	for _, sp := range spans {
+		if sp.RunID == "" || seen[sp.RunID] {
+			continue
+		}
+		seen[sp.RunID] = true
+		if _, err := t.store.GetRunInWorkspace(ctx, sp.RunID, ws); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return nil, status.Errorf(codes.NotFound, "run %s not found", sp.RunID)
+			}
+			return nil, status.Error(codes.Internal, "run lookup failed")
 		}
 	}
 

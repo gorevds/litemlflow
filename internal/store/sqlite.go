@@ -1636,6 +1636,23 @@ func (s *SQLiteStore) SetTags(ctx context.Context, runID string, ts []model.KV) 
 			return err
 		}
 	}
+	// Keep parent_run_id in sync exactly as SetTag does (log-batch carries
+	// mlflow.parentRunId for nested runs). The last occurrence wins, matching
+	// the value left in the tags table by the upserts above.
+	parent := ""
+	for _, t := range ts {
+		if t.Key == "mlflow.parentRunId" {
+			parent = t.Value
+		}
+	}
+	if parent != "" {
+		if err := syncParentRunIDFromTag(ctx, tx, runID, parent); err != nil {
+			if isFKViolation(err) {
+				return fmt.Errorf("%w: parent run %q", ErrNotFound, parent)
+			}
+			return err
+		}
+	}
 	return tx.Commit()
 }
 
@@ -1964,38 +1981,45 @@ func (s *SQLiteStore) CreatePrompt(ctx context.Context, workspaceID string, p *m
 		p.CreatedAt = time.Now().UnixMilli()
 	}
 
-	// Reuse identical content under the same name if it already exists.
-	var existingVersion sql.NullInt64
-	err := s.db.QueryRowContext(ctx, `SELECT version FROM prompts WHERE workspace_id = ? AND name = ? AND content_hash = ? ORDER BY version DESC LIMIT 1`,
-		workspaceID, p.Name, p.ContentHash).Scan(&existingVersion)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return 0, err
-	}
-	if existingVersion.Valid {
-		p.Version = existingVersion.Int64
-		return p.Version, nil
-	}
+	// MAX(version)+1 then INSERT races with a concurrent create of the same
+	// prompt name (UNIQUE violation or SQLITE_BUSY_SNAPSHOT); retry the txn
+	// like CreateModelVersion. The identical-content dedup lookup runs inside
+	// the retried txn so a racing create of the same content resolves to the
+	// version the winner inserted instead of minting a duplicate.
+	err := retryWriteRace(ctx, func() error {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, err
-	}
-	defer func() { _ = tx.Rollback() }()
+		// Reuse identical content under the same name if it already exists.
+		var existingVersion sql.NullInt64
+		err = tx.QueryRowContext(ctx, `SELECT version FROM prompts WHERE workspace_id = ? AND name = ? AND content_hash = ? ORDER BY version DESC LIMIT 1`,
+			workspaceID, p.Name, p.ContentHash).Scan(&existingVersion)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if existingVersion.Valid {
+			p.Version = existingVersion.Int64
+			return nil
+		}
 
-	var nextVersion int64
-	err = tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) + 1 FROM prompts WHERE workspace_id = ? AND name = ?`, workspaceID, p.Name).Scan(&nextVersion)
+		var nextVersion int64
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) + 1 FROM prompts WHERE workspace_id = ? AND name = ?`,
+			workspaceID, p.Name).Scan(&nextVersion); err != nil {
+			return err
+		}
+		p.Version = nextVersion
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO prompts(workspace_id, name, version, content, content_hash, created_at, created_by, description)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`, workspaceID, p.Name, p.Version, p.Content, p.ContentHash, p.CreatedAt, nilIfEmpty(p.CreatedBy), nilIfEmpty(p.Description)); err != nil {
+			return fmt.Errorf("insert prompt: %w", err)
+		}
+		return tx.Commit()
+	})
 	if err != nil {
-		return 0, err
-	}
-	p.Version = nextVersion
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO prompts(workspace_id, name, version, content, content_hash, created_at, created_by, description)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, workspaceID, p.Name, p.Version, p.Content, p.ContentHash, p.CreatedAt, nilIfEmpty(p.CreatedBy), nilIfEmpty(p.Description))
-	if err != nil {
-		return 0, err
-	}
-	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
 	return p.Version, nil
